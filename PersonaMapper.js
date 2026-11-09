@@ -1,7 +1,7 @@
 const PERSONA_MAPPER_HEADERS_ = {
   companies: ['Campaign ID','Campaign Name','Company ID','Company Name','Country','Industry','Company Size','ESG Frameworks','Reporting Obligations','ESG Reporting Maturity','Supply Chain Profile','Scope 3 Exposure','Sustainability Data Needs','Digital Transformation Signals','ESG Governance','Business Triggers','eValuater Solution Fit','Company Opportunity Score','Company Opportunity','Evidence URLs','Evidence Checked Date','Verification Status','Human Review Status','Last Enriched At','Company Score Rationale'],
   personas: ['Campaign ID','Campaign Name','Company ID','Company Name','Industry','Persona ID','Name','Title','Persona Type','LinkedIn URL','Signal','Signal Date','Evidence URL','Buying Signal','Verification Status','Confidence','Persona Fit Score','Personalized Hook','Review Status','Last Verified At','Business Email','Email Domain','Email Source URL','Email Discovery Method','Email Verification Status','Email Verification Date','Email Verification Provider','Email Identity Confidence','Email Verification Notes'],
-  settings: ['Campaign ID','Campaign Name','Persona Mapper Enabled','Persona Titles','Search Keywords','Campaign Focus','Evidence Period Months','Research Depth','Include ESG Reporting Obligations','Include ESG Reporting Maturity','Include Supply Chain Complexity','Include Scope 3 Exposure','Include Sustainability Data Challenges','Include Digital Transformation','Include ESG Governance','Include Business Triggers','Include eValuater Solution Fit','Weight ESG Reporting Relevance','Weight Supply Chain Complexity','Weight Sustainability Data Needs','Weight Digital Transformation Relevance','Weight Business Triggers','Weight eValuater Solution Fit','Minimum Company Opportunity Score','Minimum Persona Confidence','Minimum Email Priority Score','Human Approval Required','Auto Send Enabled','Email Priority Weight Company Score','Email Priority Weight Persona Fit','Email Priority Weight Buying Signal','Notes','AI Model','Max Companies Per Run','Email Verification Provider','Email Verification Endpoint'],
+  settings: ['Campaign ID','Campaign Name','Persona Mapper Enabled','AI Provider','AI Model','Persona Titles','Search Keywords','Campaign Focus','Evidence Period Months','Research Depth','Include ESG Reporting Obligations','Include ESG Reporting Maturity','Include Supply Chain Complexity','Include Scope 3 Exposure','Include Sustainability Data Challenges','Include Digital Transformation','Include ESG Governance','Include Business Triggers','Include eValuater Solution Fit','Weight ESG Reporting Relevance','Weight Supply Chain Complexity','Weight Sustainability Data Needs','Weight Digital Transformation Relevance','Weight Business Triggers','Weight eValuater Solution Fit','Minimum Company Opportunity Score','Minimum Persona Confidence','Minimum Email Priority Score','Human Approval Required','Auto Send Enabled','Email Priority Weight Company Score','Email Priority Weight Persona Fit','Email Priority Weight Buying Signal','Notes','Max Companies Per Run','Email Verification Provider','Email Verification Endpoint'],
   queue: ['Campaign ID','Campaign Name','Company ID','Company Name','Persona ID','Name','Title','Business Email','Company Opportunity Score','Persona Fit Score','Buying Signal','Priority Score','Priority Tier','Priority Score Rationale','Draft Subject','Draft Email','Evidence URLs','Review Status','Reviewer','Reviewer Notes','Reviewed At','Human Approval Status','Approved By','Approved At','Send Status','Sent At','Send Error','Country','Industry','Company Opportunity','Persona Type','LinkedIn URL','Email Domain','Email Source URL','Email Discovery Method','Email Verification Status','Email Verification Date','Email Verification Provider','Email Identity Confidence','Email Verification Notes','Queue Status','Compliance Status','Suppression Check','Date Added','Personalized Hook']
 };
 const PERSONA_MAPPER_SHEETS_ = { companies:'Company Intelligence', personas:'Persona Leads', settings:'Persona Mapper Settings', queue:'Prospect Review Queue' };
@@ -17,7 +17,12 @@ function runPersonaMapperForSelectedCampaign() {
     if (!campaignId) return;
     const settings = getPersonaMapperSettings_(spreadsheet, campaignId);
     if (!toBoolean_(settings['Persona Mapper Enabled'])) { ui.alert('Persona Mapper is disabled for this campaign. Set Persona Mapper Enabled to TRUE in Persona Mapper Settings, then try again.'); return; }
-    if (!settings['AI Model']) { ui.alert('Add an AI model in the AI Model column of Persona Mapper Settings before running research.'); return; }
+    
+    // Determine AI Provider & Model dynamically (Defaulting to Gemini if unassigned)
+    const providerChoice = String(settings['AI Provider'] || (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultAIProvider) || 'GEMINI').toUpperCase();
+    const defaultModel = providerChoice === 'GEMINI' ? ((typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel) || 'gemini-2.5-flash') : 'gpt-4o';
+    const modelChoice = String(settings['AI Model'] || defaultModel).trim();
+
     const companies = getPersonaMapperCompanies_(spreadsheet, campaignId, settings);
     if (!companies.length) { ui.alert('No companies are saved under campaign ' + campaignId + ' in Company Database yet.'); return; }
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
@@ -27,29 +32,40 @@ function runPersonaMapperForSelectedCampaign() {
     if (start >= companies.length) start = 0;
     const end = Math.min(companies.length, start + batchLimit);
     let processed = 0;
+    
     for (let index = start; index < end; index++) {
       const company = companies[index];
       try {
-        const response = requestOpenAIResponse_({ model:String(settings['AI Model']), input:buildPersonaMapperPrompt_(company,settings), tools:[{type:'web_search'}], text:{format:{type:'json_object'}} });
-        const result = parsePersonaMapperResponse_(response);
-        const citations = collectPersonaMapperUrls_(response);
-        const companyScore = scoreCompanyOpportunity_(result.company || {},settings);
-        const companyRecord = makeCompanyIntelligenceRecord_(company,result.company || {},companyScore,citations,settings);
-        upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.companies),PERSONA_MAPPER_HEADERS_.companies,'company',companyRecord);
+        // Universal AI Call (Dispatches to Gemini or OpenAI automatically)
+        const aiResponse = callAI({
+          provider: providerChoice,
+          model: modelChoice,
+          prompt: buildPersonaMapperPrompt_(company, settings),
+          enableWebSearch: true,
+          json: true
+        });
+
+        const result = aiResponse.json || {};
+        const citations = aiResponse.citations || [];
+        const companyScore = scoreCompanyOpportunity_(result.company || {}, settings);
+        const companyRecord = makeCompanyIntelligenceRecord_(company, result.company || {}, companyScore, citations, settings);
+        
+        upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.companies), PERSONA_MAPPER_HEADERS_.companies, 'company', companyRecord);
         const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
+        
         (Array.isArray(result.personas) ? result.personas : []).forEach(function(persona) {
           const confidence = titleCaseSignal_(persona.confidence);
           if (confidence === 'Low' || confidenceRank_(confidence) < confidenceRank_(settings['Minimum Persona Confidence'] || 'Medium')) return;
           if (companyScore.score < minCompanyScore) return;
           const fitScore = scorePersonaFit_(persona.fitDimensions || {});
-          const emailInfo = prepareEmailIntelligence_(persona,company,settings);
-          const personaRecord = makePersonaRecord_(company,persona,fitScore,emailInfo,settings);
-          upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas),PERSONA_MAPPER_HEADERS_.personas,'persona',personaRecord);
-          const queueRecord = makeEmailQueueRecord_(company,persona,companyScore,fitScore,citations,emailInfo,settings);
-          upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue),PERSONA_MAPPER_HEADERS_.queue,'queue',queueRecord);
+          const emailInfo = prepareEmailIntelligence_(persona, company, settings);
+          const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings);
+          upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
+          const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings);
+          upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
         });
         processed++;
-        properties.setProperty(cursorKey,String(index + 1));
+        properties.setProperty(cursorKey, String(index + 1));
       } catch (error) {
         console.error('Persona Mapper stopped on company ' + (company['Company Name'] || company['Company name'] || 'unknown') + ': ' + error.message);
         ui.alert('Persona Mapper paused after ' + processed + ' company record(s). The current company was not marked complete. Fix the issue and run again to resume.');
@@ -58,9 +74,9 @@ function runPersonaMapperForSelectedCampaign() {
     }
     if (end >= companies.length) {
       properties.deleteProperty(cursorKey);
-      ui.alert('Persona Mapper completed ' + processed + ' company record(s) for campaign ' + campaignId + '. Review Company Intelligence, Persona Leads, and Email Review Queue. No email was sent.');
+      ui.alert('Persona Mapper completed ' + processed + ' company record(s) for campaign ' + campaignId + '. Review Company Intelligence, Persona Leads, and Prospect Review Queue. No email was sent.');
     } else {
-      properties.setProperty(cursorKey,String(end));
+      properties.setProperty(cursorKey, String(end));
       ui.alert('Persona Mapper processed ' + processed + ' company record(s). Run it again to continue the next batch. No email was sent.');
     }
   } finally { lock.releaseLock(); }
@@ -135,6 +151,7 @@ function scoreCompanyOpportunity_(result,settings) {
   const rationale = map.map(function(item){return item[0] + ': ' + clampScore_(dimensions[item[0]]) + '/100 at ' + configuredNumber_(settings,item[1],item[2]) + '% weight';}).join('; ');
   return {score:score,label:score >= 75 ? 'High' : score >= 50 ? 'Medium' : 'Low',rationale:rationale};
 }
+
 function scorePersonaFit_(dimensions) {
   const weights = [['decisionAuthority',25],['functionalRelevance',25],['opportunityConnection',25],['recentActivity',15],['evidenceQuality',10]];
   return Math.round(weights.reduce(function(sum,item){return sum + clampScore_(dimensions[item[0]]) * item[1];},0) / 100);
@@ -152,6 +169,7 @@ function makeCompanyIntelligenceRecord_(source,enrichment,score,citations,settin
     'Company Opportunity Score':score.score, 'Company Opportunity':score.label, 'Company Score Rationale':score.rationale, 'Evidence URLs':Array.from(new Set(urls)).join('\n'),
     'Evidence Checked Date':new Date(), 'Verification Status':urls.length ? 'Evidence linked' : 'Needs review', 'Human Review Status':'Pending Review', 'Last Enriched At':new Date()};
 }
+
 function makePersonaRecord_(company,persona,fitScore,emailInfo,settings) {
   return {'Campaign ID':company['Campaign ID'],'Campaign Name':settings['Campaign Name'] || '', 'Company ID':company['Company ID'] || '',
     'Company Name':company['Company name'] || company['Company Name'] || '', 'Industry':company['Industry'] || '',
@@ -275,10 +293,12 @@ function checkEmailDomainMx_(domain) {
     return {checked:true,hasMx:Array.isArray(body.Answer) && body.Answer.some(function(item){return Number(item.type) === 15;})};
   } catch (error) { return {checked:false,hasMx:false}; }
 }
+
 function domainFromUrl_(url) {
   const match = String(url || '').toLowerCase().match(/^https?:\/\/(?:www\.)?([^/:?#]+)/);
   return match ? match[1].replace(/^www\./,'') : '';
 }
+
 function isPersonalEmailDomain_(domain) {
   return ['gmail.com','googlemail.com','outlook.com','hotmail.com','live.com','yahoo.com','icloud.com','me.com','aol.com','proton.me','protonmail.com'].indexOf(String(domain).toLowerCase()) >= 0;
 }
@@ -297,6 +317,7 @@ function approveSelectedProspect() {
   setQueueCell_(item,'Review Status','Approved for Outreach'); setQueueCell_(item,'Human Approval Status','Approved');
   setQueueCell_(item,'Reviewer',reviewer); setQueueCell_(item,'Reviewed At',now); setQueueCell_(item,'Approved By',reviewer); setQueueCell_(item,'Approved At',now);
 }
+
 function updateSelectedProspectReview_(status,queueStatus) {
   const item=getSelectedEmailQueueRow_(); if(!item) return;
   const ui=SpreadsheetApp.getUi(), r=item.record;
@@ -305,9 +326,11 @@ function updateSelectedProspectReview_(status,queueStatus) {
   setQueueCell_(item,'Reviewer',currentPersonaMapperUser_()); setQueueCell_(item,'Reviewed At',new Date());
   if(status==='Rejected') setQueueCell_(item,'Human Approval Status','Rejected');
 }
+
 function markSelectedProspectNeedsEditing(){updateSelectedProspectReview_('Needs Editing','Ready for Review');}
 function markSelectedProspectNeedsFurtherResearch(){updateSelectedProspectReview_('Needs Further Research','Needs Manual Verification');}
 function rejectSelectedProspect(){updateSelectedProspectReview_('Rejected','Rejected');}
+
 function getSelectedEmailQueueRow_() {
   const sheet=SpreadsheetApp.getActiveSpreadsheet().getActiveSheet(),ui=SpreadsheetApp.getUi();
   if(sheet.getName()!==PERSONA_MAPPER_SHEETS_.queue){ui.alert('Open Prospect Review Queue and select one prospect row first.');return null;}
@@ -316,8 +339,11 @@ function getSelectedEmailQueueRow_() {
   const values=sheet.getRange(range.getRow(),1,1,headers.length).getValues()[0],record={};
   headers.forEach(function(h,i){record[h]=values[i];}); return {sheet:sheet,row:range.getRow(),headers:headers,record:record};
 }
+
 function setQueueCell_(item,header,value){const i=item.headers.indexOf(header);if(i<0)throw new Error('Prospect Review Queue is missing the '+header+' column.');item.sheet.getRange(item.row,i+1).setValue(value);item.record[header]=value;}
+
 function preparePersonaMapperSheets(){ensurePersonaMapperSheets_(SpreadsheetApp.getActiveSpreadsheet());SpreadsheetApp.getUi().alert('Persona Mapper and Prospect Review Queue tabs are ready.');}
+
 function getPersonaMapperCampaignId_(spreadsheet,ui) {
   const sheet = spreadsheet.getActiveSheet();
   if (['Campaigns','Company Database'].indexOf(sheet.getName()) >= 0) {
@@ -328,12 +354,14 @@ function getPersonaMapperCampaignId_(spreadsheet,ui) {
   if (response.getSelectedButton() !== ui.Button.OK) return '';
   return String(response.getResponseText() || '').trim();
 }
+
 function getPersonaMapperSettings_(spreadsheet,campaignId) {
   const sheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.settings), records = getSheetRecords_(sheet);
   const match = records.find(function(row){return String(row['Campaign ID'] || '').trim() === String(campaignId).trim();});
   if (!match) throw new Error('Add a settings row for campaign ' + campaignId + ' in Persona Mapper Settings.');
   return match;
 }
+
 function getPersonaMapperCompanies_(spreadsheet,campaignId,settings) {
   const sheet = spreadsheet.getSheetByName('Company Database'); if (!sheet) throw new Error('Company Database sheet was not found.');
   const minScore = Number(settings && settings['Minimum Existing Company Score']) || 0;
@@ -350,11 +378,13 @@ function getPersonaMapperCompanies_(spreadsheet,campaignId,settings) {
     return true;
   });
 }
+
 function getSheetRecords_(sheet) {
   if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) return [];
   const values = sheet.getRange(1,1,sheet.getLastRow(),sheet.getLastColumn()).getValues(), headers = values[0].map(function(value){return String(value || '').trim();});
   return values.slice(1).filter(function(row){return row.some(function(value){return value !== '' && value !== null;});}).map(function(row){const record = {}; headers.forEach(function(header,index){if(header) record[header] = row[index];}); return record;});
 }
+
 function ensurePersonaMapperSheets_(spreadsheet) {
   let legacy=spreadsheet.getSheetByName('Email Review Queue');
   let queue=spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue);
@@ -368,6 +398,7 @@ function ensurePersonaMapperSheets_(spreadsheet) {
     if(missing.length){const col=sh.getLastColumn();if(sh.getMaxColumns()<col+missing.length)sh.insertColumnsAfter(sh.getMaxColumns(),col+missing.length-sh.getMaxColumns());sh.getRange(1,col+1,1,missing.length).setValues([missing]);}
   });
 }
+
 function upsertPreservingNonEmpty_(sheet,headers,keyType,record) {
   const lastRow = sheet.getLastRow();
   const rows = lastRow > 1 ? sheet.getRange(2,1,lastRow - 1,headers.length).getValues() : [];

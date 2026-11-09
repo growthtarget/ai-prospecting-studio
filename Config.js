@@ -1,6 +1,8 @@
 const APP_CONFIG = Object.freeze({
   appName: 'AI Prospecting Studio',
-  defaultAIProvider: 'openai',
+  defaultAIProvider: 'GEMINI', // Default is now Google Gemini!
+  defaultGeminiModel: 'gemini-2.5-flash',
+  geminiApiKeyProperty: 'GEMINI_API_KEY',
   openAiApiKeyProperty: 'OPENAI_API_KEY',
   openAiResponsesUrl: 'https://api.openai.com/v1/responses',
   sheetDefinitions: [
