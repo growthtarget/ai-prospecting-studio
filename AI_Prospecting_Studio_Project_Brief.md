@@ -4,15 +4,15 @@
 
 
 
-\*\*Project:\*\* AI Prospecting Studio  
+\*\*Project:\*\* AI Prospecting Studio
 
-\*\*Version:\*\* 2.0  
+\*\*Version:\*\* 2.0
 
-\*\*Development environment:\*\* ChatGPT Codex Desktop  
+\*\*Development environment:\*\* ChatGPT Codex Desktop and Google AI Studio
 
-\*\*Primary AI provider:\*\* OpenAI API  
+\*\*AI provider:\*\* OpenAI API or GEMINI API
 
-\*\*Application interface:\*\* Google Sheets  
+\*\*Application interface:\*\* Google Sheets
 
 \*\*Backend:\*\* Google Apps Script
 
@@ -58,11 +58,11 @@ The following technology choices have been made:
 
 |---|---|
 
-| Development partner | ChatGPT Codex Desktop |
+| Development partner | ChatGPT Codex Desktop or Google AI Studio
 
-| AI engine | OpenAI API |
+| AI engine | OpenAI API and GEMINI API
 
-| AI interaction interface | OpenAI Responses API |
+| AI interaction interface | OpenAI Responses API or GEMINI API
 
 | Application interface | Google Sheets |
 
@@ -78,7 +78,7 @@ The following technology choices have been made:
 
 
 
-\*\*Important:\*\* The application must not depend on Gemini or Google-specific AI models.
+\*\*Important:\*\* The application must not depend on specific AI models.
 
 
 
@@ -90,11 +90,11 @@ Google products are being used for application infrastructure and data managemen
 
 
 
-\## 3.1 OpenAI as the primary AI provider
+\## 3.1 OpenAI or GEMINI API as the AI provider
 
 
 
-Use the OpenAI API for:
+Use the OpenAI API or GEMINI API for:
 
 
 
@@ -116,7 +116,7 @@ Use the OpenAI API for:
 
 
 
-Use the OpenAI Responses API as the initial integration approach.
+Use the OpenAI Responses API or GEMINI API as the initial integration approach.
 
 
 
@@ -140,7 +140,7 @@ Suggested architecture:
 
 \- OpenAI Provider (initial implementation)
 
-\- Gemini Provider (optional future implementation)
+\- Gemini Provider (optional implementation)
 
 \- Other Providers (future expansion)
 
@@ -274,7 +274,7 @@ The backend communicates with:
 
 
 
-\- OpenAI API.
+\- OpenAI API or GEMINI API
 
 \- Configured research and search services.
 
@@ -610,7 +610,7 @@ Security is mandatory.
 
 
 
-OpenAI API keys and other credentials must:
+OpenAI API or GEMINI API keys and other credentials must:
 
 
 
@@ -700,9 +700,9 @@ Develop the application in controlled phases.
 
 \- Establish secure API key storage.
 
-\- Create the OpenAI provider integration.
+\- Create the OpenAI and GEMINI API provider integration.
 
-\- Test a basic OpenAI API request.
+\- Test a basic OpenAI API or GEMINI API request.
 
 
 
@@ -856,7 +856,7 @@ Prepare a development plan that addresses:
 
 3\. Recommended Apps Script project structure.
 
-4\. OpenAI API integration approach.
+4\. OpenAI API or GEMINI API integration approach.
 
 5\. Recommended OpenAI model choices for the initial MVP, with cost and capability trade-offs.
 
