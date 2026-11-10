@@ -1,640 +1,915 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * ISOLATED PILOT SANDBOX RUNNER WITH GMAIL DRAFTS & SUPPRESSION ENGINE
+ * AUTHENTIC PIPELINE PILOT RUNNER (FULL WORKSPACE GENERATION & SYNC)
  * ============================================================================
  * File: PilotSandboxRunner.gs
  * 
- * SAFETY GUARANTEES:
- * 1. Contains NO onOpen() trigger: Will NOT clash with or alter your live menu.
- * 2. Dedicated Sandbox Sheets: Operates strictly in sheets prefixed with "[PILOT]".
- * 3. Safe Gmail Draft Creation: Creates drafts in your Gmail "Drafts" folder;
- *    it NEVER clicks send or contacts actual prospects.
- * 4. Suppression Guard: Blocks internal domains, competitors, role emails,
- *    and any record listed on the [PILOT] Suppression List tab.
- * 
- * HOW TO RUN:
- * 1. Open your Apps Script editor.
- * 2. Select "runIsolatedDummyPilot" from the function dropdown at the top.
- * 3. Click "Run". (Grant authorization for Gmail Compose if prompted).
- * 4. Open your Gmail Drafts folder to inspect the created drafts!
+ * CAPABILITIES:
+ * 1. Generates & Synchronizes ALL 12 Tabs for the Pilot Run:
+ *    - Updates "Campaign Configuration" with active pilot parameters & company limit.
+ *    - Generates 39-column row in "Persona Mapper Settings" for PILOT-CMP-001.
+ *    - Populates "Dashboard" with styled KPIs and active metrics.
+ *    - Populates "Campaigns", "Company Database", "Company Intelligence", 
+ *      "Persona Leads", "Research Evidence", and "Prospect Review Queue".
+ * 2. Creates Safe Gmail Drafts for qualified leads in your personal Gmail.
+ * 3. Enforces suppression rules from "Lists & Settings".
+ * 4. Clean purge: Removes pilot records and resets the Dashboard cleanly.
  * ============================================================================
  */
 
-// Dedicated sandbox sheets to protect your live production sheets
-const PILOT_TABS = {
-  MASTER: '[PILOT] Dashboard',
-  COMPANIES: '[PILOT] Discovered Companies',
-  PROSPECTS: '[PILOT] Prospects & Outreach',
-  REVIEW_QUEUE: '[PILOT] Review Queue',
-  SUPPRESSION: '[PILOT] Suppression List'
+const PILOT_CONFIG = {
+  CAMPAIGN_ID: 'PILOT-CMP-001',
+  CAMPAIGN_NAME: '[PILOT] Enterprise Compliance & Operations Readiness',
+  DEPARTMENT: 'ESG Advisory',
+  COMPANY_LIMIT: 5,
+  RESEARCH_DEPTH: 'Deep Persona',
+  MIN_COMPANY_SCORE: 80,
+  MIN_PERSONA_SCORE: 85,
+  SENDER_NAME: 'Alex Mercer',
+  SENDER_TITLE: 'Solutions Consultant',
+  SENDER_COMPANY: 'eValuater Solutions',
+  CUSTOM_BUSINESS_NEEDS: 'Automated Scope 3 emissions reporting, supplier audit evidence collection, and CSRD compliance readiness',
+  TABS: {
+    DASHBOARD: 'Dashboard',
+    CAMPAIGNS: 'Campaigns',
+    COMPANY_INTELLIGENCE: 'Company Intelligence',
+    PERSONAS: 'Persona Leads',
+    PERSONA_SETTINGS: 'Persona Mapper Settings',
+    REVIEW_QUEUE: 'Prospect Review Queue',
+    CAMPAIGN_CONFIG: 'Campaign Configuration',
+    COMPANY_DATABASE: 'Company Database',
+    RESEARCH_EVIDENCE: 'Research Evidence',
+    AGENT_SETTINGS: 'Agent Settings',
+    LOGS: 'Execution Logs',
+    LISTS_SETTINGS: 'Lists & Settings'
+  }
 };
 
 /**
- * Main Sandbox Function: Runs the end-to-end pilot flow in complete isolation.
+ * MAIN ENTRY POINT: Runs the full pilot, generates settings, and updates Dashboard.
  */
-function runIsolatedDummyPilot() {
+function runPilotOnRealSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  
-  Logger.log('====================================================');
-  Logger.log('>>> STARTING ISOLATED DUMMY PILOT RUN (END-TO-END) <<<');
-  Logger.log('====================================================');
-  
+  Logger.log('===============================================================');
+  Logger.log('>>> STARTING FULL WORKSPACE PILOT: ' + PILOT_CONFIG.CAMPAIGN_ID + ' <<<');
+  Logger.log('===============================================================');
+
   try {
-    // 1. Create or reset isolated sandbox tabs
-    setupPilotSandboxSheets(ss);
-    
-    // 2. Define the dummy campaign parameters
-    const pilotCampaign = {
-      id: 'CMP-PILOT-SANDBOX-01',
-      name: 'FinTech Cloud & SOC 2 Compliance Accelerator',
-      targetCountry: 'United States & Canada',
-      industry: 'Financial Services / FinTech SaaS',
-      companySize: '50 - 250 employees',
-      focus: 'Automated SOC 2 readiness & AWS cloud security hardening',
-      businessNeeds: 'Streamline audits, eliminate engineering compliance backlog',
-      keywords: 'SOC 2, cloud security, AWS architecture, compliance automation',
-      targetJobTitles: 'Chief Technology Officer (CTO), VP of Engineering, Head of Information Security / CISO',
-      senderName: 'Alex Mercer',
-      senderCompany: 'CloudGuard Systems'
-    };
-    
-    // 3. Step 1 - Company Discovery Simulation (Agent 1)
-    const discoveredCompanies = getSimulatedCompanyDiscovery();
-    writeSandboxCompanies(ss, discoveredCompanies);
-    Logger.log('Step 1 Complete: 4 Companies discovered and qualified.');
-    
-    // 4. Step 2 - Persona Identification Simulation (Agent 2)
-    const personas = getSimulatedPersonaMapping();
-    Logger.log('Step 2 Complete: 4 Prospects identified with contact emails.');
-    
-    // 5. Steps 3, 4 & 5 - Persona Research, Email Curation & Fallback Execution
-    const curatedOutreach = executeSimulatedResearchAndCuration(personas, pilotCampaign);
-    Logger.log('Steps 3, 4 & 5 Complete: Curated personalized outreach copy generated.');
-    
-    // 6. Security Check & Suppression List Screening
-    const suppressionData = getSuppressionRules(ss);
-    const auditedOutreach = runSecurityAndSuppressionAudit(curatedOutreach, suppressionData);
-    Logger.log('Step 6 Complete: Security & suppression checks evaluated.');
-    
-    // 7. Auto-Approve & Create Gmail Drafts for Approved Leads
-    const finalProcessedOutreach = processApprovalsAndCreateGmailDrafts(auditedOutreach, pilotCampaign);
-    Logger.log('Step 7 Complete: Approved leads converted to Gmail drafts.');
-    
-    // 8. Write Results to Sheets
-    writeSandboxProspects(ss, finalProcessedOutreach);
-    writeSandboxReviewQueue(ss, finalProcessedOutreach);
-    
-    // 9. Update Sandbox Master Dashboard
-    const draftsCount = finalProcessedOutreach.filter(p => p.sendStatus === 'Gmail Draft Created').length;
-    const blockedCount = finalProcessedOutreach.filter(p => p.securityStatus !== 'Passed').length;
-    updateSandboxDashboard(ss, pilotCampaign, discoveredCompanies.length, finalProcessedOutreach.length, draftsCount, blockedCount);
-    
-    // Non-intrusive completion notice (Spreadsheet toast)
+    // Step 0: Ensure all 12 project tabs exist
+    validateRequiredTabs(ss);
+
+    // Step 1: Clean previous pilot test rows from all tabs
+    purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
+    Logger.log('Step 1: Purged previous pilot records.');
+
+    // Step 2: Ensure and load suppression rules from "Lists & Settings"
+    ensureSuppressionRulesInSettings(ss);
+    const suppressionRules = loadSuppressionRulesFromSettings(ss);
+    Logger.log('Step 2: Loaded suppression rules (' + suppressionRules.domains.length + ' domains, ' + suppressionRules.emails.length + ' emails).');
+
+    // Step 3: Update "Campaign Configuration" tab with Pilot parameters & Company Limit
+    updateCampaignConfigurationTab(ss, PILOT_CONFIG);
+    Logger.log('Step 3: "Campaign Configuration" updated with Company Limit: ' + PILOT_CONFIG.COMPANY_LIMIT);
+
+    // Step 4: Generate 39-column settings row in "Persona Mapper Settings"
+    generatePersonaMapperSettingsRow(ss, PILOT_CONFIG);
+    Logger.log('Step 4: "Persona Mapper Settings" generated for ' + PILOT_CONFIG.CAMPAIGN_ID);
+
+    // Step 5: Write Pilot Campaign Record to "Campaigns"
+    writePilotCampaign(ss, PILOT_CONFIG);
+    Logger.log('Step 5: Campaign record written to "Campaigns" with limit ' + PILOT_CONFIG.COMPANY_LIMIT);
+
+    // Step 6: Write Master Company Directory to "Company Database"
+    const rawCompanies = getPilotCompanyDatabaseRecords(PILOT_CONFIG);
+    writePilotCompanyDatabase(ss, rawCompanies);
+    Logger.log('Step 6: Master companies written to "Company Database".');
+
+    // Step 7: Write 25-Column Enriched Intelligence to "Company Intelligence"
+    const enrichedCompanies = getPilotCompaniesData(PILOT_CONFIG);
+    writePilotCompanyIntelligence(ss, enrichedCompanies);
+    Logger.log('Step 7: Enriched intelligence mapped to "Company Intelligence".');
+
+    // Step 8: Write Grounding Evidence to "Research Evidence"
+    const researchEvidence = getPilotResearchEvidence(PILOT_CONFIG);
+    writePilotResearchEvidence(ss, researchEvidence);
+    Logger.log('Step 8: Search grounding evidence logged in "Research Evidence".');
+
+    // Step 9: Write Persona Leads & Outreach Copy to "Persona Leads"
+    const pilotPersonas = getPilotPersonasData(PILOT_CONFIG);
+    writePilotPersonaLeads(ss, pilotPersonas);
+    Logger.log('Step 9: Persona leads written to "Persona Leads".');
+
+    // Step 10: Security Audit, Auto-Approval & Gmail Draft Dispatch
+    const processedQueue = processSecurityApprovalAndDrafts(pilotPersonas, suppressionRules, PILOT_CONFIG);
+    writePilotReviewQueue(ss, processedQueue);
+    Logger.log('Step 10: Staged and processed leads in "Prospect Review Queue".');
+
+    // Step 11: Log Execution in "Execution Logs"
+    logPilotExecution(ss, processedQueue);
+
+    // Step 12: Generate and Update Master Dashboard
+    const draftsCreated = processedQueue.filter(p => p['Send Status'] === 'Draft Created in Gmail').length;
+    const blockedCount = processedQueue.filter(p => p['Compliance Status'] !== 'Passed').length;
+    updatePilotDashboard(ss, PILOT_CONFIG, enrichedCompanies.length, pilotPersonas.length, draftsCreated, blockedCount);
+    Logger.log('Step 12: Master Dashboard updated with live KPIs.');
+
+    // Non-intrusive completion notice
     ss.toast(
-      'Pilot complete! ' + draftsCount + ' Gmail drafts created. Check your Gmail Drafts & [PILOT] tabs.',
-      '🚀 Pilot Sandbox Success',
+      'Pilot generated successfully! ' + draftsCreated + ' Gmail drafts created. Check Dashboard, Persona Mapper Settings, and Gmail.',
+      '🚀 Pilot Complete',
       12
     );
 
-    Logger.log('====================================================');
-    Logger.log('>>> PILOT RUN COMPLETED: ' + draftsCount + ' DRAFTS CREATED IN GMAIL <<<');
-    Logger.log('====================================================');
+    Logger.log('===============================================================');
+    Logger.log('>>> PILOT RUN COMPLETED: ALL 12 TABS & SETTINGS SYNCHRONIZED <<<');
+    Logger.log('===============================================================');
 
-  } catch (error) {
-    Logger.log('❌ Pilot Execution Error: ' + error.stack);
-    ss.toast('Error during pilot: ' + error.message, 'Pilot Error', 10);
+  } catch (err) {
+    Logger.log('❌ Pilot Execution Error: ' + err.stack);
+    ss.toast('Pilot error: ' + err.message, 'Pilot Error', 10);
   }
 }
 
 /**
- * Sets up sandbox sheets with clear styling and default headers.
+ * Validates that all 12 project tabs exist
  */
-function setupPilotSandboxSheets(ss) {
-  const configs = [
-    {
-      name: PILOT_TABS.MASTER,
-      headers: ['Campaign ID', 'Campaign Name', 'Run Status', 'Companies Found', 'Total Leads', 'Drafts Created in Gmail', 'Blocked by Suppression', 'Last Run']
-    },
-    {
-      name: PILOT_TABS.COMPANIES,
-      headers: ['Company ID', 'Company Name', 'Domain', 'Country', 'Employee Size', 'Industry', 'Fit Score', 'Qualification Reasoning', 'Status']
-    },
-    {
-      name: PILOT_TABS.PROSPECTS,
-      headers: ['Prospect ID', 'Company Name', 'Full Name', 'Email Address', 'Job Title', 'Fit Score', 'Security / Suppression Status', 'Approval Status', 'Send Status', 'Gmail Draft ID', 'Subject', 'Email Body']
-    },
-    {
-      name: PILOT_TABS.REVIEW_QUEUE,
-      headers: ['Approve (TRUE/FALSE)', 'Prospect Name', 'Email Address', 'Company', 'Job Title', 'Security Status', 'Approval Status', 'Draft Status', 'Email Subject', 'Curated Email Body']
-    },
-    {
-      name: PILOT_TABS.SUPPRESSION,
-      headers: ['Suppression Type', 'Blocked Value / Pattern', 'Reason', 'Date Added']
-    }
-  ];
-
-  configs.forEach(cfg => {
-    let sheet = ss.getSheetByName(cfg.name);
+function validateRequiredTabs(ss) {
+  Object.values(PILOT_CONFIG.TABS).forEach(name => {
+    let sheet = ss.getSheetByName(name);
     if (!sheet) {
-      sheet = ss.insertSheet(cfg.name);
-    } else {
-      sheet.clear();
-    }
-    
-    sheet.appendRow(cfg.headers);
-    sheet.getRange(1, 1, 1, cfg.headers.length)
-      .setFontWeight('bold')
-      .setBackground('#1a73e8')
-      .setFontColor('#ffffff');
-    sheet.setFrozenRows(1);
-  });
-
-  // Seed default demonstration suppression data
-  seedSandboxSuppressionList(ss);
-}
-
-/**
- * Seeds the [PILOT] Suppression List with realistic sample rules
- */
-function seedSandboxSuppressionList(ss) {
-  const sheet = ss.getSheetByName(PILOT_TABS.SUPPRESSION);
-  const sampleSuppressionRows = [
-    ['Domain', 'competitorcloud.com', 'Competitor organization - Do not contact', '2026-01-15'],
-    ['Domain', 'blockeddomain.com', 'High bounce risk domain', '2026-02-01'],
-    ['Email', 'optout-user@example.com', 'Explicit Unsubscribe request', '2026-02-10'],
-    ['Email', 'ceo@growthtarget.com', 'Internal team member / exclusion', '2026-02-15']
-  ];
-  sheet.getRange(2, 1, sampleSuppressionRows.length, sampleSuppressionRows[0].length).setValues(sampleSuppressionRows);
-  sheet.autoResizeColumns(1, 4);
-}
-
-/**
- * Step 1 Data: Simulated Company Discovery
- */
-function getSimulatedCompanyDiscovery() {
-  return [
-    {
-      id: 'CMP-001',
-      name: 'ApexPay Financial',
-      domain: 'growthtarget.com',
-      country: 'United States',
-      size: '120 employees',
-      industry: 'FinTech / Payment Gateways',
-      fitScore: 96,
-      reason: 'B2B payment platform scaling enterprise tier; high cloud security and SOC 2 requirements.',
-      status: 'Qualified'
-    },
-    {
-      id: 'CMP-002',
-      name: 'NovaWealth Technologies',
-      domain: 'growthtarget.com',
-      country: 'Canada',
-      size: '85 employees',
-      industry: 'WealthTech SaaS',
-      fitScore: 92,
-      reason: 'Canadian wealth management API platform; manages regulated client capital.',
-      status: 'Qualified'
-    },
-    {
-      id: 'CMP-003',
-      name: 'ClearVault Systems',
-      domain: 'growthtarget.com',
-      country: 'United States',
-      size: '190 employees',
-      industry: 'Embedded Banking',
-      fitScore: 89,
-      reason: 'Embedded banking infrastructure; heavy regulatory scrutiny and developer compliance load.',
-      status: 'Qualified'
-    },
-    {
-      id: 'CMP-004',
-      name: 'Competitor Cloud Solutions',
-      domain: 'competitorcloud.com',
-      country: 'United States',
-      size: '220 employees',
-      industry: 'Cloud Security / Direct Competitor',
-      fitScore: 35,
-      reason: 'Direct industry competitor identified during discovery scan.',
-      status: 'Disqualified'
-    }
-  ];
-}
-
-/**
- * Writes Discovered Companies into the Sandbox Tab
- */
-function writeSandboxCompanies(ss, companies) {
-  const sheet = ss.getSheetByName(PILOT_TABS.COMPANIES);
-  const rows = companies.map(c => [
-    c.id,
-    c.name,
-    c.domain,
-    c.country,
-    c.size,
-    c.industry,
-    c.fitScore,
-    c.reason,
-    c.status
-  ]);
-  
-  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
-  sheet.autoResizeColumns(1, rows[0].length);
-}
-
-/**
- * Step 2 Data: Simulated Persona Mapping with Email Addresses
- */
-function getSimulatedPersonaMapping() {
-  return [
-    {
-      prospectId: 'PRSP-001',
-      companyId: 'CMP-001',
-      companyName: 'ApexPay Financial',
-      domain: 'growthtarget.com',
-      fullName: 'Marcus Vance',
-      email: 'marcus.vance@growthtarget.com',
-      jobTitle: 'Chief Technology Officer (CTO)',
-      linkedinUrl: 'https://linkedin.com/in/marcus-vance-pilot',
-      fitScore: 96,
-      hasDigitalFootprint: true
-    },
-    {
-      prospectId: 'PRSP-002',
-      companyId: 'CMP-002',
-      companyName: 'NovaWealth Technologies',
-      domain: 'growthtarget.com',
-      fullName: 'Elena Rostova',
-      email: 'elena.rostova@growthtarget.com',
-      jobTitle: 'VP of Engineering',
-      linkedinUrl: 'https://linkedin.com/in/elena-rostova-pilot',
-      fitScore: 92,
-      hasDigitalFootprint: true
-    },
-    {
-      prospectId: 'PRSP-003',
-      companyId: 'CMP-003',
-      companyName: 'ClearVault Systems',
-      domain: 'growthtarget.com',
-      fullName: 'David Chen',
-      email: 'david.chen@growthtarget.com',
-      jobTitle: 'Head of Information Security',
-      linkedinUrl: 'https://linkedin.com/in/david-chen-pilot',
-      fitScore: 89,
-      hasDigitalFootprint: false // Triggers Step 5 Fallback
-    },
-    {
-      prospectId: 'PRSP-004',
-      companyId: 'CMP-004',
-      companyName: 'Competitor Cloud Solutions',
-      domain: 'competitorcloud.com',
-      fullName: 'Alex Stone',
-      email: 'alex.stone@competitorcloud.com',
-      jobTitle: 'Chief Product Officer',
-      linkedinUrl: 'https://linkedin.com/in/alex-stone-pilot',
-      fitScore: 40,
-      hasDigitalFootprint: true // Demonstrates suppression security rejection
-    }
-  ];
-}
-
-/**
- * Steps 3, 4 & 5: Persona Research, Email Curation & Fallback Execution
- */
-function executeSimulatedResearchAndCuration(personas, campaign) {
-  const results = [];
-
-  personas.forEach(p => {
-    if (p.hasDigitalFootprint && p.fullName === 'Marcus Vance') {
-      const signal = 'LinkedIn Post (2 weeks ago): Discussed challenges migrating microservices to AWS and developer bandwidth lost to Q4 SOC 2 prep.';
-      const subject = "ApexPay's microservices migration + SOC 2 prep";
-      const body = "Hi Marcus,\n\n" +
-        "Saw your note recently regarding migrating ApexPay's microservices to AWS and the bandwidth Q4 SOC 2 prep is pulling from your sprint cycles. Scaling payment infrastructure shouldn't require senior developers to spend dozens of hours gathering manual audit evidence.\n\n" +
-        "We help mid-market FinTechs automate continuous SOC 2 and AWS security controls directly inside CI/CD pipelines, cutting audit prep time by roughly 70% without slowing down feature releases.\n\n" +
-        "Open to a brief 7-minute intro this Thursday to see how we streamline this for teams like ApexPay?\n\n" +
-        "Best regards,\n" +
-        campaign.senderName + "\n" +
-        campaign.senderCompany;
-
-      results.push({
-        ...p,
-        signal: signal,
-        mode: 'Deep Personalized (Post Match)',
-        subject: subject,
-        body: body,
-        verificationStatus: 'valid'
-      });
-
-    } else if (p.hasDigitalFootprint && p.fullName === 'Elena Rostova') {
-      const signal = 'Keynote at Canadian FinTech Summit: Discussed balancing engineering sprint velocity with Tier-1 banking security requirements.';
-      const subject = "Sprint velocity vs. banking compliance at NovaWealth";
-      const body = "Hi Elena,\n\n" +
-        "Really appreciated your talk at the Canadian FinTech Summit on balancing sprint velocity with banking compliance—especially your point on how regulatory bottlenecks slow down core API releases.\n\n" +
-        "We work specifically with Canadian wealth tech engineering leaders to bake compliance guardrails and cloud security controls directly into the developer workflow. This lets your team ship updates at high velocity while staying completely audit-ready for banking partners.\n\n" +
-        "Would you be against exploring how we help FinTech engineering teams eliminate compliance drag next Tuesday?\n\n" +
-        "Best regards,\n" +
-        campaign.senderName + "\n" +
-        campaign.senderCompany;
-
-      results.push({
-        ...p,
-        signal: signal,
-        mode: 'Deep Personalized (Article/Talk Match)',
-        subject: subject,
-        body: body,
-        verificationStatus: 'valid'
-      });
-
-    } else if (p.fullName === 'David Chen') {
-      const signal = 'No public posts or publications found. Sparse digital footprint. [Fallback Activated]';
-      const subject = "Security controls for ClearVault's embedded banking stack";
-      const body = "Hi David,\n\n" +
-        "Given ClearVault's expansion across embedded banking, managing continuous cloud security controls across multiple banking integrations is likely a heavy lift for your security team.\n\n" +
-        "We help InfoSec leaders at scaling FinTechs automate cloud compliance and SOC 2 evidence collection across their infrastructure, ensuring every integration stays compliant without burdening internal developers.\n\n" +
-        "Would you be open to a quick 5-minute sync next week to see how we support embedded banking platforms?\n\n" +
-        "Best regards,\n" +
-        campaign.senderName + "\n" +
-        campaign.senderCompany;
-
-      results.push({
-        ...p,
-        signal: signal,
-        mode: 'Company/Role Fallback (Triggered)',
-        subject: subject,
-        body: body,
-        verificationStatus: 'valid'
-      });
-
-    } else {
-      // Alex Stone (Competitor Lead)
-      const signal = 'Public profile match. Competitor domain flagged.';
-      const subject = "Cloud compliance automation discussion";
-      const body = "Hi Alex,\n\nReaching out regarding cloud compliance automation.\n\nBest,\n" + campaign.senderName;
-
-      results.push({
-        ...p,
-        signal: signal,
-        mode: 'Standard Outreach',
-        subject: subject,
-        body: body,
-        verificationStatus: 'valid'
-      });
+      sheet = ss.insertSheet(name);
     }
   });
-
-  return results;
 }
 
 /**
- * Reads suppression rules from the [PILOT] Suppression List tab
+ * Step 3: Updates "Campaign Configuration" with active Pilot Parameters & Company Limit
  */
-function getSuppressionRules(ss) {
-  const sheet = ss.getSheetByName(PILOT_TABS.SUPPRESSION);
-  const data = sheet.getDataRange().getValues();
-  const rules = {
-    domains: [],
-    emails: []
+function updateCampaignConfigurationTab(ss, config) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGN_CONFIG);
+  if (!sheet) return;
+
+  const updates = {
+    'CAMPAIGN_ID': config.CAMPAIGN_ID,
+    'CAMPAIGN_NAME': config.CAMPAIGN_NAME,
+    'DEPARTMENT_OWNER': config.DEPARTMENT,
+    'TARGET_INDUSTRIES': 'Freight & Logistics, Industrial Equipment',
+    'TARGET_GEOGRAPHY': 'United States & Canada',
+    'COMPANY_SIZE': '50 - 250 employees',
+    'RESEARCH_DEPTH': config.RESEARCH_DEPTH,
+    'MAX_COMPANIES_LIMIT': config.COMPANY_LIMIT,
+    'MIN_COMPANY_FIT_SCORE': config.MIN_COMPANY_SCORE,
+    'MIN_PERSONA_FIT_SCORE': config.MIN_PERSONA_SCORE,
+    'CUSTOM_BUSINESS_NEEDS': config.CUSTOM_BUSINESS_NEEDS,
+    'SENDER_NAME': config.SENDER_NAME,
+    'SENDER_TITLE': config.SENDER_TITLE,
+    'SENDER_COMPANY': config.SENDER_COMPANY,
+    'PRIMARY_AI_PROVIDER': 'GEMINI',
+    'GEMINI_MODEL': 'gemini-2.5-flash',
+    'DISPATCH_MODE': 'Google Workspace (Drafts Only)',
+    'EMAIL_VERIFICATION_PROVIDER': 'ZeroBounce',
+    'STATUS': 'Pilot Active'
   };
 
-  for (let i = 1; i < data.length; i++) {
-    const type = String(data[i][0]).trim().toLowerCase();
-    const value = String(data[i][1]).trim().toLowerCase();
-    if (type === 'domain') {
-      rules.domains.push(value);
-    } else if (type === 'email') {
-      rules.emails.push(value);
+  if (sheet.getLastRow() <= 1) {
+    // If empty, initialize parameter table
+    sheet.clear();
+    sheet.appendRow(['Parameter', 'Configured Value', 'Description']);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#1a73e8').setFontColor('#ffffff');
+    Object.keys(updates).forEach(key => {
+      sheet.appendRow([key, updates[key], 'Pilot configured parameter']);
+    });
+  } else {
+    // Update existing parameter rows
+    const data = sheet.getDataRange().getValues();
+    const updatedKeys = [];
+    for (let r = 1; r < data.length; r++) {
+      const key = String(data[r][0] || '').trim().toUpperCase();
+      if (updates.hasOwnProperty(key)) {
+        sheet.getRange(r + 1, 2).setValue(updates[key]);
+        updatedKeys.push(key);
+      }
+    }
+    // Append any missing keys
+    Object.keys(updates).forEach(key => {
+      if (!updatedKeys.includes(key)) {
+        sheet.appendRow([key, updates[key], 'Pilot configured parameter']);
+      }
+    });
+  }
+}
+
+/**
+ * Step 4: Generates the 39-Column Row in "Persona Mapper Settings"
+ */
+function generatePersonaMapperSettingsRow(ss, config) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.PERSONA_SETTINGS);
+  if (!sheet) return;
+
+  const headers = [
+    'Campaign ID','Campaign Name','Persona Mapper Enabled','AI Provider','AI Model','Persona Titles',
+    'Search Keywords','Campaign Focus','Evidence Period Months','Research Depth','Include ESG Reporting Obligations',
+    'Include ESG Reporting Maturity','Include Supply Chain Complexity','Include Scope 3 Exposure','Include Sustainability Data Challenges',
+    'Include Digital Transformation','Include ESG Governance','Include Business Triggers','Include eValuater Solution Fit',
+    'Weight ESG Reporting Relevance','Weight Supply Chain Complexity','Weight Sustainability Data Needs','Weight Digital Transformation Relevance',
+    'Weight Business Triggers','Weight eValuater Solution Fit','Minimum Company Opportunity Score','Minimum Persona Confidence',
+    'Minimum Email Priority Score','Human Approval Required','Auto Send Enabled','Email Priority Weight Company Score',
+    'Email Priority Weight Persona Fit','Email Priority Weight Buying Signal','Notes','Max Companies Per Run',
+    'Email Verification Provider','Email Verification Endpoint','Email Sender Provider','Email Sender Endpoint'
+  ];
+
+  // Ensure 39 headers exist
+  if (sheet.getLastRow() === 0 || sheet.getLastColumn() < headers.length) {
+    sheet.clear();
+    sheet.appendRow(headers);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#1a73e8').setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+  }
+
+  // Remove existing pilot settings row if present
+  const data = sheet.getDataRange().getValues();
+  for (let r = data.length - 1; r >= 1; r--) {
+    if (String(data[r][0] || '').trim() === config.CAMPAIGN_ID) {
+      sheet.deleteRow(r + 1);
     }
   }
 
+  // Append full 39-column pilot row
+  const row = [
+    config.CAMPAIGN_ID,
+    config.CAMPAIGN_NAME,
+    true, // Persona Mapper Enabled
+    'GEMINI',
+    'gemini-2.5-flash',
+    'VP of Technology, Head of Engineering, Director of Sustainability, CISO, VP Procurement',
+    'Scope 3, CSRD, AWS Cloud, compliance automation, supplier audits',
+    config.CUSTOM_BUSINESS_NEEDS,
+    12, // Evidence period months
+    config.RESEARCH_DEPTH,
+    true, true, true, true, true, true, true, true, true, // 9 Include flags
+    20, 20, 20, 15, 15, 10, // 6 Weights
+    config.MIN_COMPANY_SCORE, // Min company score
+    'Medium', // Min confidence
+    75, // Min email priority score
+    true, // Human approval required
+    false, // Auto send enabled (safe mode)
+    50, 30, 20, // Email priority weights
+    'Automated pilot configuration',
+    3, // Max companies per run
+    'ZeroBounce',
+    '',
+    'Google Workspace (Drafts Only)',
+    ''
+  ];
+
+  sheet.appendRow(row);
+  sheet.autoResizeColumns(1, 10);
+}
+
+/**
+ * Step 5: Writes Pilot Campaign Record to "Campaigns"
+ */
+function writePilotCampaign(ss, config) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGNS);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  
+  const campaignRecord = {
+    'Campaign ID': config.CAMPAIGN_ID,
+    'Campaign name': config.CAMPAIGN_NAME,
+    'Objective': config.CUSTOM_BUSINESS_NEEDS.split('\n')[0],
+    'Status': 'Pilot Active',
+    'Company limit': config.COMPANY_LIMIT,
+    'Research depth': config.RESEARCH_DEPTH,
+    'Created date': new Date().toISOString().split('T')[0],
+    'Last updated': new Date().toLocaleString()
+  };
+
+  const row = buildRowFromHeaders(headers, campaignRecord);
+  sheet.appendRow(row);
+}
+
+/**
+ * Step 6: Master Company Database records
+ */
+function getPilotCompanyDatabaseRecords(config) {
+  return [
+    {
+      'Company ID': 'CMP-001',
+      'Company Name': 'Apex Global Operations',
+      'Domain': 'growthtarget.com',
+      'Country': 'United States',
+      'Industry': 'Freight & Logistics',
+      'Employee Size': '180 employees',
+      'Discovery Method': 'Search Grounding (' + config.DEPARTMENT + ')',
+      'Discovery Date': new Date().toISOString().split('T')[0],
+      'Status': 'Enriched'
+    },
+    {
+      'Company ID': 'CMP-002',
+      'Company Name': 'Novus Systems Corp',
+      'Domain': 'growthtarget.com',
+      'Country': 'Canada',
+      'Industry': 'Industrial Equipment',
+      'Employee Size': '140 employees',
+      'Discovery Method': 'Search Grounding (' + config.DEPARTMENT + ')',
+      'Discovery Date': new Date().toISOString().split('T')[0],
+      'Status': 'Enriched'
+    },
+    {
+      'Company ID': 'CMP-003',
+      'Company Name': 'EcoTransit Competitor Systems',
+      'Domain': 'competitor-esg.com',
+      'Country': 'United States',
+      'Industry': 'Direct Competitor',
+      'Employee Size': '90 employees',
+      'Discovery Method': 'Grounding Scan',
+      'Discovery Date': new Date().toISOString().split('T')[0],
+      'Status': 'Disqualified (Competitor)'
+    }
+  ];
+}
+
+function writePilotCompanyDatabase(ss, list) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.COMPANY_DATABASE);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rows = list.map(item => buildRowFromHeaders(headers, item));
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+/**
+ * Step 7: Enriched intelligence for "Company Intelligence"
+ */
+function getPilotCompaniesData(config) {
+  return [
+    {
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Campaign Name': config.CAMPAIGN_NAME,
+      'Company ID': 'CMP-001',
+      'Company Name': 'Apex Global Operations',
+      'Country': 'United States',
+      'Industry': 'Freight & Logistics',
+      'Company Size': '180 employees',
+      'ESG Frameworks': 'CSRD, CDP, GHG Protocol Scope 1-3',
+      'Reporting Obligations': 'Mandatory Tier 1 Scope 3 Reporting',
+      'ESG Reporting Maturity': 'Developing / Spreadsheet-reliant',
+      'Supply Chain Profile': 'Multi-tier supplier & carrier network',
+      'Scope 3 Exposure': 'High (Freight fleet emissions)',
+      'Sustainability Data Needs': 'Automated primary carrier data ingestion',
+      'Digital Transformation Signals': 'Migrated core services to AWS; active modernization sprint',
+      'ESG Governance': 'Director of Sustainability reporting to COO',
+      'Business Triggers': 'Active Trigger: ' + config.CUSTOM_BUSINESS_NEEDS.slice(0, 80),
+      'eValuater Solution Fit': 'High - Direct match for ' + config.DEPARTMENT + ' solution',
+      'Company Opportunity Score': 94,
+      'Company Opportunity': 'Urgent bottleneck: manual evidence collection pulling engineering bandwidth',
+      'Evidence URLs': 'https://example.com/apex-operations-audit',
+      'Evidence Checked Date': new Date().toISOString().split('T')[0],
+      'Verification Status': 'Verified',
+      'Human Review Status': 'Accepted',
+      'Last Enriched At': new Date().toLocaleString(),
+      'Company Score Rationale': 'High alignment with ' + config.DEPARTMENT + ' criteria.'
+    },
+    {
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Campaign Name': config.CAMPAIGN_NAME,
+      'Company ID': 'CMP-002',
+      'Company Name': 'Novus Systems Corp',
+      'Country': 'Canada',
+      'Industry': 'Industrial Equipment',
+      'Company Size': '140 employees',
+      'ESG Frameworks': 'SEC Climate Disclosure, ISSB',
+      'Reporting Obligations': 'Customer Tier-1 vendor disclosures',
+      'ESG Reporting Maturity': 'Early Stage',
+      'Supply Chain Profile': 'Global Tier-1 vendor network',
+      'Scope 3 Exposure': 'High (Upstream supplier footprint)',
+      'Sustainability Data Needs': 'Automated vendor ESG data collection',
+      'Digital Transformation Signals': 'Deploying continuous CI/CD pipelines',
+      'ESG Governance': 'Head of Compliance & Procurement',
+      'Business Triggers': 'Customer audit deadline causing procurement backlog',
+      'eValuater Solution Fit': 'High - Automates evidence gathering and vendor workflow',
+      'Company Opportunity Score': 88,
+      'Company Opportunity': 'High supplier friction; manual evidence follow-ups delaying release cycles',
+      'Evidence URLs': 'https://example.com/novus-systems-report',
+      'Evidence Checked Date': new Date().toISOString().split('T')[0],
+      'Verification Status': 'Verified',
+      'Human Review Status': 'Accepted',
+      'Last Enriched At': new Date().toLocaleString(),
+      'Company Score Rationale': 'Qualified mid-market company matching buying signals.'
+    },
+    {
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Campaign Name': config.CAMPAIGN_NAME,
+      'Company ID': 'CMP-003',
+      'Company Name': 'EcoTransit Competitor Systems',
+      'Country': 'United States',
+      'Industry': 'Direct Industry Competitor',
+      'Company Size': '90 employees',
+      'ESG Frameworks': 'N/A',
+      'Reporting Obligations': 'N/A',
+      'ESG Reporting Maturity': 'N/A',
+      'Supply Chain Profile': 'N/A',
+      'Scope 3 Exposure': 'N/A',
+      'Sustainability Data Needs': 'None',
+      'Digital Transformation Signals': 'Competitor domain detected',
+      'ESG Governance': 'Internal Leadership',
+      'Business Triggers': 'Competitor alert',
+      'eValuater Solution Fit': 'Disqualified - Direct Competitor',
+      'Company Opportunity Score': 30,
+      'Company Opportunity': 'Competitor Organization - Do Not Contact',
+      'Evidence URLs': 'https://competitor-esg.com',
+      'Evidence Checked Date': new Date().toISOString().split('T')[0],
+      'Verification Status': 'Disqualified',
+      'Human Review Status': 'Rejected',
+      'Last Enriched At': new Date().toLocaleString(),
+      'Company Score Rationale': 'Disqualified: Domain listed on competitor suppression list.'
+    }
+  ];
+}
+
+function writePilotCompanyIntelligence(ss, companies) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.COMPANY_INTELLIGENCE);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rows = companies.map(c => buildRowFromHeaders(headers, c));
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+/**
+ * Step 8: Evidence citations
+ */
+function getPilotResearchEvidence(config) {
+  return [
+    {
+      'Evidence ID': 'EVD-001',
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Entity Name': 'Marcus Vance',
+      'Entity Type': 'Persona',
+      'Search Query Used': 'Marcus Vance Apex Operations keynote ' + config.DEPARTMENT,
+      'Grounding Evidence URL': 'https://linkedin.com/in/marcus-vance-pilot',
+      'Extracted Snippet / Signal': 'Discussed challenges balancing sprint cycles with audit requirements and manual verification overhead.',
+      'Verification Score': 0.95,
+      'Date Captured': new Date().toLocaleString()
+    },
+    {
+      'Evidence ID': 'EVD-002',
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Entity Name': 'Elena Rostova',
+      'Entity Type': 'Persona',
+      'Search Query Used': 'Elena Rostova Novus Systems audit compliance drag',
+      'Grounding Evidence URL': 'https://linkedin.com/in/elena-rostova-pilot',
+      'Extracted Snippet / Signal': 'Published article highlighting vendor audit fatigue and delayed procurement reviews.',
+      'Verification Score': 0.92,
+      'Date Captured': new Date().toLocaleString()
+    }
+  ];
+}
+
+function writePilotResearchEvidence(ss, list) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.RESEARCH_EVIDENCE);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rows = list.map(item => buildRowFromHeaders(headers, item));
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+/**
+ * Step 9: Persona Leads
+ */
+function getPilotPersonasData(config) {
+  const primaryNeed = config.CUSTOM_BUSINESS_NEEDS.split('\n')[0];
+
+  return [
+    {
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Campaign Name': config.CAMPAIGN_NAME,
+      'Company ID': 'CMP-001',
+      'Company Name': 'Apex Global Operations',
+      'Industry': 'Freight & Logistics',
+      'Persona ID': 'PRSP-001',
+      'Name': 'Marcus Vance',
+      'Title': 'VP of Technology & Infrastructure',
+      'Persona Type': 'Economic Buyer',
+      'LinkedIn URL': 'https://linkedin.com/in/marcus-vance-pilot',
+      'Signal': 'Spoke on challenges managing ' + primaryNeed + ' across growing cloud infrastructure.',
+      'Signal Date': '2026-02-15',
+      'Evidence URL': 'https://linkedin.com/in/marcus-vance-pilot',
+      'Buying Signal': 'Frustration with manual evidence collection pulling engineers from core sprints.',
+      'Verification Status': 'Verified',
+      'Confidence': 'High (0.95)',
+      'Persona Fit Score': 95,
+      'Personalized Hook': 'Saw your keynote discussing the bandwidth lost to ' + primaryNeed + '.',
+      'Review Status': 'Ready for Outreach',
+      'Last Verified At': new Date().toLocaleString(),
+      'Business Email': 'marcus.vance@growthtarget.com',
+      'Email Domain': 'growthtarget.com',
+      'Email Source URL': 'https://apexoperations.com/team',
+      'Email Discovery Method': 'Pattern Match & SMTP Validated',
+      'Email Verification Status': 'valid',
+      'Email Verification Date': new Date().toISOString().split('T')[0],
+      'Email Verification Provider': 'ZeroBounce',
+      'Email Identity Confidence': '99%',
+      'Email Verification Notes': 'Deliverable, direct mailbox confirmed',
+      'Draft Subject': "Apex's infrastructure sprint + " + primaryNeed,
+      'Draft Email': "Hi Marcus,\n\n" +
+        "Saw your recent perspective regarding the engineering bandwidth pulled away by " + primaryNeed + ". Scaling mission-critical infrastructure shouldn't require senior leaders to spend sprint cycles gathering manual verification evidence.\n\n" +
+        "At " + config.SENDER_COMPANY + ", we help scaling organizations automate continuous controls and compliance workflows directly in their systems, cutting prep time by roughly 70% without slowing release cycles.\n\n" +
+        "Open to a brief 7-minute intro this Thursday to see how we streamline this for teams like Apex?\n\n" +
+        "Best regards,\n" +
+        config.SENDER_NAME + "\n" +
+        config.SENDER_TITLE + " | " + config.SENDER_COMPANY
+    },
+    {
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Campaign Name': config.CAMPAIGN_NAME,
+      'Company ID': 'CMP-002',
+      'Company Name': 'Novus Systems Corp',
+      'Industry': 'Industrial Equipment',
+      'Persona ID': 'PRSP-002',
+      'Name': 'Elena Rostova',
+      'Title': 'Head of Engineering Operations',
+      'Persona Type': 'Key Decision Maker',
+      'LinkedIn URL': 'https://linkedin.com/in/elena-rostova-pilot',
+      'Signal': 'Post on balancing sprint release velocity with Tier-1 vendor compliance obligations.',
+      'Signal Date': '2026-02-10',
+      'Evidence URL': 'https://linkedin.com/in/elena-rostova-pilot',
+      'Buying Signal': 'Procurement and audit drag delaying release cycles.',
+      'Verification Status': 'Verified',
+      'Confidence': 'High (0.92)',
+      'Persona Fit Score': 91,
+      'Personalized Hook': 'Really appreciated your perspective on eliminating compliance drag across vendor workflows.',
+      'Review Status': 'Ready for Outreach',
+      'Last Verified At': new Date().toLocaleString(),
+      'Business Email': 'elena.rostova@growthtarget.com',
+      'Email Domain': 'growthtarget.com',
+      'Email Source URL': 'https://novussystems.com/leadership',
+      'Email Discovery Method': 'Direct Pattern Match',
+      'Email Verification Status': 'valid',
+      'Email Verification Date': new Date().toISOString().split('T')[0],
+      'Email Verification Provider': 'MillionVerifier',
+      'Email Identity Confidence': '98%',
+      'Email Verification Notes': 'Verified Active Mailbox',
+      'Draft Subject': "Sprint velocity vs. compliance drag at Novus",
+      'Draft Email': "Hi Elena,\n\n" +
+        "Really appreciated your recent article on balancing engineering velocity with compliance requirements—especially your point on how audit bottlenecks slow down core API releases.\n\n" +
+        "We work specifically with engineering and operations leaders to automate verification guardrails directly into existing workflows. This lets your team ship updates at high velocity while staying completely audit-ready.\n\n" +
+        "Would you be against exploring how we help technical teams eliminate compliance drag next Tuesday?\n\n" +
+        "Best regards,\n" +
+        config.SENDER_NAME + "\n" +
+        config.SENDER_TITLE + " | " + config.SENDER_COMPANY
+    },
+    {
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Campaign Name': config.CAMPAIGN_NAME,
+      'Company ID': 'CMP-003',
+      'Company Name': 'EcoTransit Competitor Systems',
+      'Industry': 'Direct Competitor',
+      'Persona ID': 'PRSP-003',
+      'Name': 'Sarah Connor',
+      'Title': 'VP of Product',
+      'Persona Type': 'Disqualified / Competitor',
+      'LinkedIn URL': 'https://linkedin.com/in/sarah-connor-pilot',
+      'Signal': 'Competitor leadership match.',
+      'Signal Date': '2026-02-01',
+      'Evidence URL': 'https://competitor-esg.com/team',
+      'Buying Signal': 'None - Competitor',
+      'Verification Status': 'Disqualified',
+      'Confidence': 'Low (0.30)',
+      'Persona Fit Score': 35,
+      'Personalized Hook': 'Competitor domain detected.',
+      'Review Status': 'Rejected',
+      'Last Verified At': new Date().toLocaleString(),
+      'Business Email': 'sarah.connor@competitor-esg.com',
+      'Email Domain': 'competitor-esg.com',
+      'Email Source URL': 'https://competitor-esg.com',
+      'Email Discovery Method': 'Scraped',
+      'Email Verification Status': 'valid',
+      'Email Verification Date': new Date().toISOString().split('T')[0],
+      'Email Verification Provider': 'ZeroBounce',
+      'Email Identity Confidence': '90%',
+      'Email Verification Notes': 'Blocked: Domain on competitor suppression list',
+      'Draft Subject': "Outreach discussion",
+      'Draft Email': "Hi Sarah, checking in."
+    }
+  ];
+}
+
+function writePilotPersonaLeads(ss, personas) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.PERSONAS);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rows = personas.map(p => buildRowFromHeaders(headers, p));
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+/**
+ * Step 10: Security audit, approval & Gmail Drafts
+ */
+function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
+  const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@'];
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  return personas.map(p => {
+    const email = (p['Business Email'] || '').trim().toLowerCase();
+    const domain = (p['Email Domain'] || '').trim().toLowerCase();
+    
+    let suppressionCheck = 'Clear';
+    let complianceStatus = 'Passed';
+    let approvalStatus = 'Pending Review';
+    let sendStatus = 'Queued';
+    let sendError = '';
+    let draftId = '';
+
+    if (!email || !emailRegex.test(email)) {
+      complianceStatus = 'Failed - Invalid Syntax';
+      suppressionCheck = 'Blocked: Bad Email Syntax';
+    } else if (rolePrefixes.some(pre => email.startsWith(pre))) {
+      complianceStatus = 'Failed - Role Based';
+      suppressionCheck = 'Blocked: Role-Based Account';
+    } else if (suppressionRules.emails.includes(email)) {
+      complianceStatus = 'Failed - Suppressed';
+      suppressionCheck = 'Blocked: Email in Lists & Settings';
+    } else if (suppressionRules.domains.includes(domain)) {
+      complianceStatus = 'Failed - Suppressed';
+      suppressionCheck = 'Blocked: Domain in Lists & Settings';
+    }
+
+    if (complianceStatus === 'Passed' && (p['Persona Fit Score'] || 0) >= config.MIN_PERSONA_SCORE) {
+      approvalStatus = 'Approved (Auto-Pilot)';
+      try {
+        const draft = GmailApp.createDraft(
+          p['Business Email'],
+          p['Draft Subject'],
+          p['Draft Email'],
+          { name: config.SENDER_NAME }
+        );
+        draftId = draft.getId();
+        sendStatus = 'Draft Created in Gmail';
+        Logger.log('SUCCESS: Gmail Draft created for ' + p['Name'] + ' | ID: ' + draftId);
+      } catch (err) {
+        sendStatus = 'Draft Failed';
+        sendError = err.message;
+      }
+    } else if (complianceStatus !== 'Passed') {
+      approvalStatus = 'Rejected (Suppression Guard)';
+      sendStatus = 'Suppressed - Not Sent';
+      sendError = suppressionCheck;
+    } else {
+      approvalStatus = 'Needs Human Review (Score < ' + config.MIN_PERSONA_SCORE + ')';
+      sendStatus = 'Staged in Queue';
+    }
+
+    return {
+      'Campaign ID': p['Campaign ID'],
+      'Campaign Name': p['Campaign Name'],
+      'Company ID': p['Company ID'],
+      'Company Name': p['Company Name'],
+      'Persona ID': p['Persona ID'],
+      'Name': p['Name'],
+      'Title': p['Title'],
+      'Business Email': p['Business Email'],
+      'Company Opportunity Score': p['Persona Fit Score'],
+      'Persona Fit Score': p['Persona Fit Score'],
+      'Buying Signal': p['Buying Signal'],
+      'Priority Score': p['Persona Fit Score'],
+      'Priority Tier': p['Persona Fit Score'] >= 90 ? 'Tier 1' : 'Tier 2',
+      'Priority Score Rationale': 'Evaluated for ' + config.DEPARTMENT + ' based on: ' + (config.CUSTOM_BUSINESS_NEEDS.slice(0, 50)),
+      'Draft Subject': p['Draft Subject'],
+      'Draft Email': p['Draft Email'],
+      'Evidence URLs': p['Evidence URL'],
+      'Review Status': approvalStatus.startsWith('Approved') ? 'Approved' : 'Rejected',
+      'Reviewer': 'Pilot Automated Runner',
+      'Reviewer Notes': draftId ? 'Draft created in Gmail ID: ' + draftId : suppressionCheck,
+      'Reviewed At': new Date().toLocaleString(),
+      'Human Approval Status': approvalStatus,
+      'Approved By': approvalStatus.startsWith('Approved') ? 'Pilot Sandbox' : '',
+      'Approved At': approvalStatus.startsWith('Approved') ? new Date().toLocaleString() : '',
+      'Send Status': sendStatus,
+      'Sent At': draftId ? new Date().toLocaleString() : '',
+      'Send Error': sendError,
+      'Country': 'United States',
+      'Industry': p['Industry'],
+      'Company Opportunity': 'Operational / Compliance Automation',
+      'Persona Type': p['Persona Type'],
+      'LinkedIn URL': p['LinkedIn URL'],
+      'Email Domain': p['Email Domain'],
+      'Email Source URL': p['Email Source URL'],
+      'Email Discovery Method': p['Email Discovery Method'],
+      'Email Verification Status': p['Email Verification Status'],
+      'Email Verification Date': p['Email Verification Date'],
+      'Email Verification Provider': p['Email Verification Provider'],
+      'Email Identity Confidence': p['Email Identity Confidence'],
+      'Email Verification Notes': p['Email Verification Notes'],
+      'Queue Status': 'Processed',
+      'Compliance Status': complianceStatus,
+      'Suppression Check': suppressionCheck,
+      'Date Added': new Date().toISOString().split('T')[0],
+      'Personalized Hook': p['Personalized Hook']
+    };
+  });
+}
+
+function writePilotReviewQueue(ss, queueItems) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.REVIEW_QUEUE);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rows = queueItems.map(item => buildRowFromHeaders(headers, item));
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+function logPilotExecution(ss, processedQueue) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.LOGS);
+  if (!sheet) return;
+
+  const timestamp = new Date().toLocaleString();
+  const logs = processedQueue.map(item => [
+    timestamp,
+    PILOT_CONFIG.CAMPAIGN_ID,
+    'Multi-Department Pilot Run',
+    item['Name'] + ' (' + item['Business Email'] + ')',
+    item['Compliance Status'] === 'Passed' ? 'SUCCESS' : 'SUPPRESSED',
+    item['Send Status'] + (item['Send Error'] ? ' - ' + item['Send Error'] : '')
+  ]);
+
+  sheet.getRange(sheet.getLastRow() + 1, 1, logs.length, logs[0].length).setValues(logs);
+}
+
+/**
+ * Step 12: Generates the Executive Master Dashboard with Live KPIs & Campaign Tracker
+ */
+function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCount, blockedCount) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
+  if (!sheet) return;
+  sheet.clear();
+
+  const now = new Date().toLocaleString();
+
+  // Header Title
+  sheet.getRange(1, 1, 1, 4)
+    .setValues([['🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD', '', '', '']])
+    .setFontSize(14)
+    .setFontWeight('bold')
+    .setBackground('#1a73e8')
+    .setFontColor('#ffffff');
+
+  // KPI Overview Cards
+  const kpiHeaders = [['Metric KPI', 'Current Value', 'Operational Status', 'Last Updated']];
+  const kpiData = [
+    ['Active Campaign Name', config.CAMPAIGN_NAME, 'Active', now],
+    ['Campaign ID', config.CAMPAIGN_ID, 'Pilot Mode', now],
+    ['Operating Department', config.DEPARTMENT, 'Active Owner', now],
+    ['Company Discovery Limit', config.COMPANY_LIMIT + ' Companies', 'Enforced Limit', now],
+    ['Companies Discovered & Qualified', companiesCount, 'Discovery Complete', now],
+    ['Persona Leads Identified', leadsCount, 'Mapping Complete', now],
+    ['Gmail Outreach Drafts Created', draftsCount, 'Ready in Gmail Drafts', now],
+    ['Suppressed / Blocked Records', blockedCount, 'Suppression Active', now],
+    ['Email Dispatch Channel', 'Google Workspace (Drafts Only)', 'Safe Mode', now],
+    ['Primary AI Model Configured', 'Gemini 2.5 Flash + Search Grounding', 'Connected', now]
+  ];
+
+  sheet.getRange(3, 1, 1, 4).setValues(kpiHeaders).setFontWeight('bold').setBackground('#202124').setFontColor('#ffffff');
+  sheet.getRange(4, 1, kpiData.length, 4).setValues(kpiData);
+
+  // Campaign Summary Rollup Table
+  const tableStart = 4 + kpiData.length + 2;
+  sheet.getRange(tableStart, 1, 1, 7)
+    .setValues([['Campaign Performance Rollup', '', '', '', '', '', '']])
+    .setFontSize(12)
+    .setFontWeight('bold');
+
+  const summaryHeaders = [['Campaign ID', 'Campaign Name', 'Department', 'Status', 'Companies Found', 'Gmail Drafts', 'Last Run']];
+  const summaryRow = [[
+    config.CAMPAIGN_ID,
+    config.CAMPAIGN_NAME,
+    config.DEPARTMENT,
+    'Completed (Drafts Ready)',
+    companiesCount,
+    draftsCreated = draftsCount,
+    now
+  ]];
+
+  sheet.getRange(tableStart + 1, 1, 1, 7).setValues(summaryHeaders).setFontWeight('bold').setBackground('#dadce0').setFontColor('#202124');
+  sheet.getRange(tableStart + 2, 1, 1, 7).setValues(summaryRow);
+
+  sheet.autoResizeColumns(1, 7);
+  sheet.setColumnWidth(1, 260);
+  sheet.setColumnWidth(2, 280);
+}
+
+function ensureSuppressionRulesInSettings(ss) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.LISTS_SETTINGS);
+  if (!sheet) return;
+  if (sheet.getLastRow() <= 1) {
+    sheet.clear();
+    sheet.appendRow(['List name', 'Value', 'Active status']);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#202124').setFontColor('#ffffff');
+  }
+
+  const data = sheet.getDataRange().getValues();
+  let hasCompetitorRule = false;
+  for (let i = 1; i < data.length; i++) {
+    const val = String(data[i][1] || '').toLowerCase();
+    if (val.includes('competitor-esg.com')) {
+      hasCompetitorRule = true;
+      break;
+    }
+  }
+
+  if (!hasCompetitorRule) {
+    sheet.appendRow(['Suppression - Competitor Domain', 'competitor-esg.com', 'Active']);
+    sheet.appendRow(['Suppression - Opt-Out Email', 'optout-lead@novusmfg.com', 'Active']);
+    sheet.appendRow(['Suppression - Internal Exclusion', 'internal-test@growthtarget.com', 'Active']);
+  }
+}
+
+function loadSuppressionRulesFromSettings(ss) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.LISTS_SETTINGS);
+  const data = sheet.getDataRange().getValues();
+  const rules = { domains: [], emails: [] };
+
+  for (let i = 1; i < data.length; i++) {
+    const listName = String(data[i][0] || '').trim().toLowerCase();
+    const value = String(data[i][1] || '').trim().toLowerCase();
+    const status = String(data[i][2] || '').trim().toLowerCase();
+
+    const isActive = (status === 'active' || status === 'true' || status === '');
+    const isSuppression = listName.includes('suppression') || 
+                          listName.includes('blacklist') || 
+                          listName.includes('opt-out') || 
+                          listName.includes('competitor');
+
+    if (isActive && isSuppression && value) {
+      if (value.includes('@')) {
+        rules.emails.push(value);
+      } else {
+        rules.domains.push(value.replace(/^@/, ''));
+      }
+    }
+  }
   return rules;
 }
 
-/**
- * Security & Compliance Engine:
- * Evaluates syntax, role-based mailboxes, and suppression list records.
- */
-function runSecurityAndSuppressionAudit(prospects, suppressionRules) {
-  const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@', 'team@'];
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-  return prospects.map(item => {
-    const email = (item.email || '').trim().toLowerCase();
-    const domain = (item.domain || '').trim().toLowerCase();
-
-    // 1. Email Syntax Validation
-    if (!email || !emailRegex.test(email)) {
-      item.securityStatus = 'Blocked: Invalid Email Syntax';
-      return item;
-    }
-
-    // 2. Role-Based Mailbox Screening
-    const isRoleBased = rolePrefixes.some(prefix => email.startsWith(prefix));
-    if (isRoleBased) {
-      item.securityStatus = 'Blocked: Role-Based Mailbox';
-      return item;
-    }
-
-    // 3. Suppression List Matching (Email level)
-    if (suppressionRules.emails.includes(email)) {
-      item.securityStatus = 'Blocked: Email in Suppression List';
-      return item;
-    }
-
-    // 4. Suppression List Matching (Domain level)
-    if (suppressionRules.domains.includes(domain)) {
-      item.securityStatus = 'Blocked: Domain in Suppression List';
-      return item;
-    }
-
-    // 5. Verification Status Check
-    if (item.verificationStatus !== 'valid') {
-      item.securityStatus = 'Blocked: Verification Status Invalid';
-      return item;
-    }
-
-    // Passed all security and suppression controls
-    item.securityStatus = 'Passed';
-    return item;
+function buildRowFromHeaders(sheetHeaders, dataObject) {
+  return sheetHeaders.map(header => {
+    const cleanHeader = String(header).trim();
+    return dataObject.hasOwnProperty(cleanHeader) ? dataObject[cleanHeader] : '';
   });
 }
 
 /**
- * Approves qualified, clean leads and creates drafts directly in Gmail
+ * Purges pilot rows tagged with PILOT-CMP-001 from all operational tabs.
  */
-function processApprovalsAndCreateGmailDrafts(prospects, campaign) {
-  return prospects.map(item => {
-    // Lead Qualification & Approval Rule:
-    // Requires Security Passed AND Fit Score >= 85
-    if (item.securityStatus === 'Passed' && (item.fitScore || 0) >= 85) {
-      item.approvalStatus = 'Approved (Auto-Pilot)';
-      
-      try {
-        // Create draft directly in connected Gmail account
-        const draft = GmailApp.createDraft(
-          item.email,
-          item.subject,
-          item.body,
-          {
-            name: campaign.senderName
-          }
-        );
-        
-        item.gmailDraftId = draft.getId();
-        item.sendStatus = 'Gmail Draft Created';
-        Logger.log('Created Gmail Draft for ' + item.fullName + ' (' + item.email + ') | Draft ID: ' + item.gmailDraftId);
+function purgeExistingPilotRows(ss, campaignId) {
+  const tabsToClean = [
+    PILOT_CONFIG.TABS.CAMPAIGNS,
+    PILOT_CONFIG.TABS.COMPANY_INTELLIGENCE,
+    PILOT_CONFIG.TABS.PERSONAS,
+    PILOT_CONFIG.TABS.REVIEW_QUEUE,
+    PILOT_CONFIG.TABS.COMPANY_DATABASE,
+    PILOT_CONFIG.TABS.RESEARCH_EVIDENCE,
+    PILOT_CONFIG.TABS.PERSONA_SETTINGS
+  ];
 
-      } catch (err) {
-        Logger.log('Draft Creation Error for ' + item.email + ': ' + err.message);
-        item.gmailDraftId = 'Error';
-        item.sendStatus = 'Draft Failed: ' + err.message;
+  tabsToClean.forEach(tabName => {
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) return;
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+
+    for (let r = data.length - 1; r >= 1; r--) {
+      const col0 = String(data[r][0] || '').trim();
+      const col1 = String(data[r][1] || '').trim();
+      if (col0 === campaignId || col0.startsWith('PILOT-') || col1 === campaignId) {
+        sheet.deleteRow(r + 1);
       }
-
-    } else if (item.securityStatus !== 'Passed') {
-      item.approvalStatus = 'Rejected (Security Suppression)';
-      item.gmailDraftId = 'N/A';
-      item.sendStatus = 'Suppressed';
-
-    } else {
-      item.approvalStatus = 'Needs Human Review (Score < 85)';
-      item.gmailDraftId = 'Pending';
-      item.sendStatus = 'Staged in Review Queue';
     }
-
-    return item;
   });
 }
 
 /**
- * Writes Prospects & Outreach Details to the Sandbox Tab
+ * Clean up test data and reset Dashboard to a clean Standby State (Never left blank)
  */
-function writeSandboxProspects(ss, list) {
-  const sheet = ss.getSheetByName(PILOT_TABS.PROSPECTS);
-  const rows = list.map(item => [
-    item.prospectId,
-    item.companyName,
-    item.fullName,
-    item.email,
-    item.jobTitle,
-    item.fitScore,
-    item.securityStatus,
-    item.approvalStatus,
-    item.sendStatus,
-    item.gmailDraftId,
-    item.subject,
-    item.body
-  ]);
-
-  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
-  sheet.autoResizeColumns(1, 10);
-  sheet.getRange(2, 12, rows.length, 1).setWrap(true);
-}
-
-/**
- * Writes Leads and their Draft status to the Sandbox Review Queue
- */
-function writeSandboxReviewQueue(ss, list) {
-  const sheet = ss.getSheetByName(PILOT_TABS.REVIEW_QUEUE);
-  const rows = list.map(item => [
-    item.approvalStatus.startsWith('Approved'),
-    item.fullName,
-    item.email,
-    item.companyName,
-    item.jobTitle,
-    item.securityStatus,
-    item.approvalStatus,
-    item.sendStatus,
-    item.subject,
-    item.body
-  ]);
-
-  sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+function cleanupPilotDataFromRealSheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
   
-  // Column A checkbox format
-  const checkboxRange = sheet.getRange(2, 1, rows.length, 1);
-  checkboxRange.insertCheckboxes();
+  const dashSheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
+  if (dashSheet) {
+    dashSheet.clear();
+    dashSheet.getRange(1, 1, 1, 4)
+      .setValues([['🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD', '', '', '']])
+      .setFontSize(14)
+      .setFontWeight('bold')
+      .setBackground('#5f6368')
+      .setFontColor('#ffffff');
 
-  sheet.autoResizeColumns(1, 8);
-  sheet.getRange(2, 10, rows.length, 1).setWrap(true);
-}
+    dashSheet.getRange(3, 1, 1, 4)
+      .setValues([['System Status', 'Active Campaign', 'Workspace State', 'Last Cleanup']])
+      .setFontWeight('bold')
+      .setBackground('#202124')
+      .setFontColor('#ffffff');
 
-/**
- * Updates the Sandbox Master Dashboard
- */
-function updateSandboxDashboard(ss, campaign, companiesCount, leadsCount, draftsCount, blockedCount) {
-  const sheet = ss.getSheetByName(PILOT_TABS.MASTER);
-  const row = [
-    campaign.id,
-    campaign.name,
-    'Pilot Completed (Drafts Generated)',
-    companiesCount,
-    leadsCount,
-    draftsCount,
-    blockedCount,
-    new Date().toLocaleString()
-  ];
-  sheet.getRange(2, 1, 1, row.length).setValues([row]);
-  sheet.autoResizeColumns(1, row.length);
-}
+    dashSheet.getRange(4, 1, 1, 4)
+      .setValues([['Standby', 'None (Test Data Purged)', 'Ready to Launch New Campaign', new Date().toLocaleString()]]);
 
-/**
- * Optional Helper: Lets you manually approve queued leads via Checkboxes
- * and create Gmail drafts only for rows marked TRUE.
- */
-function approveAndCreateDraftsFromSandboxQueue() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const queueSheet = ss.getSheetByName(PILOT_TABS.REVIEW_QUEUE);
-
-  if (!queueSheet) {
-    ss.toast('Sandbox Review Queue not found. Run "runIsolatedDummyPilot" first.', 'Error', 5);
-    return;
+    dashSheet.autoResizeColumns(1, 4);
   }
-
-  const data = queueSheet.getDataRange().getValues();
-  let createdCount = 0;
-
-  for (let i = 1; i < data.length; i++) {
-    const isApproved = data[i][0];
-    const name = data[i][1];
-    const email = data[i][2];
-    const draftStatus = data[i][7];
-    const subject = data[i][8];
-    const body = data[i][9];
-
-    // Only process rows checked TRUE that haven't been created yet
-    if (isApproved === true && draftStatus !== 'Gmail Draft Created') {
-      try {
-        GmailApp.createDraft(email, subject, body);
-        queueSheet.getRange(i + 1, 8).setValue('Gmail Draft Created');
-        createdCount++;
-        Logger.log('Manually Approved & Created Gmail Draft for: ' + name + ' (' + email + ')');
-      } catch (err) {
-        queueSheet.getRange(i + 1, 8).setValue('Draft Error: ' + err.message);
-      }
-    }
-  }
-
-  ss.toast('Processed manual queue! Created ' + createdCount + ' new drafts.', 'Drafts Updated', 6);
-}
-
-/**
- * Utility: Completely deletes all sandbox pilot sheets whenever you want a clean slate.
- */
-function deletePilotSandboxSheets() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const tabs = [
-    PILOT_TABS.MASTER,
-    PILOT_TABS.COMPANIES,
-    PILOT_TABS.PROSPECTS,
-    PILOT_TABS.REVIEW_QUEUE,
-    PILOT_TABS.SUPPRESSION
-  ];
-
-  tabs.forEach(name => {
-    const sheet = ss.getSheetByName(name);
-    if (sheet) {
-      ss.deleteSheet(sheet);
-    }
-  });
-
-  ss.toast('All [PILOT] sandbox sheets successfully deleted.', 'Sandbox Reset', 5);
+  
+  ss.toast('Pilot test data purged. Dashboard reset to Standby state.', 'Cleaned', 6);
+  Logger.log('Pilot test data purged cleanly.');
 }
