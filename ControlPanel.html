@@ -2,122 +2,344 @@
 <html>
   <head>
     <base target="_top">
-    <link rel="stylesheet" href="https://ssl.gstatic.com/docs/script/css/add-ons1.css">
     <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 15px; color: #202124; background-color: #f8f9fa; }
-      .card { background: white; border: 1px solid #dadce0; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(60,64,67,0.1); }
-      h2 { font-size: 16px; margin-top: 0; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 8px; }
-      h3 { font-size: 13px; margin: 12px 0 4px; color: #3c4043; text-transform: uppercase; letter-spacing: 0.5px; }
-      .field-group { margin-bottom: 12px; }
-      label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: #5f6368; }
-      select, input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #dadce0; border-radius: 4px; font-size: 13px; }
-      .criteria-box { background: #f1f3f4; border-radius: 4px; padding: 10px; font-size: 12px; line-height: 1.4; color: #3c4043; }
-      .btn { width: 100%; padding: 10px; font-size: 13px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; margin-top: 8px; transition: background 0.2s; }
-      .btn-primary { background: #1a73e8; color: white; }
+      * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      body { margin: 0; padding: 12px; background: #f8f9fa; color: #202124; font-size: 13px; }
+      .card { background: #fff; border: 1px solid #dadce0; border-radius: 8px; padding: 12px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(60,64,67,0.08); }
+      .header-title { font-size: 15px; font-weight: 700; color: #1a73e8; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+      .field { margin-bottom: 10px; }
+      label { display: block; font-size: 11px; font-weight: 600; color: #5f6368; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.3px; }
+      select, input[type="text"], input[type="number"], textarea { width: 100%; padding: 7px 9px; border: 1px solid #dadce0; border-radius: 4px; font-size: 12px; color: #202124; background: #fff; }
+      select:focus, input:focus, textarea:focus { outline: none; border-color: #1a73e8; }
+      textarea { resize: vertical; min-height: 48px; }
+      .checkbox-grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; }
+      .checkbox-item { display: flex; align-items: flex-start; font-size: 12px; color: #3c4043; cursor: pointer; }
+      .checkbox-item input { margin-right: 6px; margin-top: 2px; }
+      .section-toggle { font-size: 12px; font-weight: 700; color: #3c4043; padding: 8px 0; border-bottom: 1px solid #eee; margin-top: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; cursor: pointer; }
+      .btn { display: block; width: 100%; padding: 9px; font-size: 12px; font-weight: 600; text-align: center; border-radius: 4px; border: none; cursor: pointer; transition: background 0.2s; margin-top: 6px; }
+      .btn-primary { background: #1a73e8; color: #fff; }
       .btn-primary:hover { background: #1557b0; }
-      .btn-secondary { background: #e8f0fe; color: #1a73e8; border: 1px solid #dadce0; }
-      .btn-secondary:hover { background: #d2e3fc; }
-      .status { font-size: 12px; padding: 8px; border-radius: 4px; margin-top: 10px; display: none; }
-      .status.info { display: block; background: #e8f0fe; color: #1a73e8; }
-      .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; background: #e6f4ea; color: #137333; }
+      .btn-success { background: #1e8e3e; color: #fff; }
+      .btn-success:hover { background: #188038; }
+      .btn-secondary { background: #fff; color: #1a73e8; border: 1px solid #dadce0; }
+      .btn-secondary:hover { background: #f1f3f4; }
+      .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; }
+      .row { display: flex; gap: 8px; }
+      .row .field { flex: 1; }
+      .status { font-size: 11px; padding: 8px; border-radius: 4px; margin-top: 8px; display: none; }
+      .status.info { display: block; background: #e8f0fe; color: #1a73e8; border: 1px solid #d2e3fc; }
+      .status.success { display: block; background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
+      .status.error { display: block; background: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }
     </style>
   </head>
   <body>
+    <!-- Campaign Selection Header -->
     <div class="card">
-      <h2>Prospecting Control Panel</h2>
-      <div class="field-group">
-        <label for="campaignSelect">Select Campaign</label>
-        <select id="campaignSelect" onchange="loadCampaignDetails()">
-          <option value="">-- Choose Campaign --</option>
+      <div class="header-title">
+        <span>Campaign Control</span>
+        <button class="btn btn-secondary btn-icon" onclick="refreshCampaigns()" title="Reload campaigns list">🔄 Refresh</button>
+      </div>
+      <div class="field">
+        <label for="campaignSelect">Active Campaign</label>
+        <select id="campaignSelect" onchange="onCampaignSelected()">
+          <option value="">-- Choose or Enter Campaign --</option>
         </select>
       </div>
-      <div id="campaignDetails" style="display:none;">
-        <h3>Target Profile</h3>
-        <div class="criteria-box">
-          <div><strong>Country:</strong> <span id="lblCountry">-</span></div>
-          <div><strong>Industry:</strong> <span id="lblIndustry">-</span></div>
-          <div><strong>Size:</strong> <span id="lblSize">-</span></div>
+      <div class="row">
+        <div class="field">
+          <label for="campaignIdInput">Campaign ID</label>
+          <input type="text" id="campaignIdInput" placeholder="e.g. CMP-001">
+        </div>
+        <div class="field">
+          <label for="campaignNameInput">Campaign Name</label>
+          <input type="text" id="campaignNameInput" placeholder="e.g. Nordic ESG Q1">
         </div>
       </div>
     </div>
 
-    <!-- Step 1: Discover -->
+    <!-- Target Company & Persona Profile -->
     <div class="card">
-      <h2>Step 1: Company Discovery</h2>
-      <p style="font-size:12px; color:#5f6368; margin-top:0;">Search the web with Gemini to find companies matching your target profile.</p>
-      <button class="btn btn-primary" onclick="triggerDiscovery()">🔍 Discover Target Companies</button>
+      <div class="section-toggle" onclick="toggleSection('secTargeting')">
+        <span>1. Targeting & Criteria Profile</span>
+        <span id="iconTargeting">▼</span>
+      </div>
+      <div id="secTargeting">
+        <div class="field">
+          <label for="targetCountries">Target Countries / Regions</label>
+          <input type="text" id="targetCountries" placeholder="e.g. Sweden, Norway, Denmark">
+        </div>
+        <div class="field">
+          <label for="targetIndustries">Target Industries</label>
+          <input type="text" id="targetIndustries" placeholder="e.g. Manufacturing, Logistics, BioTech">
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="companySize">Company Size (FTEs)</label>
+            <input type="text" id="companySize" placeholder="e.g. 500 - 5000">
+          </div>
+          <div class="field">
+            <label for="companyLimit">Discovery Limit</label>
+            <input type="number" id="companyLimit" value="5" min="1" max="25">
+          </div>
+        </div>
+        <div class="field">
+          <label for="targetTitles">Target Persona Titles</label>
+          <textarea id="targetTitles" placeholder="e.g. Chief Sustainability Officer; VP Procurement; Head of ESG Reporting"></textarea>
+        </div>
+      </div>
     </div>
 
-    <!-- Step 2: Persona Mapping -->
+    <!-- Business Needs & Intelligence Criteria -->
     <div class="card">
-      <h2>Step 2: Persona Mapping</h2>
-      <p style="font-size:12px; color:#5f6368; margin-top:0;">Enrich discovered companies, find decision-maker emails, and draft hooks.</p>
-      <button class="btn btn-primary" onclick="triggerPersonaMapper()">👤 Run Persona Mapper</button>
+      <div class="section-toggle" onclick="toggleSection('secIntelligence')">
+        <span>2. Business Needs & ESG Signals</span>
+        <span id="iconIntelligence">▼</span>
+      </div>
+      <div id="secIntelligence">
+        <div class="checkbox-grid">
+          <label class="checkbox-item"><input type="checkbox" id="incEsgObligations" checked> ESG Reporting Obligations (CSRD/GRI)</label>
+          <label class="checkbox-item"><input type="checkbox" id="incScope3" checked> Scope 3 & Value-Chain Data Exposure</label>
+          <label class="checkbox-item"><input type="checkbox" id="incSupplyChain" checked> Supply Chain Complexity</label>
+          <label class="checkbox-item"><input type="checkbox" id="incDataChallenges" checked> Sustainability Data Management Needs</label>
+          <label class="checkbox-item"><input type="checkbox" id="incDigital" checked> Digital Transformation / AI Signals</label>
+          <label class="checkbox-item"><input type="checkbox" id="incTriggers" checked> Commercial & Leadership Triggers</label>
+          <label class="checkbox-item"><input type="checkbox" id="incEvaluater" checked> eValuater / EvA Solution Fit</label>
+        </div>
+      </div>
     </div>
 
-    <!-- Step 3: Review -->
+    <!-- AI Engine & Provider Config -->
     <div class="card">
-      <h2>Step 3: Human Review</h2>
-      <button class="btn btn-secondary" onclick="openReviewQueue()">📋 Open Prospect Review Queue</button>
+      <div class="section-toggle" onclick="toggleSection('secAI')">
+        <span>3. AI Engine & Model Config</span>
+        <span id="iconAI">▶</span>
+      </div>
+      <div id="secAI" style="display:none;">
+        <div class="field">
+          <label for="aiProviderSelect">AI Provider</label>
+          <select id="aiProviderSelect" onchange="onProviderChanged()">
+            <option value="GEMINI" selected>Google Gemini (Search Grounding & Fast)</option>
+            <option value="OPENAI">OpenAI (GPT-4o)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="aiModelInput">AI Model Name</label>
+          <input type="text" id="aiModelInput" value="gemini-2.5-flash">
+        </div>
+      </div>
     </div>
 
-    <div id="statusBox" class="status"></div>
+    <!-- Email Verification & Outreach Provider -->
+    <div class="card">
+      <div class="section-toggle" onclick="toggleSection('secEmail')">
+        <span>4. Email Verification & Sender</span>
+        <span id="iconEmail">▶</span>
+      </div>
+      <div id="secEmail" style="display:none;">
+        <div class="field">
+          <label for="emailVerifierSelect">Email Verification Provider</label>
+          <select id="emailVerifierSelect">
+            <option value="ZeroBounce" selected>ZeroBounce (Pay-As-You-Go API)</option>
+            <option value="MillionVerifier">MillionVerifier (Budget Pick)</option>
+            <option value="NeverBounce">NeverBounce</option>
+            <option value="Custom">Custom HTTPS REST Endpoint</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="emailEndpoint">Verification Endpoint</label>
+          <input type="text" id="emailEndpoint" placeholder="https://api.zerobounce.net/v2/validate">
+        </div>
+        <div class="field">
+          <label for="senderModeSelect">Outreach Mode</label>
+          <select id="senderModeSelect">
+            <option value="GmailDrafts" selected>Create Gmail Drafts ($0 - Safe & Human Reviewed)</option>
+            <option value="ReviewOnly">Spreadsheet Human Approval Only</option>
+            <option value="Webhook">Webhook / External Sequencer</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Action Pipeline -->
+    <div class="card">
+      <div class="header-title">Pipeline Execution</div>
+      <button class="btn btn-secondary" onclick="saveConfiguration()">💾 Save Campaign Settings</button>
+      <button class="btn btn-primary" onclick="runDiscovery()">🔍 Step 1: Discover Companies</button>
+      <button class="btn btn-primary" onclick="runPersonaMapper()">👤 Step 2: Run Persona Mapper</button>
+      <button class="btn btn-success" onclick="openReviewQueue()">📋 Step 3: Open Review Queue</button>
+      <div id="statusBox" class="status"></div>
+    </div>
 
     <script>
+      // Load pre-fetched campaigns rendered directly from the server to bypass PERMISSION_DENIED
+      var serverPreloaded = <?!= JSON.stringify(initialCampaigns || []) ?>;
+
       window.onload = function() {
-        google.script.run.withSuccessHandler(populateCampaigns).getAvailableCampaignsList();
+        if (serverPreloaded && serverPreloaded.length > 0) {
+          renderCampaignOptions(serverPreloaded);
+        } else {
+          refreshCampaigns();
+        }
       };
 
-      function populateCampaigns(campaigns) {
+      function renderCampaignOptions(campaigns) {
         const select = document.getElementById('campaignSelect');
-        select.innerHTML = '<option value="">-- Choose Campaign --</option>';
-        campaigns.forEach(c => {
-          const opt = document.createElement('option');
-          opt.value = c.id;
-          opt.textContent = c.id + ' - ' + c.name;
-          select.appendChild(opt);
-        });
-      }
-
-      function loadCampaignDetails() {
-        const campaignId = document.getElementById('campaignSelect').value;
-        if (!campaignId) {
-          document.getElementById('campaignDetails').style.display = 'none';
-          return;
+        select.innerHTML = '<option value="">-- Choose or Enter Campaign --</option>';
+        if (campaigns && campaigns.length) {
+          campaigns.forEach(function(c) {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.id + ' - ' + (c.name || 'Untitled');
+            select.appendChild(opt);
+          });
+          showStatus('Loaded ' + campaigns.length + ' campaign(s).', 'success');
+        } else {
+          showStatus('No campaigns found. Type Campaign ID & Name and click Save.', 'info');
         }
-        google.script.run.withSuccessHandler(renderDetails).getCampaignTargetingSummary(campaignId);
       }
 
-      function renderDetails(data) {
-        if (!data) return;
-        document.getElementById('lblCountry').textContent = data.country || 'Any';
-        document.getElementById('lblIndustry').textContent = data.industry || 'Any';
-        document.getElementById('lblSize').textContent = data.size || 'Any';
-        document.getElementById('campaignDetails').style.display = 'block';
+      function toggleSection(id) {
+        const el = document.getElementById(id);
+        const icon = document.getElementById('icon' + id.replace('sec', ''));
+        if (el.style.display === 'none') {
+          el.style.display = 'block';
+          if (icon) icon.textContent = '▼';
+        } else {
+          el.style.display = 'none';
+          if (icon) icon.textContent = '▶';
+        }
       }
 
-      function showStatus(msg) {
+      function showStatus(msg, type) {
         const box = document.getElementById('statusBox');
         box.textContent = msg;
-        box.className = 'status info';
+        box.className = 'status ' + (type || 'info');
       }
 
-      function triggerDiscovery() {
-        const id = document.getElementById('campaignSelect').value;
-        if (!id) { alert('Please select a campaign first.'); return; }
-        showStatus('Running Gemini Company Discovery... Please check the spreadsheet alert.');
+      function refreshCampaigns() {
+        showStatus('Refreshing campaigns list...', 'info');
+        google.script.run
+          .withSuccessHandler(function(campaigns) {
+            renderCampaignOptions(campaigns);
+          })
+          .withFailureHandler(function(err) {
+            showStatus('Failed to load campaigns: ' + err.message, 'error');
+          })
+          .getAvailableCampaignsList();
+      }
+
+      function onCampaignSelected() {
+        const cid = document.getElementById('campaignSelect').value;
+        if (!cid) return;
+        document.getElementById('campaignIdInput').value = cid;
+        showStatus('Loading campaign details for ' + cid + '...', 'info');
+        
+        google.script.run
+          .withSuccessHandler(function(data) {
+            if (!data) return;
+            document.getElementById('campaignNameInput').value = data.name || '';
+            document.getElementById('targetCountries').value = data.country || '';
+            document.getElementById('targetIndustries').value = data.industry || '';
+            document.getElementById('companySize').value = data.size || '';
+            document.getElementById('companyLimit').value = data.limit || 5;
+            document.getElementById('targetTitles').value = data.titles || '';
+            document.getElementById('aiProviderSelect').value = data.aiProvider || 'GEMINI';
+            document.getElementById('aiModelInput').value = data.aiModel || 'gemini-2.5-flash';
+            document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
+            document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
+
+            document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
+            document.getElementById('incScope3').checked = data.incScope3 !== false;
+            document.getElementById('incSupplyChain').checked = data.incSupplyChain !== false;
+            document.getElementById('incDataChallenges').checked = data.incDataChallenges !== false;
+            document.getElementById('incDigital').checked = data.incDigital !== false;
+            document.getElementById('incTriggers').checked = data.incTriggers !== false;
+            document.getElementById('incEvaluater').checked = data.incEvaluater !== false;
+
+            showStatus('Loaded configuration for ' + cid, 'success');
+          })
+          .withFailureHandler(function(err) {
+            showStatus('Error loading campaign data: ' + err.message, 'error');
+          })
+          .getCampaignFullConfig(cid);
+      }
+
+      function onProviderChanged() {
+        const p = document.getElementById('aiProviderSelect').value;
+        const m = document.getElementById('aiModelInput');
+        if (p === 'GEMINI') m.value = 'gemini-2.5-flash';
+        if (p === 'OPENAI') m.value = 'gpt-4o';
+      }
+
+      function saveConfiguration() {
+        const cid = document.getElementById('campaignIdInput').value.trim();
+        const cname = document.getElementById('campaignNameInput').value.trim();
+        if (!cid) {
+          alert('Please enter a Campaign ID (e.g. CMP-001)');
+          return;
+        }
+
+        const payload = {
+          id: cid,
+          name: cname,
+          country: document.getElementById('targetCountries').value.trim(),
+          industry: document.getElementById('targetIndustries').value.trim(),
+          size: document.getElementById('companySize').value.trim(),
+          limit: document.getElementById('companyLimit').value || 5,
+          titles: document.getElementById('targetTitles').value.trim(),
+          aiProvider: document.getElementById('aiProviderSelect').value,
+          aiModel: document.getElementById('aiModelInput').value.trim(),
+          emailVerifier: document.getElementById('emailVerifierSelect').value,
+          emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
+          incEsgObligations: document.getElementById('incEsgObligations').checked,
+          incScope3: document.getElementById('incScope3').checked,
+          incSupplyChain: document.getElementById('incSupplyChain').checked,
+          incDataChallenges: document.getElementById('incDataChallenges').checked,
+          incDigital: document.getElementById('incDigital').checked,
+          incTriggers: document.getElementById('incTriggers').checked,
+          incEvaluater: document.getElementById('incEvaluater').checked
+        };
+
+        showStatus('Saving campaign settings to sheet...', 'info');
+        google.script.run
+          .withSuccessHandler(function(res) {
+            showStatus(res.message, 'success');
+            refreshCampaigns();
+          })
+          .withFailureHandler(function(err) {
+            showStatus('Save failed: ' + err.message, 'error');
+          })
+          .saveCampaignFullConfig(payload);
+      }
+
+      function runDiscovery() {
+        const cid = document.getElementById('campaignIdInput').value.trim();
+        if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
+        showStatus('Starting Company Discovery... Check spreadsheet popup.', 'info');
         google.script.run.runCompanyDiscoveryForSelectedCampaign();
       }
 
-      function triggerPersonaMapper() {
-        const id = document.getElementById('campaignSelect').value;
-        if (!id) { alert('Please select a campaign first.'); return; }
-        showStatus('Running Persona Mapper... Please check the spreadsheet alert.');
+      function runPersonaMapper() {
+        const cid = document.getElementById('campaignIdInput').value.trim();
+        if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
+        showStatus('Starting Persona Mapper... Check spreadsheet popup.', 'info');
         google.script.run.runPersonaMapperForSelectedCampaign();
       }
 
       function openReviewQueue() {
-        google.script.run.navigateToReviewQueueSheet();
+        showStatus('Navigating to Prospect Review Queue...', 'info');
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (res && res.success) {
+              showStatus(res.message, 'success');
+            } else {
+              showStatus(res ? res.message : 'Review Queue sheet was not found.', 'error');
+            }
+          })
+          .withFailureHandler(function(err) {
+            showStatus('Failed to switch tab: ' + err.message, 'error');
+          })
+          .navigateToReviewQueueSheet();
       }
     </script>
   </body>
