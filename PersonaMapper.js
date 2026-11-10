@@ -1,7 +1,7 @@
 const PERSONA_MAPPER_HEADERS_ = {
   companies: ['Campaign ID','Campaign Name','Company ID','Company Name','Country','Industry','Company Size','ESG Frameworks','Reporting Obligations','ESG Reporting Maturity','Supply Chain Profile','Scope 3 Exposure','Sustainability Data Needs','Digital Transformation Signals','ESG Governance','Business Triggers','eValuater Solution Fit','Company Opportunity Score','Company Opportunity','Evidence URLs','Evidence Checked Date','Verification Status','Human Review Status','Last Enriched At','Company Score Rationale'],
   personas: ['Campaign ID','Campaign Name','Company ID','Company Name','Industry','Persona ID','Name','Title','Persona Type','LinkedIn URL','Signal','Signal Date','Evidence URL','Buying Signal','Verification Status','Confidence','Persona Fit Score','Personalized Hook','Review Status','Last Verified At','Business Email','Email Domain','Email Source URL','Email Discovery Method','Email Verification Status','Email Verification Date','Email Verification Provider','Email Identity Confidence','Email Verification Notes'],
-  settings: ['Campaign ID','Campaign Name','Persona Mapper Enabled','AI Provider','AI Model','Persona Titles','Search Keywords','Campaign Focus','Evidence Period Months','Research Depth','Include ESG Reporting Obligations','Include ESG Reporting Maturity','Include Supply Chain Complexity','Include Scope 3 Exposure','Include Sustainability Data Challenges','Include Digital Transformation','Include ESG Governance','Include Business Triggers','Include eValuater Solution Fit','Weight ESG Reporting Relevance','Weight Supply Chain Complexity','Weight Sustainability Data Needs','Weight Digital Transformation Relevance','Weight Business Triggers','Weight eValuater Solution Fit','Minimum Company Opportunity Score','Minimum Persona Confidence','Minimum Email Priority Score','Human Approval Required','Auto Send Enabled','Email Priority Weight Company Score','Email Priority Weight Persona Fit','Email Priority Weight Buying Signal','Notes','Max Companies Per Run','Email Verification Provider','Email Verification Endpoint'],
+  settings: ['Campaign ID','Campaign Name','Persona Mapper Enabled','AI Provider','AI Model','Persona Titles','Search Keywords','Campaign Focus','Evidence Period Months','Research Depth','Include ESG Reporting Obligations','Include ESG Reporting Maturity','Include Supply Chain Complexity','Include Scope 3 Exposure','Include Sustainability Data Challenges','Include Digital Transformation','Include ESG Governance','Include Business Triggers','Include eValuater Solution Fit','Weight ESG Reporting Relevance','Weight Supply Chain Complexity','Weight Sustainability Data Needs','Weight Digital Transformation Relevance','Weight Business Triggers','Weight eValuater Solution Fit','Minimum Company Opportunity Score','Minimum Persona Confidence','Minimum Email Priority Score','Human Approval Required','Auto Send Enabled','Email Priority Weight Company Score','Email Priority Weight Persona Fit','Email Priority Weight Buying Signal','Notes','Max Companies Per Run','Email Verification Provider','Email Verification Endpoint','Email Sender Provider','Email Sender Endpoint'],
   queue: ['Campaign ID','Campaign Name','Company ID','Company Name','Persona ID','Name','Title','Business Email','Company Opportunity Score','Persona Fit Score','Buying Signal','Priority Score','Priority Tier','Priority Score Rationale','Draft Subject','Draft Email','Evidence URLs','Review Status','Reviewer','Reviewer Notes','Reviewed At','Human Approval Status','Approved By','Approved At','Send Status','Sent At','Send Error','Country','Industry','Company Opportunity','Persona Type','LinkedIn URL','Email Domain','Email Source URL','Email Discovery Method','Email Verification Status','Email Verification Date','Email Verification Provider','Email Identity Confidence','Email Verification Notes','Queue Status','Compliance Status','Suppression Check','Date Added','Personalized Hook']
 };
 const PERSONA_MAPPER_SHEETS_ = { companies:'Company Intelligence', personas:'Persona Leads', settings:'Persona Mapper Settings', queue:'Prospect Review Queue' };
@@ -18,7 +18,6 @@ function runPersonaMapperForSelectedCampaign() {
     const settings = getPersonaMapperSettings_(spreadsheet, campaignId);
     if (!toBoolean_(settings['Persona Mapper Enabled'])) { ui.alert('Persona Mapper is disabled for this campaign. Set Persona Mapper Enabled to TRUE in Persona Mapper Settings, then try again.'); return; }
     
-    // Determine AI Provider & Model dynamically (Defaulting to gemini-3.8-flash)
     const providerChoice = String(settings['AI Provider'] || (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultAIProvider) || 'GEMINI').toUpperCase();
     const defaultModel = providerChoice === 'GEMINI' ? ((typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel) || 'gemini-3.8-flash') : 'gpt-4o';
     let modelChoice = String(settings['AI Model'] || defaultModel).trim();
@@ -233,7 +232,9 @@ function prepareEmailIntelligence_(persona,company,settings) {
   let confidence = titleCaseSignal_(persona.emailIdentityConfidence);
   if (!sourceUrl || !domainMatches || /inferred/i.test(normalizedMethod)) confidence = 'Low';
   if (!['High','Medium','Low'].includes(confidence)) confidence = 'Low';
-  const verifier = callConfiguredEmailVerifier_(candidate,settings);
+  
+  // Connect to Pluggable Verifier
+  const verifier = callConfiguredEmailVerifier_(candidate, settings);
   let status = /inferred/i.test(normalizedMethod) ? 'Inferred – Unverified' : 'Unknown';
   let queueStatus = 'Email Verification Required';
   let notes = [];
@@ -241,6 +242,7 @@ function prepareEmailIntelligence_(persona,company,settings) {
   if (!sourceUrl) notes.push('No direct source URL was provided for the email address.');
   if (mx.checked && !mx.hasMx) notes.push('No MX record was found for the domain; this is a domain check, not a mailbox result.');
   if (!mx.checked) notes.push('Domain mail configuration could not be checked.');
+  
   if (!verifier.configured) {
     notes.push('No email verification provider is configured. Syntax and domain checks do not establish mailbox deliverability.');
   } else {
@@ -264,25 +266,97 @@ function prepareEmailIntelligence_(persona,company,settings) {
     emailVerificationNotes:notes.filter(Boolean).join(' '),queueStatus:queueStatus,country:persona.country || ''};
 }
 
-function callConfiguredEmailVerifier_(email,settings) {
-  const endpoint = String(settings['Email Verification Endpoint'] || '').trim();
-  const provider = String(settings['Email Verification Provider'] || '').trim();
+/**
+ * Universal Pluggable Email Verifier
+ * Supports: ZeroBounce, MillionVerifier, NeverBounce, and Custom HTTPS APIs.
+ */
+function callConfiguredEmailVerifier_(email, settings) {
+  const provider = String(settings['Email Verification Provider'] || 'ZeroBounce').trim();
   const apiKey = PropertiesService.getScriptProperties().getProperty('EMAIL_VERIFICATION_API_KEY') || '';
-  if (!endpoint || !provider || !apiKey) return {configured:false,status:'unknown',provider:provider,notes:'Email verifier is not configured.'};
-  if (endpoint.indexOf('https://') !== 0) return {configured:true,status:'unknown',provider:provider,notes:'Email verifier endpoint must use HTTPS.'};
+  let endpoint = String(settings['Email Verification Endpoint'] || '').trim();
+
+  if (!apiKey && provider !== 'None') {
+    return { configured: false, status: 'unknown', provider: provider, notes: 'EMAIL_VERIFICATION_API_KEY is missing in Script Properties.' };
+  }
+
+  const p = provider.toLowerCase();
+
   try {
-    const response = UrlFetchApp.fetch(endpoint,{method:'post',contentType:'application/json',headers:{Authorization:'Bearer ' + apiKey},payload:JSON.stringify({email:email}),muteHttpExceptions:true});
-    if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) return {configured:true,status:'unknown',provider:provider,notes:'Email verification provider returned an unsuccessful response.'};
-    const body = JSON.parse(response.getContentText() || '{}');
-    const rawStatus = String(body.status || body.result || 'unknown').toLowerCase();
-    let status = 'unknown';
-    if (['deliverable','valid','safe','ok'].indexOf(rawStatus) >= 0) status = 'deliverable';
-    if (['risky','catch_all','catch-all','accept_all','accept-all','disposable'].indexOf(rawStatus) >= 0) status = 'risky';
-    if (['undeliverable','invalid','undeliverable_email'].indexOf(rawStatus) >= 0) status = 'undeliverable';
-    return {configured:true,status:status,provider:String(body.provider || provider),catchAll:Boolean(body.catch_all || body.is_catch_all),disposable:Boolean(body.disposable || body.is_disposable),notes:String(body.reason || body.notes || ('Provider status: ' + rawStatus))};
-  } catch (error) {
-    console.error('Configured email verification provider failed. Email details were not logged.');
-    return {configured:true,status:'unknown',provider:provider,notes:'Email verification provider could not complete the request.'};
+    // 1. ZeroBounce Native Integration
+    if (p.indexOf('zerobounce') >= 0) {
+      endpoint = endpoint || 'https://api.zerobounce.net/v2/validate';
+      const url = endpoint + '?api_key=' + encodeURIComponent(apiKey) + '&email=' + encodeURIComponent(email) + '&ip_address=';
+      const response = UrlFetchApp.fetch(url, { method: 'get', muteHttpExceptions: true });
+      if (response.getResponseCode() >= 300) return { configured: true, status: 'unknown', provider: 'ZeroBounce', notes: 'ZeroBounce returned status ' + response.getResponseCode() };
+      
+      const body = JSON.parse(response.getContentText() || '{}');
+      const st = String(body.status || '').toLowerCase();
+      let status = 'unknown';
+      if (st === 'valid') status = 'deliverable';
+      if (st === 'invalid') status = 'undeliverable';
+      if (st === 'catch-all' || st === 'spamtrap' || st === 'abuse' || st === 'do_not_mail') status = 'risky';
+
+      return { configured: true, status: status, provider: 'ZeroBounce', catchAll: st === 'catch-all', disposable: Boolean(body.sub_status === 'disposable'), notes: 'ZeroBounce result: ' + st };
+    }
+
+    // 2. MillionVerifier Native Integration
+    if (p.indexOf('millionverifier') >= 0) {
+      endpoint = endpoint || 'https://api.millionverifier.com/api/v3/';
+      const url = endpoint + '?api=' + encodeURIComponent(apiKey) + '&email=' + encodeURIComponent(email);
+      const response = UrlFetchApp.fetch(url, { method: 'get', muteHttpExceptions: true });
+      if (response.getResponseCode() >= 300) return { configured: true, status: 'unknown', provider: 'MillionVerifier', notes: 'MillionVerifier returned status ' + response.getResponseCode() };
+
+      const body = JSON.parse(response.getContentText() || '{}');
+      const res = String(body.result || '').toLowerCase();
+      let status = 'unknown';
+      if (res === 'ok') status = 'deliverable';
+      if (res === 'invalid') status = 'undeliverable';
+      if (res === 'catch_all' || res === 'disposable') status = 'risky';
+
+      return { configured: true, status: status, provider: 'MillionVerifier', catchAll: res === 'catch_all', disposable: res === 'disposable', notes: 'MillionVerifier result: ' + res };
+    }
+
+    // 3. NeverBounce Native Integration
+    if (p.indexOf('neverbounce') >= 0) {
+      endpoint = endpoint || 'https://api.neverbounce.com/v4/single/check';
+      const url = endpoint + '?key=' + encodeURIComponent(apiKey) + '&email=' + encodeURIComponent(email);
+      const response = UrlFetchApp.fetch(url, { method: 'get', muteHttpExceptions: true });
+      if (response.getResponseCode() >= 300) return { configured: true, status: 'unknown', provider: 'NeverBounce', notes: 'NeverBounce returned status ' + response.getResponseCode() };
+
+      const body = JSON.parse(response.getContentText() || '{}');
+      const res = String(body.result || '').toLowerCase();
+      let status = 'unknown';
+      if (res === 'valid') status = 'deliverable';
+      if (res === 'invalid') status = 'undeliverable';
+      if (res === 'catchall' || res === 'disposable') status = 'risky';
+
+      return { configured: true, status: status, provider: 'NeverBounce', catchAll: res === 'catchall', disposable: res === 'disposable', notes: 'NeverBounce result: ' + res };
+    }
+
+    // 4. Custom HTTPS Endpoint
+    if (endpoint && /^https:\/\//i.test(endpoint)) {
+      const response = UrlFetchApp.fetch(endpoint, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: 'Bearer ' + apiKey },
+        payload: JSON.stringify({ email: email }),
+        muteHttpExceptions: true
+      });
+      if (response.getResponseCode() >= 300) return { configured: true, status: 'unknown', provider: provider, notes: 'Custom verifier returned status ' + response.getResponseCode() };
+
+      const body = JSON.parse(response.getContentText() || '{}');
+      const rawStatus = String(body.status || body.result || 'unknown').toLowerCase();
+      let status = 'unknown';
+      if (['deliverable','valid','safe','ok'].indexOf(rawStatus) >= 0) status = 'deliverable';
+      if (['risky','catch_all','catch-all','accept_all','disposable'].indexOf(rawStatus) >= 0) status = 'risky';
+      if (['undeliverable','invalid'].indexOf(rawStatus) >= 0) status = 'undeliverable';
+
+      return { configured: true, status: status, provider: provider, catchAll: Boolean(body.catch_all), disposable: Boolean(body.disposable), notes: 'Custom result: ' + rawStatus };
+    }
+
+    return { configured: false, status: 'unknown', provider: provider, notes: 'Verifier provider not configured.' };
+  } catch (err) {
+    return { configured: true, status: 'unknown', provider: provider, notes: 'Verification request failed: ' + err.message };
   }
 }
 
@@ -359,7 +433,7 @@ function getPersonaMapperCampaignId_(spreadsheet,ui) {
 
 function getPersonaMapperSettings_(spreadsheet,campaignId) {
   const sheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.settings), records = getSheetRecords_(sheet);
-  const match = records.find(function(row){return String(row['Campaign ID'] || '').trim() === String(campaignId).trim();});
+  const match = records.find(function(row){return String(row['Campaign ID'] || '').trim().toLowerCase() === String(campaignId).trim().toLowerCase();});
   if (!match) throw new Error('Add a settings row for campaign ' + campaignId + ' in Persona Mapper Settings.');
   return match;
 }
