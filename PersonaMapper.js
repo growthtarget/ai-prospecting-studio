@@ -18,10 +18,13 @@ function runPersonaMapperForSelectedCampaign() {
     const settings = getPersonaMapperSettings_(spreadsheet, campaignId);
     if (!toBoolean_(settings['Persona Mapper Enabled'])) { ui.alert('Persona Mapper is disabled for this campaign. Set Persona Mapper Enabled to TRUE in Persona Mapper Settings, then try again.'); return; }
     
-    // Determine AI Provider & Model dynamically (Defaulting to Gemini if unassigned)
+    // Determine AI Provider & Model dynamically (Defaulting to gemini-3.8-flash)
     const providerChoice = String(settings['AI Provider'] || (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultAIProvider) || 'GEMINI').toUpperCase();
-    const defaultModel = providerChoice === 'GEMINI' ? ((typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel) || 'gemini-2.5-flash') : 'gpt-4o';
-    const modelChoice = String(settings['AI Model'] || defaultModel).trim();
+    const defaultModel = providerChoice === 'GEMINI' ? ((typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel) || 'gemini-3.8-flash') : 'gpt-4o';
+    let modelChoice = String(settings['AI Model'] || defaultModel).trim();
+    if (modelChoice === 'gemini-2.5-flash' || modelChoice === 'gemini-1.5-flash') {
+      modelChoice = 'gemini-3.8-flash';
+    }
 
     const companies = getPersonaMapperCompanies_(spreadsheet, campaignId, settings);
     if (!companies.length) { ui.alert('No companies are saved under campaign ' + campaignId + ' in Company Database yet.'); return; }
@@ -36,7 +39,6 @@ function runPersonaMapperForSelectedCampaign() {
     for (let index = start; index < end; index++) {
       const company = companies[index];
       try {
-        // Universal AI Call (Dispatches to Gemini or OpenAI automatically)
         const aiResponse = callAI({
           provider: providerChoice,
           model: modelChoice,
@@ -346,7 +348,7 @@ function preparePersonaMapperSheets(){ensurePersonaMapperSheets_(SpreadsheetApp.
 
 function getPersonaMapperCampaignId_(spreadsheet,ui) {
   const sheet = spreadsheet.getActiveSheet();
-  if (['Campaigns','Company Database'].indexOf(sheet.getName()) >= 0) {
+  if (['Campaigns','Company Database','Persona Mapper Settings','Campaign Configuration'].indexOf(sheet.getName()) >= 0) {
     const range = sheet.getActiveRange();
     if (range && range.getRow() > 1) { const headers = sheet.getRange(1,1,1,sheet.getLastColumn()).getDisplayValues()[0]; const values = sheet.getRange(range.getRow(),1,1,headers.length).getValues()[0]; const record = {}; headers.forEach(function(header,index){record[header] = values[index];}); if (record['Campaign ID']) return String(record['Campaign ID']).trim(); }
   }

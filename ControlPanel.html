@@ -124,7 +124,7 @@
         </div>
         <div class="field">
           <label for="aiModelInput">AI Model Name</label>
-          <input type="text" id="aiModelInput" value="gemini-2.5-flash">
+          <input type="text" id="aiModelInput" value="gemini-3.8-flash">
         </div>
       </div>
     </div>
@@ -171,15 +171,11 @@
     </div>
 
     <script>
-      // Load pre-fetched campaigns rendered directly from the server to bypass PERMISSION_DENIED
-      var serverPreloaded = <?!= JSON.stringify(initialCampaigns || []) ?>;
+      var serverCampaigns = <?!= JSON.stringify(initialCampaigns || []) ?>;
+      var serverConfigsMap = <?!= JSON.stringify(initialConfigsMap || {}) ?>;
 
       window.onload = function() {
-        if (serverPreloaded && serverPreloaded.length > 0) {
-          renderCampaignOptions(serverPreloaded);
-        } else {
-          refreshCampaigns();
-        }
+        renderCampaignOptions(serverCampaigns);
       };
 
       function renderCampaignOptions(campaigns) {
@@ -194,7 +190,7 @@
           });
           showStatus('Loaded ' + campaigns.length + ' campaign(s).', 'success');
         } else {
-          showStatus('No campaigns found. Type Campaign ID & Name and click Save.', 'info');
+          showStatus('Type your unique Campaign ID & Name, set your criteria, then click Save.', 'info');
         }
       }
 
@@ -232,42 +228,35 @@
         const cid = document.getElementById('campaignSelect').value;
         if (!cid) return;
         document.getElementById('campaignIdInput').value = cid;
-        showStatus('Loading campaign details for ' + cid + '...', 'info');
         
-        google.script.run
-          .withSuccessHandler(function(data) {
-            if (!data) return;
-            document.getElementById('campaignNameInput').value = data.name || '';
-            document.getElementById('targetCountries').value = data.country || '';
-            document.getElementById('targetIndustries').value = data.industry || '';
-            document.getElementById('companySize').value = data.size || '';
-            document.getElementById('companyLimit').value = data.limit || 5;
-            document.getElementById('targetTitles').value = data.titles || '';
-            document.getElementById('aiProviderSelect').value = data.aiProvider || 'GEMINI';
-            document.getElementById('aiModelInput').value = data.aiModel || 'gemini-2.5-flash';
-            document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
-            document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
+        const data = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : {};
 
-            document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
-            document.getElementById('incScope3').checked = data.incScope3 !== false;
-            document.getElementById('incSupplyChain').checked = data.incSupplyChain !== false;
-            document.getElementById('incDataChallenges').checked = data.incDataChallenges !== false;
-            document.getElementById('incDigital').checked = data.incDigital !== false;
-            document.getElementById('incTriggers').checked = data.incTriggers !== false;
-            document.getElementById('incEvaluater').checked = data.incEvaluater !== false;
+        document.getElementById('campaignNameInput').value = data.name || '';
+        document.getElementById('targetCountries').value = data.country || '';
+        document.getElementById('targetIndustries').value = data.industry || '';
+        document.getElementById('companySize').value = data.size || '';
+        document.getElementById('companyLimit').value = data.limit || 5;
+        document.getElementById('targetTitles').value = data.titles || '';
+        document.getElementById('aiProviderSelect').value = data.aiProvider || 'GEMINI';
+        document.getElementById('aiModelInput').value = data.aiModel || 'gemini-3.8-flash';
+        document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
+        document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
 
-            showStatus('Loaded configuration for ' + cid, 'success');
-          })
-          .withFailureHandler(function(err) {
-            showStatus('Error loading campaign data: ' + err.message, 'error');
-          })
-          .getCampaignFullConfig(cid);
+        document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
+        document.getElementById('incScope3').checked = data.incScope3 !== false;
+        document.getElementById('incSupplyChain').checked = data.incSupplyChain !== false;
+        document.getElementById('incDataChallenges').checked = data.incDataChallenges !== false;
+        document.getElementById('incDigital').checked = data.incDigital !== false;
+        document.getElementById('incTriggers').checked = data.incTriggers !== false;
+        document.getElementById('incEvaluater').checked = data.incEvaluater !== false;
+
+        showStatus('Loaded configuration for ' + cid, 'success');
       }
 
       function onProviderChanged() {
         const p = document.getElementById('aiProviderSelect').value;
         const m = document.getElementById('aiModelInput');
-        if (p === 'GEMINI') m.value = 'gemini-2.5-flash';
+        if (p === 'GEMINI') m.value = 'gemini-3.8-flash';
         if (p === 'OPENAI') m.value = 'gpt-4o';
       }
 
@@ -281,14 +270,14 @@
 
         const payload = {
           id: cid,
-          name: cname,
+          name: cname || cid,
           country: document.getElementById('targetCountries').value.trim(),
           industry: document.getElementById('targetIndustries').value.trim(),
           size: document.getElementById('companySize').value.trim(),
           limit: document.getElementById('companyLimit').value || 5,
           titles: document.getElementById('targetTitles').value.trim(),
           aiProvider: document.getElementById('aiProviderSelect').value,
-          aiModel: document.getElementById('aiModelInput').value.trim(),
+          aiModel: document.getElementById('aiModelInput').value.trim() || 'gemini-3.8-flash',
           emailVerifier: document.getElementById('emailVerifierSelect').value,
           emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
           incEsgObligations: document.getElementById('incEsgObligations').checked,
@@ -300,6 +289,8 @@
           incEvaluater: document.getElementById('incEvaluater').checked
         };
 
+        serverConfigsMap[cid] = payload;
+
         showStatus('Saving campaign settings to sheet...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
@@ -307,7 +298,7 @@
             refreshCampaigns();
           })
           .withFailureHandler(function(err) {
-            showStatus('Save failed: ' + err.message, 'error');
+            showStatus('Save error: ' + err.message, 'error');
           })
           .saveCampaignFullConfig(payload);
       }

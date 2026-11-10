@@ -4,14 +4,22 @@
  */
 function callGemini_(options) {
   const apiKey = PropertiesService.getScriptProperties().getProperty(
-    APP_CONFIG.geminiApiKeyProperty || 'GEMINI_API_KEY'
+    (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.geminiApiKeyProperty) || 'GEMINI_API_KEY'
   );
   
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is missing. Add it under Project Settings > Script Properties.');
   }
 
-  const model = options.model || APP_CONFIG.defaultGeminiModel || 'gemini-2.5-flash';
+  // Updated to the latest active Gemini flash model
+  const defaultModel = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel) || 'gemini-3.8-flash';
+  let model = options.model || defaultModel;
+  
+  // Auto-upgrade legacy model names if passed from older settings
+  if (model === 'gemini-2.5-flash' || model === 'gemini-1.5-flash') {
+    model = 'gemini-3.8-flash';
+  }
+
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent?key=' + apiKey;
 
   // 1. Build Payload
@@ -74,7 +82,6 @@ function callGemini_(options) {
         citations.push(chunk.web.uri);
       }
     });
-    const webSearchQueries = candidate.groundingMetadata.webSearchQueries || [];
   }
 
   // Parse JSON if requested

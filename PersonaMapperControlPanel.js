@@ -1,12 +1,15 @@
 /**
  * Opens the comprehensive Prospecting Control Panel in the sidebar.
- * Pre-loads campaign data on the server to prevent PERMISSION_DENIED storage errors.
  */
 function showPersonaMapperControlPanel() {
   const template = HtmlService.createTemplateFromFile('ControlPanel');
   
-  // Pre-fetch campaign list directly within the spreadsheet context
-  template.initialCampaigns = getAvailableCampaignsList();
+  // Pre-load all campaigns and criteria server-side
+  const configsMap = getAllCampaignConfigsMap_();
+  template.initialCampaigns = Object.keys(configsMap).map(function(id) {
+    return { id: id, name: configsMap[id].name || id };
+  });
+  template.initialConfigsMap = configsMap;
 
   const html = template.evaluate()
     .setTitle('AI Prospecting Studio')
@@ -16,102 +19,7 @@ function showPersonaMapperControlPanel() {
 }
 
 /**
- * Returns available campaigns for the dropdown from ALL possible tabs (Campaigns, Config, Settings).
- * Handles casing differences and eliminates duplicates.
- */
-function getAvailableCampaignsList() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const campaignMap = {};
-
-  // Check 'Campaigns' sheet
-  const campSheet = spreadsheet.getSheetByName('Campaigns');
-  if (campSheet) {
-    const records = getSheetRecords_(campSheet);
-    records.forEach(function(r) {
-      const id = String(r['Campaign ID'] || r['Campaign id'] || r['campaign id'] || '').trim();
-      const name = String(r['Campaign name'] || r['Campaign Name'] || r['campaign name'] || '').trim();
-      if (id) campaignMap[id] = name || campaignMap[id] || '';
-    });
-  }
-
-  // Check 'Campaign Configuration' sheet
-  const confSheet = spreadsheet.getSheetByName('Campaign Configuration');
-  if (confSheet) {
-    const records = getSheetRecords_(confSheet);
-    records.forEach(function(r) {
-      const id = String(r['Campaign ID'] || r['Campaign id'] || '').trim();
-      const name = String(r['Campaign Name'] || r['Campaign name'] || '').trim();
-      if (id) campaignMap[id] = name || campaignMap[id] || '';
-    });
-  }
-
-  // Check 'Persona Mapper Settings' sheet
-  const setSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
-  if (setSheet) {
-    const records = getSheetRecords_(setSheet);
-    records.forEach(function(r) {
-      const id = String(r['Campaign ID'] || '').trim();
-      const name = String(r['Campaign Name'] || '').trim();
-      if (id) campaignMap[id] = name || campaignMap[id] || '';
-    });
-  }
-
-  return Object.keys(campaignMap).map(function(id) {
-    return { id: id, name: campaignMap[id] };
-  });
-}
-
-/**
- * Loads all targeting, ESG signals, AI model, and verification settings for a campaign.
- */
-function getCampaignFullConfig(campaignId) {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const cleanId = String(campaignId || '').trim();
-  const result = { id: cleanId };
-
-  // Read from Campaign Configuration
-  const confSheet = spreadsheet.getSheetByName('Campaign Configuration');
-  if (confSheet) {
-    const match = getSheetRecords_(confSheet).find(function(r) {
-      return String(r['Campaign ID'] || '').trim() === cleanId;
-    });
-    if (match) {
-      result.name = match['Campaign Name'] || match['Campaign name'] || '';
-      result.country = match['Countries/regions'] || '';
-      result.industry = match['Target industries'] || '';
-      result.size = match['Company size'] || '';
-      result.limit = match['Company limit'] || 5;
-    }
-  }
-
-  // Read from Persona Mapper Settings
-  const setSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
-  if (setSheet) {
-    const match = getSheetRecords_(setSheet).find(function(r) {
-      return String(r['Campaign ID'] || '').trim() === cleanId;
-    });
-    if (match) {
-      result.name = result.name || match['Campaign Name'] || '';
-      result.titles = match['Persona Titles'] || '';
-      result.aiProvider = match['AI Provider'] || 'GEMINI';
-      result.aiModel = match['AI Model'] || 'gemini-2.5-flash';
-      result.emailVerifier = match['Email Verification Provider'] || 'ZeroBounce';
-      result.emailEndpoint = match['Email Verification Endpoint'] || '';
-      result.incEsgObligations = toBoolean_(match['Include ESG Reporting Obligations']);
-      result.incScope3 = toBoolean_(match['Include Scope 3 Exposure']);
-      result.incSupplyChain = toBoolean_(match['Include Supply Chain Complexity']);
-      result.incDataChallenges = toBoolean_(match['Include Sustainability Data Challenges']);
-      result.incDigital = toBoolean_(match['Include Digital Transformation']);
-      result.incTriggers = toBoolean_(match['Include Business Triggers']);
-      result.incEvaluater = toBoolean_(match['Include eValuater Solution Fit']);
-    }
-  }
-
-  return result;
-}
-
-/**
- * Saves or updates settings across Campaign Configuration & Persona Mapper Settings simultaneously.
+ * Saves and OVERWRITES all unique criteria entered in the sidebar across all sheets.
  */
 function saveCampaignFullConfig(payload) {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -120,58 +28,156 @@ function saveCampaignFullConfig(payload) {
   const cid = String(payload.id).trim();
   const cname = String(payload.name).trim();
 
-  // 1. Update 'Campaigns' summary sheet
+  // 1. Update 'Campaigns' sheet
   const campSheet = spreadsheet.getSheetByName('Campaigns');
   if (campSheet) {
     upsertSimpleRow_(campSheet, 'Campaign ID', cid, {
       'Campaign ID': cid,
       'Campaign name': cname,
+      'Objective': 'Active Lead Generation',
       'Status': 'Active',
+      'Company limit': payload.limit || 5,
+      'Research depth': 'Standard',
       'Last updated': new Date()
     });
   }
 
-  // 2. Update 'Campaign Configuration' sheet
+  // 2. Overwrite 'Campaign Configuration' sheet with unique criteria
   const confSheet = spreadsheet.getSheetByName('Campaign Configuration');
   if (confSheet) {
     upsertSimpleRow_(confSheet, 'Campaign ID', cid, {
       'Campaign ID': cid,
-      'Campaign Name': cname,
-      'Countries/regions': payload.country,
       'Target industries': payload.industry,
+      'Countries/regions': payload.country,
       'Company size': payload.size,
-      'Company limit': payload.limit
+      'Relevant activities': 'Commercial operations and corporate reporting',
+      'Required criteria': 'Must match specified industry and country filters',
+      'Exclusions': 'Consulting agencies, pure SaaS software',
+      'Research instructions': 'Identify verified corporate headquarters and executive team',
+      'Evidence expectations': 'Official corporate website and public registries',
+      'Scoring criteria and weights': 'Size fit: 40%, Industry fit: 60%',
+      'Required output fields': 'Company Name, Website, Country, Size',
+      'Selected model': payload.aiModel || 'gemini-2.5-flash'
     });
   }
 
-  // 3. Update 'Persona Mapper Settings' sheet
+  // 3. Overwrite 'Persona Mapper Settings' sheet with unique criteria
   const setSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
   if (setSheet) {
     upsertSimpleRow_(setSheet, 'Campaign ID', cid, {
       'Campaign ID': cid,
       'Campaign Name': cname,
       'Persona Mapper Enabled': 'TRUE',
-      'AI Provider': payload.aiProvider,
-      'AI Model': payload.aiModel,
+      'AI Provider': payload.aiProvider || 'GEMINI',
+      'AI Model': payload.aiModel || 'gemini-2.5-flash',
       'Persona Titles': payload.titles,
+      'Search Keywords': 'CSRD, Scope 3, supply chain, emissions',
+      'Campaign Focus': 'Supply chain compliance and data automation',
+      'Evidence Period Months': 12,
+      'Research Depth': 'Standard',
       'Include ESG Reporting Obligations': payload.incEsgObligations ? 'TRUE' : 'FALSE',
-      'Include Scope 3 Exposure': payload.incScope3 ? 'TRUE' : 'FALSE',
+      'Include ESG Reporting Maturity': payload.incEsgObligations ? 'TRUE' : 'FALSE',
       'Include Supply Chain Complexity': payload.incSupplyChain ? 'TRUE' : 'FALSE',
+      'Include Scope 3 Exposure': payload.incScope3 ? 'TRUE' : 'FALSE',
       'Include Sustainability Data Challenges': payload.incDataChallenges ? 'TRUE' : 'FALSE',
       'Include Digital Transformation': payload.incDigital ? 'TRUE' : 'FALSE',
+      'Include ESG Governance': 'TRUE',
       'Include Business Triggers': payload.incTriggers ? 'TRUE' : 'FALSE',
       'Include eValuater Solution Fit': payload.incEvaluater ? 'TRUE' : 'FALSE',
-      'Email Verification Provider': payload.emailVerifier,
-      'Email Verification Endpoint': payload.emailEndpoint
+      'Weight ESG Reporting Relevance': 20,
+      'Weight Supply Chain Complexity': 20,
+      'Weight Sustainability Data Needs': 20,
+      'Weight Digital Transformation Relevance': 15,
+      'Weight Business Triggers': 15,
+      'Weight eValuater Solution Fit': 10,
+      'Minimum Company Opportunity Score': 70,
+      'Minimum Persona Confidence': 'Medium',
+      'Minimum Email Priority Score': 70,
+      'Human Approval Required': 'TRUE',
+      'Auto Send Enabled': 'FALSE',
+      'Email Priority Weight Company Score': 50,
+      'Email Priority Weight Persona Fit': 30,
+      'Email Priority Weight Buying Signal': 20,
+      'Notes': 'Saved via Sidebar Control Panel',
+      'Max Companies Per Run': payload.limit || 5,
+      'Email Verification Provider': payload.emailVerifier || 'ZeroBounce',
+      'Email Verification Endpoint': payload.emailEndpoint || 'https://api.zerobounce.net/v2/validate'
     });
   }
 
-  return { success: true, message: 'Settings saved successfully for ' + cid + '!' };
+  return { success: true, message: 'Settings saved and updated for ' + cid + '!' };
 }
 
 /**
- * Switches the user's active view to the Prospect Review Queue tab.
+ * Reads all campaign data across all sheets into a single server-side bundle.
  */
+function getAllCampaignConfigsMap_() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const configMap = {};
+
+  const campSheet = spreadsheet.getSheetByName('Campaigns');
+  if (campSheet) {
+    const records = getSheetRecords_(campSheet);
+    records.forEach(function(r) {
+      const id = String(r['Campaign ID'] || r['Campaign id'] || '').trim();
+      const name = String(r['Campaign name'] || r['Campaign Name'] || '').trim();
+      if (id) {
+        if (!configMap[id]) configMap[id] = { id: id };
+        configMap[id].name = name;
+      }
+    });
+  }
+
+  const confSheet = spreadsheet.getSheetByName('Campaign Configuration');
+  if (confSheet) {
+    const records = getSheetRecords_(confSheet);
+    records.forEach(function(r) {
+      const id = String(r['Campaign ID'] || r['Campaign id'] || '').trim();
+      if (id) {
+        if (!configMap[id]) configMap[id] = { id: id };
+        configMap[id].name = configMap[id].name || r['Campaign Name'] || r['Campaign name'] || '';
+        configMap[id].country = r['Countries/regions'] || '';
+        configMap[id].industry = r['Target industries'] || '';
+        configMap[id].size = r['Company size'] || '';
+        configMap[id].limit = r['Company limit'] || 5;
+      }
+    });
+  }
+
+  const setSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
+  if (setSheet) {
+    const records = getSheetRecords_(setSheet);
+    records.forEach(function(r) {
+      const id = String(r['Campaign ID'] || '').trim();
+      if (id) {
+        if (!configMap[id]) configMap[id] = { id: id };
+        configMap[id].name = configMap[id].name || r['Campaign Name'] || '';
+        configMap[id].titles = r['Persona Titles'] || '';
+        configMap[id].aiProvider = r['AI Provider'] || 'GEMINI';
+        configMap[id].aiModel = r['AI Model'] || 'gemini-2.5-flash';
+        configMap[id].emailVerifier = r['Email Verification Provider'] || 'ZeroBounce';
+        configMap[id].emailEndpoint = r['Email Verification Endpoint'] || '';
+        configMap[id].incEsgObligations = toBoolean_(r['Include ESG Reporting Obligations']);
+        configMap[id].incScope3 = toBoolean_(r['Include Scope 3 Exposure']);
+        configMap[id].incSupplyChain = toBoolean_(r['Include Supply Chain Complexity']);
+        configMap[id].incDataChallenges = toBoolean_(r['Include Sustainability Data Challenges']);
+        configMap[id].incDigital = toBoolean_(r['Include Digital Transformation']);
+        configMap[id].incTriggers = toBoolean_(r['Include Business Triggers']);
+        configMap[id].incEvaluater = toBoolean_(r['Include eValuater Solution Fit']);
+      }
+    });
+  }
+
+  return configMap;
+}
+
+function getAvailableCampaignsList() {
+  const configsMap = getAllCampaignConfigsMap_();
+  return Object.keys(configsMap).map(function(id) {
+    return { id: id, name: configsMap[id].name || id };
+  });
+}
+
 function navigateToReviewQueueSheet() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   ensurePersonaMapperSheets_(spreadsheet);
@@ -188,13 +194,10 @@ function navigateToReviewQueueSheet() {
   return { success: false, message: 'Prospect Review Queue sheet not found.' };
 }
 
-/**
- * Helper to update or append a row in a sheet by key
- */
 function upsertSimpleRow_(sheet, keyHeader, keyValue, record) {
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
-  if (lastRow < 1 || lastCol < 1) return;
+  if (lastCol < 1) return;
 
   const headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
     return String(h || '').trim();
