@@ -11,7 +11,7 @@
       label { display: block; font-size: 11px; font-weight: 600; color: #5f6368; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.3px; }
       select, input[type="text"], input[type="number"], textarea { width: 100%; padding: 7px 9px; border: 1px solid #dadce0; border-radius: 4px; font-size: 12px; color: #202124; background: #fff; }
       select:focus, input:focus, textarea:focus { outline: none; border-color: #1a73e8; }
-      textarea { resize: vertical; min-height: 48px; }
+      textarea { resize: vertical; min-height: 44px; }
       .checkbox-grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; }
       .checkbox-item { display: flex; align-items: flex-start; font-size: 12px; color: #3c4043; cursor: pointer; }
       .checkbox-item input { margin-right: 6px; margin-top: 2px; }
@@ -26,10 +26,12 @@
       .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; }
       .row { display: flex; gap: 8px; }
       .row .field { flex: 1; }
-      .status { font-size: 11px; padding: 8px; border-radius: 4px; margin-top: 8px; display: none; }
+      .status { font-size: 11px; padding: 8px; border-radius: 4px; margin-top: 8px; display: none; line-height: 1.4; }
       .status.info { display: block; background: #e8f0fe; color: #1a73e8; border: 1px solid #d2e3fc; }
       .status.success { display: block; background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
       .status.error { display: block; background: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }
+      .hint { font-size: 11px; color: #5f6368; margin-top: 3px; font-style: italic; }
+      hr { border: 0; border-top: 1px solid #eee; margin: 12px 0; }
     </style>
   </head>
   <body>
@@ -86,6 +88,14 @@
           <label for="targetTitles">Target Persona Titles</label>
           <textarea id="targetTitles" placeholder="e.g. Chief Sustainability Officer; VP Procurement; Head of ESG Reporting"></textarea>
         </div>
+        <div class="field">
+          <label for="campaignFocus">Campaign Focus / Objective Hook</label>
+          <input type="text" id="campaignFocus" placeholder="e.g. Supply chain compliance, AI adoption, ERP migration">
+        </div>
+        <div class="field">
+          <label for="searchKeywords">Additional Search Keywords</label>
+          <input type="text" id="searchKeywords" placeholder="e.g. CSRD, Scope 3, supplier audits, carbon footprint">
+        </div>
       </div>
     </div>
 
@@ -129,33 +139,46 @@
       </div>
     </div>
 
-    <!-- Email Verification & Outreach Provider -->
+    <!-- Email Verification & Sender Config -->
     <div class="card">
       <div class="section-toggle" onclick="toggleSection('secEmail')">
         <span>4. Email Verification & Sender</span>
-        <span id="iconEmail">▶</span>
+        <span id="iconEmail">▼</span>
       </div>
-      <div id="secEmail" style="display:none;">
+      <div id="secEmail">
+        <!-- Part A: Email Verifier -->
         <div class="field">
           <label for="emailVerifierSelect">Email Verification Provider</label>
-          <select id="emailVerifierSelect">
+          <select id="emailVerifierSelect" onchange="onVerifierChanged()">
             <option value="ZeroBounce" selected>ZeroBounce (Pay-As-You-Go API)</option>
             <option value="MillionVerifier">MillionVerifier (Budget Pick)</option>
             <option value="NeverBounce">NeverBounce</option>
             <option value="Custom">Custom HTTPS REST Endpoint</option>
+            <option value="None">None (Skip Verification)</option>
           </select>
         </div>
-        <div class="field">
-          <label for="emailEndpoint">Verification Endpoint</label>
+        <div class="field" id="verifierEndpointField">
+          <label for="emailEndpoint">Verifier Endpoint (Optional if standard)</label>
           <input type="text" id="emailEndpoint" placeholder="https://api.zerobounce.net/v2/validate">
         </div>
+
+        <hr>
+
+        <!-- Part B: Email Sender -->
         <div class="field">
-          <label for="senderModeSelect">Outreach Mode</label>
-          <select id="senderModeSelect">
-            <option value="GmailDrafts" selected>Create Gmail Drafts ($0 - Safe & Human Reviewed)</option>
-            <option value="ReviewOnly">Spreadsheet Human Approval Only</option>
-            <option value="Webhook">Webhook / External Sequencer</option>
+          <label for="senderProviderSelect" style="color:#1a73e8; font-weight:700;">Email Sender Provider</label>
+          <select id="senderProviderSelect" onchange="onSenderChanged()">
+            <option value="Workspace Gmail (Direct Send)">Workspace Gmail (Direct Send)</option>
+            <option value="Workspace Gmail (Drafts Only)" selected>Workspace Gmail (Drafts Only)</option>
+            <option value="Smartlead">Smartlead (enter campaign ID below)</option>
+            <option value="Instantly">Instantly (enter campaign ID below)</option>
+            <option value="Custom Webhook">Custom Webhook (enter webhook URL below)</option>
           </select>
+        </div>
+        <div class="field" id="senderEndpointField">
+          <label for="senderEndpointInput" id="senderEndpointLabel">Email Sender Endpoint / Campaign ID</label>
+          <input type="text" id="senderEndpointInput" placeholder="Leave empty for Workspace Gmail">
+          <div class="hint" id="senderEndpointHint">For Workspace Gmail, leave this blank. For Smartlead/Instantly, enter your Campaign ID. For Webhook, enter your HTTPS URL.</div>
         </div>
       </div>
     </div>
@@ -176,6 +199,7 @@
 
       window.onload = function() {
         renderCampaignOptions(serverCampaigns);
+        onSenderChanged();
       };
 
       function renderCampaignOptions(campaigns) {
@@ -237,10 +261,17 @@
         document.getElementById('companySize').value = data.size || '';
         document.getElementById('companyLimit').value = data.limit || 5;
         document.getElementById('targetTitles').value = data.titles || '';
+        document.getElementById('campaignFocus').value = data.campaignFocus || '';
+        document.getElementById('searchKeywords').value = data.searchKeywords || '';
+
         document.getElementById('aiProviderSelect').value = data.aiProvider || 'GEMINI';
         document.getElementById('aiModelInput').value = data.aiModel || 'gemini-3.8-flash';
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
+        
+        document.getElementById('senderProviderSelect').value = data.emailSenderProvider || 'Workspace Gmail (Drafts Only)';
+        document.getElementById('senderEndpointInput').value = data.emailSenderEndpoint || '';
+        onSenderChanged();
 
         document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
         document.getElementById('incScope3').checked = data.incScope3 !== false;
@@ -260,6 +291,40 @@
         if (p === 'OPENAI') m.value = 'gpt-4o';
       }
 
+      function onVerifierChanged() {
+        const v = document.getElementById('emailVerifierSelect').value;
+        const ep = document.getElementById('emailEndpoint');
+        if (v === 'ZeroBounce') ep.placeholder = 'https://api.zerobounce.net/v2/validate';
+        if (v === 'MillionVerifier') ep.placeholder = 'https://api.millionverifier.com/api/v3/';
+        if (v === 'NeverBounce') ep.placeholder = 'https://api.neverbounce.com/v4/single/check';
+        if (v === 'Custom') ep.placeholder = 'https://your-custom-api.com/verify';
+      }
+
+      function onSenderChanged() {
+        const p = document.getElementById('senderProviderSelect').value;
+        const label = document.getElementById('senderEndpointLabel');
+        const input = document.getElementById('senderEndpointInput');
+        const hint = document.getElementById('senderEndpointHint');
+
+        if (p.indexOf('Gmail') >= 0) {
+          label.textContent = 'Email Sender Endpoint (Not Required for Gmail)';
+          input.placeholder = 'Not required — sends directly via your Google Workspace';
+          hint.textContent = 'Your current Google Workspace email will be used automatically. No endpoint required.';
+        } else if (p === 'Smartlead') {
+          label.textContent = 'Smartlead Campaign ID';
+          input.placeholder = 'e.g. 123456';
+          hint.textContent = 'Enter the Campaign ID from your Smartlead dashboard.';
+        } else if (p === 'Instantly') {
+          label.textContent = 'Instantly Campaign ID';
+          input.placeholder = 'e.g. 987654-abcd-ef01';
+          hint.textContent = 'Enter the Campaign UUID from your Instantly dashboard.';
+        } else if (p === 'Custom Webhook') {
+          label.textContent = 'Webhook URL (Make, Zapier, CRM)';
+          input.placeholder = 'https://hook.eu1.make.com/...';
+          hint.textContent = 'Enter the full HTTPS URL where approved leads will be posted.';
+        }
+      }
+
       function saveConfiguration() {
         const cid = document.getElementById('campaignIdInput').value.trim();
         const cname = document.getElementById('campaignNameInput').value.trim();
@@ -276,10 +341,14 @@
           size: document.getElementById('companySize').value.trim(),
           limit: document.getElementById('companyLimit').value || 5,
           titles: document.getElementById('targetTitles').value.trim(),
+          campaignFocus: document.getElementById('campaignFocus').value.trim(),
+          searchKeywords: document.getElementById('searchKeywords').value.trim(),
           aiProvider: document.getElementById('aiProviderSelect').value,
           aiModel: document.getElementById('aiModelInput').value.trim() || 'gemini-3.8-flash',
           emailVerifier: document.getElementById('emailVerifierSelect').value,
           emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
+          emailSenderProvider: document.getElementById('senderProviderSelect').value,
+          emailSenderEndpoint: document.getElementById('senderEndpointInput').value.trim(),
           incEsgObligations: document.getElementById('incEsgObligations').checked,
           incScope3: document.getElementById('incScope3').checked,
           incSupplyChain: document.getElementById('incSupplyChain').checked,
@@ -303,18 +372,46 @@
           .saveCampaignFullConfig(payload);
       }
 
+      // DIRECT SIDEBAR EXECUTION (No blocking spreadsheet popups)
       function runDiscovery() {
         const cid = document.getElementById('campaignIdInput').value.trim();
         if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
-        showStatus('Starting Company Discovery... Check spreadsheet popup.', 'info');
-        google.script.run.runCompanyDiscoveryForSelectedCampaign();
+        
+        showStatus('🔍 Gemini is searching the web for target companies... Please wait.', 'info');
+        
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (res && res.success) {
+              showStatus('✅ ' + res.message, 'success');
+            } else {
+              showStatus('⚠️ ' + (res ? res.message : 'Discovery finished with no companies.'), 'error');
+            }
+          })
+          .withFailureHandler(function(err) {
+            showStatus('Discovery Error: ' + err.message, 'error');
+          })
+          .runCompanyDiscoveryFromSidebar(cid);
       }
 
+      // DIRECT SIDEBAR EXECUTION (No blocking spreadsheet popups)
       function runPersonaMapper() {
         const cid = document.getElementById('campaignIdInput').value.trim();
         if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
-        showStatus('Starting Persona Mapper... Check spreadsheet popup.', 'info');
-        google.script.run.runPersonaMapperForSelectedCampaign();
+        
+        showStatus('👤 Running Persona Mapper for decision-makers and emails... Please wait.', 'info');
+        
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (res && res.success) {
+              showStatus('✅ ' + res.message, 'success');
+            } else {
+              showStatus('⚠️ ' + (res ? res.message : 'Persona Mapper finished with no leads.'), 'error');
+            }
+          })
+          .withFailureHandler(function(err) {
+            showStatus('Persona Mapper Error: ' + err.message, 'error');
+          })
+          .runPersonaMapperFromSidebar(cid);
       }
 
       function openReviewQueue() {

@@ -4,7 +4,6 @@
 function showPersonaMapperControlPanel() {
   const template = HtmlService.createTemplateFromFile('ControlPanel');
   
-  // Pre-load all campaigns and criteria server-side
   const configsMap = getAllCampaignConfigsMap_();
   template.initialCampaigns = Object.keys(configsMap).map(function(id) {
     return { id: id, name: configsMap[id].name || id };
@@ -57,11 +56,11 @@ function saveCampaignFullConfig(payload) {
       'Evidence expectations': 'Official corporate website and public registries',
       'Scoring criteria and weights': 'Size fit: 40%, Industry fit: 60%',
       'Required output fields': 'Company Name, Website, Country, Size',
-      'Selected model': payload.aiModel || 'gemini-2.5-flash'
+      'Selected model': payload.aiModel || 'gemini-3.8-flash'
     });
   }
 
-  // 3. Overwrite 'Persona Mapper Settings' sheet with unique criteria
+  // 3. Overwrite 'Persona Mapper Settings' sheet with unique criteria (NO HARDCODING)
   const setSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
   if (setSheet) {
     upsertSimpleRow_(setSheet, 'Campaign ID', cid, {
@@ -69,10 +68,10 @@ function saveCampaignFullConfig(payload) {
       'Campaign Name': cname,
       'Persona Mapper Enabled': 'TRUE',
       'AI Provider': payload.aiProvider || 'GEMINI',
-      'AI Model': payload.aiModel || 'gemini-2.5-flash',
+      'AI Model': payload.aiModel || 'gemini-3.8-flash',
       'Persona Titles': payload.titles,
-      'Search Keywords': 'CSRD, Scope 3, supply chain, emissions',
-      'Campaign Focus': 'Supply chain compliance and data automation',
+      'Search Keywords': payload.searchKeywords || '',
+      'Campaign Focus': payload.campaignFocus || '',
       'Evidence Period Months': 12,
       'Research Depth': 'Standard',
       'Include ESG Reporting Obligations': payload.incEsgObligations ? 'TRUE' : 'FALSE',
@@ -101,7 +100,9 @@ function saveCampaignFullConfig(payload) {
       'Notes': 'Saved via Sidebar Control Panel',
       'Max Companies Per Run': payload.limit || 5,
       'Email Verification Provider': payload.emailVerifier || 'ZeroBounce',
-      'Email Verification Endpoint': payload.emailEndpoint || 'https://api.zerobounce.net/v2/validate'
+      'Email Verification Endpoint': payload.emailEndpoint || 'https://api.zerobounce.net/v2/validate',
+      'Email Sender Provider': payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)',
+      'Email Sender Endpoint': payload.emailSenderEndpoint || ''
     });
   }
 
@@ -153,10 +154,14 @@ function getAllCampaignConfigsMap_() {
         if (!configMap[id]) configMap[id] = { id: id };
         configMap[id].name = configMap[id].name || r['Campaign Name'] || '';
         configMap[id].titles = r['Persona Titles'] || '';
+        configMap[id].searchKeywords = r['Search Keywords'] || '';
+        configMap[id].campaignFocus = r['Campaign Focus'] || '';
         configMap[id].aiProvider = r['AI Provider'] || 'GEMINI';
-        configMap[id].aiModel = r['AI Model'] || 'gemini-2.5-flash';
+        configMap[id].aiModel = r['AI Model'] || 'gemini-3.8-flash';
         configMap[id].emailVerifier = r['Email Verification Provider'] || 'ZeroBounce';
         configMap[id].emailEndpoint = r['Email Verification Endpoint'] || '';
+        configMap[id].emailSenderProvider = r['Email Sender Provider'] || 'Workspace Gmail (Drafts Only)';
+        configMap[id].emailSenderEndpoint = r['Email Sender Endpoint'] || '';
         configMap[id].incEsgObligations = toBoolean_(r['Include ESG Reporting Obligations']);
         configMap[id].incScope3 = toBoolean_(r['Include Scope 3 Exposure']);
         configMap[id].incSupplyChain = toBoolean_(r['Include Supply Chain Complexity']);

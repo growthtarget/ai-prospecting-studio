@@ -6,6 +6,93 @@ const PERSONA_MAPPER_HEADERS_ = {
 };
 const PERSONA_MAPPER_SHEETS_ = { companies:'Company Intelligence', personas:'Persona Leads', settings:'Persona Mapper Settings', queue:'Prospect Review Queue' };
 
+/**
+ * Called directly from the Sidebar Control Panel (No blocking popups; returns results to sidebar)
+ */
+function runPersonaMapperFromSidebar(campaignId) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(1000)) {
+    return { success: false, message: 'Persona Mapper is already running. Try again after it finishes.' };
+  }
+  try {
+    ensurePersonaMapperSheets_(spreadsheet);
+    const settings = getPersonaMapperSettings_(spreadsheet, campaignId);
+    if (!toBoolean_(settings['Persona Mapper Enabled'])) {
+      return { success: false, message: 'Persona Mapper is disabled for this campaign. Enable it in settings.' };
+    }
+
+    const providerChoice = String(settings['AI Provider'] || (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultAIProvider) || 'GEMINI').toUpperCase();
+    const defaultModel = providerChoice === 'GEMINI' ? ((typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel) || 'gemini-3.8-flash') : 'gpt-4o';
+    let modelChoice = String(settings['AI Model'] || defaultModel).trim();
+    if (modelChoice === 'gemini-2.5-flash' || modelChoice === 'gemini-1.5-flash') {
+      modelChoice = 'gemini-3.8-flash';
+    }
+
+    const companies = getPersonaMapperCompanies_(spreadsheet, campaignId, settings);
+    if (!companies.length) {
+      return { success: false, message: 'No qualified companies found for campaign ' + campaignId + ' in Company Database. Run Step 1 first!' };
+    }
+
+    const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
+    const properties = PropertiesService.getDocumentProperties();
+    const cursorKey = 'PERSONA_MAPPER_CURSOR_' + campaignId;
+    let start = Number(properties.getProperty(cursorKey) || 0);
+    if (start >= companies.length) start = 0;
+    const end = Math.min(companies.length, start + batchLimit);
+    let processed = 0;
+
+    for (let index = start; index < end; index++) {
+      const company = companies[index];
+      const aiResponse = callAI({
+        provider: providerChoice,
+        model: modelChoice,
+        prompt: buildPersonaMapperPrompt_(company, settings),
+        enableWebSearch: true,
+        json: true
+      });
+
+      const result = aiResponse.json || {};
+      const citations = aiResponse.citations || [];
+      const companyScore = scoreCompanyOpportunity_(result.company || {}, settings);
+      const companyRecord = makeCompanyIntelligenceRecord_(company, result.company || {}, companyScore, citations, settings);
+      
+      upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.companies), PERSONA_MAPPER_HEADERS_.companies, 'company', companyRecord);
+      const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
+
+      (Array.isArray(result.personas) ? result.personas : []).forEach(function(persona) {
+        const confidence = titleCaseSignal_(persona.confidence);
+        if (confidence === 'Low' || confidenceRank_(confidence) < confidenceRank_(settings['Minimum Persona Confidence'] || 'Medium')) return;
+        if (companyScore.score < minCompanyScore) return;
+        const fitScore = scorePersonaFit_(persona.fitDimensions || {});
+        const emailInfo = prepareEmailIntelligence_(persona, company, settings);
+        const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings);
+        upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
+        const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings);
+        upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
+      });
+
+      processed++;
+      properties.setProperty(cursorKey, String(index + 1));
+    }
+
+    if (end >= companies.length) {
+      properties.deleteProperty(cursorKey);
+      return { success: true, count: processed, message: 'Persona Mapper completed ' + processed + ' company record(s) for campaign ' + campaignId + '! Leads added to Review Queue.' };
+    } else {
+      properties.setProperty(cursorKey, String(end));
+      return { success: true, count: processed, message: 'Processed ' + processed + ' companies. Click Step 2 again to run next batch.' };
+    }
+  } catch (err) {
+    return { success: false, message: 'Persona Mapper error: ' + err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Called from the Top Menu (Uses standard dialogs)
+ */
 function runPersonaMapperForSelectedCampaign() {
   const ui = SpreadsheetApp.getUi();
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -233,7 +320,6 @@ function prepareEmailIntelligence_(persona,company,settings) {
   if (!sourceUrl || !domainMatches || /inferred/i.test(normalizedMethod)) confidence = 'Low';
   if (!['High','Medium','Low'].includes(confidence)) confidence = 'Low';
   
-  // Connect to Pluggable Verifier
   const verifier = callConfiguredEmailVerifier_(candidate, settings);
   let status = /inferred/i.test(normalizedMethod) ? 'Inferred – Unverified' : 'Unknown';
   let queueStatus = 'Email Verification Required';
@@ -266,10 +352,6 @@ function prepareEmailIntelligence_(persona,company,settings) {
     emailVerificationNotes:notes.filter(Boolean).join(' '),queueStatus:queueStatus,country:persona.country || ''};
 }
 
-/**
- * Universal Pluggable Email Verifier
- * Supports: ZeroBounce, MillionVerifier, NeverBounce, and Custom HTTPS APIs.
- */
 function callConfiguredEmailVerifier_(email, settings) {
   const provider = String(settings['Email Verification Provider'] || 'ZeroBounce').trim();
   const apiKey = PropertiesService.getScriptProperties().getProperty('EMAIL_VERIFICATION_API_KEY') || '';
@@ -282,7 +364,6 @@ function callConfiguredEmailVerifier_(email, settings) {
   const p = provider.toLowerCase();
 
   try {
-    // 1. ZeroBounce Native Integration
     if (p.indexOf('zerobounce') >= 0) {
       endpoint = endpoint || 'https://api.zerobounce.net/v2/validate';
       const url = endpoint + '?api_key=' + encodeURIComponent(apiKey) + '&email=' + encodeURIComponent(email) + '&ip_address=';
@@ -299,7 +380,6 @@ function callConfiguredEmailVerifier_(email, settings) {
       return { configured: true, status: status, provider: 'ZeroBounce', catchAll: st === 'catch-all', disposable: Boolean(body.sub_status === 'disposable'), notes: 'ZeroBounce result: ' + st };
     }
 
-    // 2. MillionVerifier Native Integration
     if (p.indexOf('millionverifier') >= 0) {
       endpoint = endpoint || 'https://api.millionverifier.com/api/v3/';
       const url = endpoint + '?api=' + encodeURIComponent(apiKey) + '&email=' + encodeURIComponent(email);
@@ -316,7 +396,6 @@ function callConfiguredEmailVerifier_(email, settings) {
       return { configured: true, status: status, provider: 'MillionVerifier', catchAll: res === 'catch_all', disposable: res === 'disposable', notes: 'MillionVerifier result: ' + res };
     }
 
-    // 3. NeverBounce Native Integration
     if (p.indexOf('neverbounce') >= 0) {
       endpoint = endpoint || 'https://api.neverbounce.com/v4/single/check';
       const url = endpoint + '?key=' + encodeURIComponent(apiKey) + '&email=' + encodeURIComponent(email);
@@ -333,7 +412,6 @@ function callConfiguredEmailVerifier_(email, settings) {
       return { configured: true, status: status, provider: 'NeverBounce', catchAll: res === 'catchall', disposable: res === 'disposable', notes: 'NeverBounce result: ' + res };
     }
 
-    // 4. Custom HTTPS Endpoint
     if (endpoint && /^https:\/\//i.test(endpoint)) {
       const response = UrlFetchApp.fetch(endpoint, {
         method: 'post',

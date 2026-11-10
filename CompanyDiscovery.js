@@ -1,6 +1,57 @@
 /**
  * Agent 1: Company Discovery & Research Agent
- * Reads targeting criteria from 'Campaign Configuration' and discovers matching companies using Gemini.
+ */
+
+/**
+ * Called directly from the Sidebar Control Panel (No blocking popups; returns results to sidebar)
+ */
+function runCompanyDiscoveryFromSidebar(campaignId) {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const lock = LockService.getDocumentLock();
+  
+  if (!lock.tryLock(1000)) {
+    return { success: false, message: 'A research run is already in progress. Please wait.' };
+  }
+
+  try {
+    const config = getCampaignConfigurationRecord_(spreadsheet, campaignId);
+    if (!config) {
+      return { success: false, message: 'No configuration found for Campaign ID: ' + campaignId + ' in "Campaign Configuration".' };
+    }
+
+    const companyLimit = Math.min(15, Math.max(1, Number(config['Company limit'] || config['Maximum companies'] || 5)));
+    const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
+
+    const aiResponse = callAI({
+      provider: 'GEMINI',
+      model: 'gemini-3.8-flash',
+      prompt: prompt,
+      enableWebSearch: true,
+      json: true
+    });
+
+    const discoveredCompanies = (aiResponse.json && Array.isArray(aiResponse.json.companies)) ? aiResponse.json.companies : [];
+    if (!discoveredCompanies.length) {
+      return { success: false, message: 'Gemini search found no matching companies. Try broadening your criteria in the sidebar.' };
+    }
+
+    const addedCount = saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config);
+    updateCampaignDiscoveryCounts_(spreadsheet, campaignId);
+
+    return {
+      success: true,
+      count: addedCount,
+      message: 'Discovered and added ' + addedCount + ' qualified companies to "Company Database"! Next: Run Step 2.'
+    };
+  } catch (error) {
+    return { success: false, message: 'Discovery failed: ' + error.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Called from the Top Menu (Uses standard Google Sheets dialogs)
  */
 function runCompanyDiscoveryForSelectedCampaign() {
   const ui = SpreadsheetApp.getUi();
@@ -34,13 +85,10 @@ function runCompanyDiscoveryForSelectedCampaign() {
       ui.ButtonSet.OK
     );
 
-    // 1. Build the Discovery Prompt
     const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
-
-    // 2. Execute Universal AI Search with Google Grounding
     const aiResponse = callAI({
       provider: 'GEMINI',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       prompt: prompt,
       enableWebSearch: true,
       json: true
@@ -52,72 +100,7 @@ function runCompanyDiscoveryForSelectedCampaign() {
       return;
     }
 
-    // 3. Save Discovered Companies into 'Company Database' & Log Evidence
-    const dbSheet = spreadsheet.getSheetByName('Company Database');
-    const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
-    if (!dbSheet) throw new Error('Sheet "Company Database" not found.');
-
-    const existingCompanies = getSheetRecords_(dbSheet);
-    let addedCount = 0;
-
-    discoveredCompanies.forEach(function(item) {
-      const companyName = String(item.companyName || '').trim();
-      const website = String(item.website || '').trim();
-      const domain = domainFromUrl_(website);
-
-      // Duplicate Prevention: Check if company or domain already exists in this campaign
-      const isDuplicate = existingCompanies.some(function(row) {
-        const rowDomain = domainFromUrl_(row['Website'] || '');
-        return (row['Campaign ID'] === campaignId) && (
-          (domain && rowDomain && domain === rowDomain) ||
-          (row['Company name'] && row['Company name'].toLowerCase() === companyName.toLowerCase())
-        );
-      });
-
-      if (isDuplicate || !companyName) return;
-
-      const companyId = 'COMP-' + Utilities.getUuid().slice(0, 6).toUpperCase();
-      const now = new Date();
-
-      // Write to Company Database
-      dbSheet.appendRow([
-        companyId,
-        campaignId,
-        companyName,
-        website,
-        item.headquarters || config['Countries/regions'] || '',
-        item.industry || config['Target industries'] || '',
-        item.companySize || config['Company size'] || '',
-        item.businessSummary || '',
-        item.qualificationResult || 'Qualified',
-        item.qualificationExplanation || 'Discovered via Google Search Grounding matching campaign criteria.',
-        item.initialScore || 80,
-        'Web Verified',
-        'Discovered',
-        now,
-        now
-      ]);
-
-      // Write Supporting Evidence if available
-      if (evidenceSheet && item.sourceUrl) {
-        evidenceSheet.appendRow([
-          'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(),
-          companyId,
-          'Company profile discovery',
-          item.businessSummary || companyName,
-          item.sourceUrl,
-          'Official Website / Web Registry',
-          now,
-          'Yes',
-          'High',
-          'Identified during initial campaign search'
-        ]);
-      }
-
-      addedCount++;
-    });
-
-    // 4. Update Campaign Counts in "Campaigns" & "Dashboard"
+    const addedCount = saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config);
     updateCampaignDiscoveryCounts_(spreadsheet, campaignId);
 
     ui.alert(
@@ -128,7 +111,6 @@ function runCompanyDiscoveryForSelectedCampaign() {
     );
 
   } catch (error) {
-    console.error('Company Discovery Error: ' + error.message);
     ui.alert('Error during Company Discovery: ' + error.message);
   } finally {
     lock.releaseLock();
@@ -136,8 +118,73 @@ function runCompanyDiscoveryForSelectedCampaign() {
 }
 
 /**
- * Builds the structured Google Search Grounding prompt
+ * Shared helper: Saves discovered companies into sheets
  */
+function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config) {
+  const dbSheet = spreadsheet.getSheetByName('Company Database');
+  const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
+  if (!dbSheet) throw new Error('Sheet "Company Database" not found.');
+
+  const existingCompanies = getSheetRecords_(dbSheet);
+  let addedCount = 0;
+
+  discoveredCompanies.forEach(function(item) {
+    const companyName = String(item.companyName || '').trim();
+    const website = String(item.website || '').trim();
+    const domain = domainFromUrl_(website);
+
+    const isDuplicate = existingCompanies.some(function(row) {
+      const rowDomain = domainFromUrl_(row['Website'] || '');
+      return (row['Campaign ID'] === campaignId) && (
+        (domain && rowDomain && domain === rowDomain) ||
+        (row['Company name'] && row['Company name'].toLowerCase() === companyName.toLowerCase())
+      );
+    });
+
+    if (isDuplicate || !companyName) return;
+
+    const companyId = 'COMP-' + Utilities.getUuid().slice(0, 6).toUpperCase();
+    const now = new Date();
+
+    dbSheet.appendRow([
+      companyId,
+      campaignId,
+      companyName,
+      website,
+      item.headquarters || config['Countries/regions'] || '',
+      item.industry || config['Target industries'] || '',
+      item.companySize || config['Company size'] || '',
+      item.businessSummary || '',
+      item.qualificationResult || 'Qualified',
+      item.qualificationExplanation || 'Discovered via Google Search Grounding matching campaign criteria.',
+      item.initialScore || 80,
+      'Web Verified',
+      'Discovered',
+      now,
+      now
+    ]);
+
+    if (evidenceSheet && item.sourceUrl) {
+      evidenceSheet.appendRow([
+        'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(),
+        companyId,
+        'Company profile discovery',
+        item.businessSummary || companyName,
+        item.sourceUrl,
+        'Official Website / Web Registry',
+        now,
+        'Yes',
+        'High',
+        'Identified during initial campaign search'
+      ]);
+    }
+
+    addedCount++;
+  });
+
+  return addedCount;
+}
+
 function buildCompanyDiscoveryPrompt_(config, limit) {
   return [
     'Act as the Senior B2B Account Research & Discovery Agent.',
@@ -175,9 +222,6 @@ function buildCompanyDiscoveryPrompt_(config, limit) {
   ].join('\n');
 }
 
-/**
- * Helper to fetch Campaign Configuration
- */
 function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
   const sheet = spreadsheet.getSheetByName('Campaign Configuration');
   if (!sheet) return null;
@@ -187,12 +231,9 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
   });
 }
 
-/**
- * Helper to detect active Campaign ID
- */
 function getActiveCampaignId_(spreadsheet, ui) {
   const sheet = spreadsheet.getActiveSheet();
-  const allowed = ['Campaigns', 'Campaign Configuration', 'Company Database', 'Dashboard'];
+  const allowed = ['Campaigns', 'Campaign Configuration', 'Company Database', 'Dashboard', 'Persona Mapper Settings'];
   if (allowed.indexOf(sheet.getName()) >= 0) {
     const range = sheet.getActiveRange();
     if (range && range.getRow() > 1) {
@@ -208,9 +249,6 @@ function getActiveCampaignId_(spreadsheet, ui) {
   return String(prompt.getResponseText() || '').trim();
 }
 
-/**
- * Updates summary counts on Campaigns sheet
- */
 function updateCampaignDiscoveryCounts_(spreadsheet, campaignId) {
   const compSheet = spreadsheet.getSheetByName('Company Database');
   const campSheet = spreadsheet.getSheetByName('Campaigns');
@@ -219,11 +257,6 @@ function updateCampaignDiscoveryCounts_(spreadsheet, campaignId) {
   const records = getSheetRecords_(compSheet).filter(function(r) {
     return String(r['Campaign ID'] || '').trim() === String(campaignId).trim();
   });
-
-  const foundCount = records.length;
-  const qualifiedCount = records.filter(function(r) {
-    return String(r['Qualification result'] || '').toLowerCase() === 'qualified';
-  }).length;
 
   const campRows = campSheet.getRange(2, 1, Math.max(1, campSheet.getLastRow() - 1), campSheet.getLastColumn()).getValues();
   const campHeaders = campSheet.getRange(1, 1, 1, campSheet.getLastColumn()).getDisplayValues()[0];
