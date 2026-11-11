@@ -3,17 +3,17 @@
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
  * AGENT 1: COMPANY DISCOVERY & RESEARCH AGENT (MULTI-AI PROVIDER ENGINE)
  * ============================================================================
- * File: CompanyDiscovery.gs
+ * File: CompanyDiscovery.gs / CompanyDiscovery.js
  * 
  * CAPABILITIES:
- * 1. Multi-AI Support: Dynamically routes to OPENAI (GPT-4o) or GEMINI (with Grounding)
- *    reading API keys from Script Properties (Project Settings) or Agent Settings.
+ * 1. Multi-AI Support: Dynamically routes to GEMINI (gemini-3.8-flash with Grounding)
+ *    or OPENAI (GPT-4o) reading API keys from Script Properties or Agent Settings.
  * 2. Multi-Department Intelligence: Normalizes and reads DEPARTMENT, CUSTOM_BUSINESS_NEEDS,
  *    and targeting parameters reliably from "Campaign Configuration".
  * 3. Dual-Tab Population: Writes master entries to "Company Database" AND
  *    populates all 25 columns of "Company Intelligence".
  * 4. Grounding Evidence Logging: Stores audit citation URLs in "Research Evidence".
- * 5. High-Contrast Headers: Sets clean Dark Navy font on Light Blue for readability.
+ * 5. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
  * ============================================================================
  */
 
@@ -21,7 +21,7 @@
  * Called directly from the Sidebar Control Panel (No blocking popups; returns results to sidebar)
  */
 function runCompanyDiscoveryFromSidebar(campaignId) {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   const lock = LockService.getDocumentLock();
   
   if (!lock.tryLock(5000)) {
@@ -37,7 +37,7 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
     const companyLimit = Math.min(25, Math.max(1, Number(config.companyLimit || 5)));
     const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
 
-    const provider = String(config.aiProvider || 'OPENAI').toUpperCase();
+    const provider = String(config.aiProvider || 'GEMINI').toUpperCase();
     const model = resolveAiModel_(provider, config.aiModel);
     const providerLabel = provider === 'OPENAI' ? 'OpenAI (' + model + ')' : 'Google Gemini (' + model + ')';
 
@@ -79,15 +79,22 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
 }
 
 /**
- * Called from the Top Menu (Uses standard Google Sheets dialogs)
+ * Called from the Top Menu (Uses standard Google Sheets dialogs with safe context fallback)
  */
 function runCompanyDiscoveryForSelectedCampaign() {
-  const ui = SpreadsheetApp.getUi();
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  let ui = null;
+  try {
+    ui = SpreadsheetApp.getUi();
+  } catch (e) {
+    // Running in headless/editor context where UI is unavailable
+  }
+
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   const lock = LockService.getDocumentLock();
   
   if (!lock.tryLock(5000)) {
-    ui.alert('A research run is already in progress. Please wait for it to finish.');
+    if (ui) ui.alert('A research run is already in progress. Please wait for it to finish.');
+    else Logger.log('A research run is already in progress.');
     return;
   }
 
@@ -97,25 +104,28 @@ function runCompanyDiscoveryForSelectedCampaign() {
 
     const config = getCampaignConfigurationRecord_(spreadsheet, campaignId);
     if (!config || !config.id) {
-      ui.alert('No configuration found for Campaign ID: ' + campaignId + ' in "Campaign Configuration".');
+      if (ui) ui.alert('No configuration found for Campaign ID: ' + campaignId + ' in "Campaign Configuration".');
+      else Logger.log('No configuration found for Campaign ID: ' + campaignId);
       return;
     }
 
     const companyLimit = Math.min(25, Math.max(1, Number(config.companyLimit || 5)));
-    const provider = String(config.aiProvider || 'OPENAI').toUpperCase();
+    const provider = String(config.aiProvider || 'GEMINI').toUpperCase();
     const model = resolveAiModel_(provider, config.aiModel);
     const providerLabel = provider === 'OPENAI' ? 'OpenAI (' + model + ')' : 'Google Gemini (' + model + ')';
     
-    ui.alert(
-      'Starting Company Discovery (Agent 1)',
-      'Searching for up to ' + companyLimit + ' companies using ' + providerLabel + ':\n' +
-      '• Department: ' + config.department + '\n' +
-      '• Industry: ' + (config.industry || 'Any') + '\n' +
-      '• Geography: ' + (config.country || 'Any') + '\n' +
-      '• Needs/Triggers: ' + (config.customBusinessNeeds.slice(0, 100) || 'General') + '\n\n' +
-      'The AI research agent is now searching the web. Click OK to begin.',
-      ui.ButtonSet.OK
-    );
+    if (ui) {
+      ui.alert(
+        'Starting Company Discovery (Agent 1)',
+        'Searching for up to ' + companyLimit + ' companies using ' + providerLabel + ':\n' +
+        '• Department: ' + config.department + '\n' +
+        '• Industry: ' + (config.industry || 'Any') + '\n' +
+        '• Geography: ' + (config.country || 'Any') + '\n' +
+        '• Needs/Triggers: ' + (config.customBusinessNeeds.slice(0, 100) || 'General') + '\n\n' +
+        'The AI research agent is now searching the web. Click OK to begin.',
+        ui.ButtonSet.OK
+      );
+    }
 
     const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
     const aiResponse = executeAiDiscoveryCall_({
@@ -131,22 +141,28 @@ function runCompanyDiscoveryForSelectedCampaign() {
       : [];
 
     if (!discoveredCompanies.length) {
-      ui.alert(providerLabel + ' did not return any companies matching the given criteria. Try broadening your criteria.');
+      if (ui) ui.alert(providerLabel + ' did not return any companies matching the given criteria. Try broadening your criteria.');
+      else Logger.log(providerLabel + ' did not return any companies.');
       return;
     }
 
     const addedCount = saveDiscoveredCompanies_(spreadsheet, config.id, discoveredCompanies, config, providerLabel);
     updateCampaignDiscoveryCounts_(spreadsheet, config.id);
 
-    ui.alert(
-      'Company Discovery Complete',
-      'Discovered and added ' + addedCount + ' qualified companies to "Company Database" and "Company Intelligence" using ' + providerLabel + '.\n\n' +
-      'Next Step: Run "Agent 2: Persona Mapping" from the sidebar to find decision-makers and draft outreach.',
-      ui.ButtonSet.OK
-    );
+    if (ui) {
+      ui.alert(
+        'Company Discovery Complete',
+        'Discovered and added ' + addedCount + ' qualified companies to "Company Database" and "Company Intelligence" using ' + providerLabel + '.\n\n' +
+        'Next Step: Run "Agent 2: Persona Mapping" from the sidebar to find decision-makers and draft outreach.',
+        ui.ButtonSet.OK
+      );
+    } else {
+      Logger.log('Company Discovery Complete: Added ' + addedCount + ' companies.');
+    }
 
   } catch (error) {
-    ui.alert('Error during Company Discovery: ' + error.message);
+    if (ui) ui.alert('Error during Company Discovery: ' + error.message);
+    else Logger.log('Error during Company Discovery: ' + error.message);
   } finally {
     lock.releaseLock();
   }
@@ -214,7 +230,7 @@ function executeAiDiscoveryCall_(options) {
     }
   }
 
-  const provider = String(options.provider || 'OPENAI').toUpperCase();
+  const provider = String(options.provider || 'GEMINI').toUpperCase();
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
   let apiKey = scriptProps[provider === 'OPENAI' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY'] || '';
 
@@ -242,6 +258,10 @@ function executeAiDiscoveryCall_(options) {
     const body = JSON.parse(response.getContentText() || '{}');
     const text = body.choices && body.choices[0] && body.choices[0].message ? body.choices[0].message.content : '{}';
     return { text: text, json: JSON.parse(text), citations: [] };
+  }
+
+  if (provider === 'GEMINI' && typeof callGemini_ === 'function') {
+    return callGemini_(options);
   }
 
   throw new Error('No API key configured for ' + provider + ' in Project Settings.');
@@ -315,6 +335,9 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     dbSheet.appendRow(buildRowFromHeaders_(dbHeaders, dbRecord));
 
     // 2. Write to "Company Intelligence" (All 25 Columns)
+    // Solution fit strictly aligned with dropdown options
+    const fitLabel = score >= 85 ? 'High' : (score >= 70 ? 'Medium' : 'Low');
+
     const intelRecord = {
       'Campaign ID': campaignId,
       'Campaign Name': config.name || config.id,
@@ -332,7 +355,7 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
       'Digital Transformation Signals': item.digitalSignals || item.businessSummary || 'Cloud infrastructure detected',
       'ESG Governance': isEsg ? 'Director of Sustainability' : 'VP of Engineering / Operations',
       'Business Triggers': item.businessTriggers || config.customBusinessNeeds.slice(0, 150),
-      'eValuater Solution Fit': item.solutionFit || ('High - Direct match for ' + config.department),
+      'eValuater Solution Fit': fitLabel,
       'Company Opportunity Score': score,
       'Company Opportunity': item.companyOpportunity || item.businessSummary || 'Operational improvement opportunity',
       'Evidence URLs': item.sourceUrl || website,
@@ -372,7 +395,7 @@ function resolveAiModel_(provider, configuredModel) {
   if (configuredModel && String(configuredModel).trim() !== '') {
     return String(configuredModel).trim();
   }
-  return (provider === 'OPENAI') ? 'gpt-4o' : 'gemini-2.5-flash';
+  return (provider === 'OPENAI') ? 'gpt-4o' : 'gemini-3.8-flash';
 }
 
 /**
@@ -385,7 +408,7 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
   const config = {
     id: campaignId || 'CMP-005',
     name: '',
-    department: 'Procurement',
+    department: 'ESG Advisory',
     industry: 'Freight & Logistics, Manufacturing',
     country: 'United States & Canada',
     size: '50 - 250 employees',
@@ -394,8 +417,8 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
     minCompanyScore: 80,
     minPersonaScore: 85,
     customBusinessNeeds: '',
-    aiProvider: 'OPENAI',
-    aiModel: 'gpt-4o'
+    aiProvider: 'GEMINI',
+    aiModel: 'gemini-3.8-flash'
   };
 
   if (!configSheet) return config;
@@ -447,26 +470,57 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
 }
 
 /**
- * Gets Active Campaign ID from active selection or prompt
+ * Gets Active Campaign ID safely without throwing undefined exceptions.
+ * Checks Dashboard B2, Campaign Configuration, active selection, or prompts.
  */
 function getActiveCampaignId_(spreadsheet, ui) {
-  const sheet = spreadsheet.getActiveSheet();
-  const allowed = ['Campaigns', 'Campaign Configuration', 'Company Database', 'Dashboard', 'Company Intelligence'];
-  
-  if (allowed.indexOf(sheet.getName()) >= 0) {
-    const range = sheet.getActiveRange();
-    if (range && range.getRow() > 1) {
-      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
-      const values = sheet.getRange(range.getRow(), 1, 1, headers.length).getValues()[0];
-      const record = {};
-      headers.forEach(function(h, i) { record[h] = values[i]; });
-      if (record['Campaign ID']) return String(record['Campaign ID']).trim();
-    }
+  const ss = spreadsheet || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return 'CMP-005';
+
+  // 1. Try reading from Dashboard Cell B2
+  const dashSheet = ss.getSheetByName('Dashboard');
+  if (dashSheet) {
+    const b2 = String(dashSheet.getRange('B2').getValue() || '').trim();
+    if (b2 && b2 !== 'Select Campaign' && b2 !== 'No Active Campaign') return b2;
   }
-  
-  const prompt = ui.prompt('Company Discovery', 'Enter the Campaign ID to discover companies for (e.g. CMP-005):', ui.ButtonSet.OK_CANCEL);
-  if (prompt.getSelectedButton() !== ui.Button.OK) return '';
-  return String(prompt.getResponseText() || '').trim();
+
+  // 2. Try reading from Campaign Configuration Row 2
+  const configSheet = ss.getSheetByName('Campaign Configuration');
+  if (configSheet && configSheet.getLastRow() > 1) {
+    const cId = String(configSheet.getRange(2, 2).getValue() || '').trim();
+    if (cId) return cId;
+  }
+
+  // 3. Try checking active sheet selection safely
+  try {
+    const sheet = ss.getActiveSheet ? ss.getActiveSheet() : null;
+    const allowed = ['Campaigns', 'Campaign Configuration', 'Company Database', 'Dashboard', 'Company Intelligence'];
+    if (sheet && allowed.indexOf(sheet.getName()) >= 0) {
+      const range = sheet.getActiveRange ? sheet.getActiveRange() : null;
+      if (range && range.getRow() > 1) {
+        const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+        const values = sheet.getRange(range.getRow(), 1, 1, headers.length).getValues()[0];
+        const record = {};
+        headers.forEach(function(h, i) { record[h] = values[i]; });
+        if (record['Campaign ID']) return String(record['Campaign ID']).trim();
+      }
+    }
+  } catch (e) {
+    // Ignore selection read errors in headless/sidebar contexts
+  }
+
+  // 4. Fallback to UI prompt if ui is available
+  if (ui && typeof ui.prompt === 'function') {
+    try {
+      const prompt = ui.prompt('Company Discovery', 'Enter the Campaign ID to discover companies for (e.g. CMP-005):', ui.ButtonSet.OK_CANCEL);
+      if (prompt.getSelectedButton() === ui.Button.OK) {
+        const resp = String(prompt.getResponseText() || '').trim();
+        if (resp) return resp;
+      }
+    } catch (e) {}
+  }
+
+  return 'CMP-005';
 }
 
 /**

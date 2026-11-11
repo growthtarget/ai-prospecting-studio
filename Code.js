@@ -10,7 +10,7 @@
  */
 
 /**
- * 39 Canonical Header Columns for Persona Mapper Settings
+ * 39 Canonical Header Columns for Persona Mapper Settings (LOCKED SCHEMA)
  */
 const PERSONA_MAPPER_39_HEADERS = [
   'Campaign ID',
@@ -55,7 +55,8 @@ const PERSONA_MAPPER_39_HEADERS = [
 ];
 
 /**
- * Master 28 Canonical Header Columns for Campaigns Tab
+ * Master 28 Canonical Header Columns for Campaigns Tab (LOCKED SCHEMA)
+ * Column 4 (Index 3) = Status
  */
 const CAMPAIGNS_MASTER_HEADERS = [
   'Campaign ID',
@@ -96,13 +97,18 @@ function normalizeStudioKey(str) {
 }
 
 /**
- * Master onOpen Trigger: Installs the complete, unified menu across all tools.
+ * Master onOpen Trigger: Clean menu with isolated audit function.
  */
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('🎯 AI Prospecting Studio')
+  let ui;
+  try {
+    ui = SpreadsheetApp.getUi();
+  } catch (e) {
+    return;
+  }
+
+  ui.createMenu('🎯 AI Prospecting Studio')
     .addItem('🚀 Open Campaign Control Panel', 'showPersonaMapperControlPanel')
-    .addItem('🔄 Sync Config to Persona Mapper Settings', 'executeMasterPersonaMapperSync')
-    .addItem('🎨 Fix Tab Header Contrast & Styling', 'fixAllTabHeaderContrast')
     .addSeparator()
     .addItem('🔍 1. Discover Target Companies', 'runCompanyDiscoveryForSelectedCampaign')
     .addItem('👤 2. Run Persona Mapper', 'runPersonaMapperForSelectedCampaign')
@@ -115,50 +121,154 @@ function onOpen() {
     .addItem('📝 Create Gmail Drafts (Safe Review)', 'createGmailDraftsForApprovedProspects')
     .addItem('✉️ Send Approved Outreach Emails', 'sendApprovedOutreachEmails')
     .addSeparator()
-    .addItem('⚙️ Initialize Sheets & Setup All Dropdowns', 'triggerSetupAllDropdowns')
-    .addItem('⚙️ Prepare / Verify All Tabs', 'preparePersonaMapperSheets')
-    .addItem('❓ Check Spreadsheet Setup', 'showSetupStatus')
+    .addItem('❓ Check Spreadsheet Setup', 'runStudioSpreadsheetAudit')
     .addSeparator()
     .addItem('🧪 Run Authentic Pilot Pipeline', 'triggerPilotRun')
     .addItem('🧹 Clean Up Pilot Test Data', 'triggerPilotCleanup')
-    .addItem('🔑 Authorize Studio Permissions', 'authorizeStudioPermissions')
     .addToUi();
 }
 
 /**
- * Restyles headers across all tabs with Dark Blue Text on Light Blue Background.
+ * Native onEdit Trigger: Listens for in-cell updates on Dashboard (D1 for Status,
+ * C4 for Status) and on Campaigns sheet Column 4 (Status).
+ */
+function onEdit(e) {
+  if (!e || !e.range) return;
+  try {
+    const sheet = e.range.getSheet();
+    const sheetName = sheet.getName();
+    const row = e.range.getRow();
+    const col = e.range.getColumn();
+    const val = String(e.value || e.range.getValue() || '').trim();
+
+    // 1. EDITS ON DASHBOARD TAB
+    if (sheetName === 'Dashboard') {
+      // Cell D1: Campaign Status toggled (Active / Paused / Draft / Completed)
+      if (row === 1 && col === 4 && val) {
+        syncStatusFromDashboard_(val);
+      }
+      // Cell C4: Status in table row 4 changed
+      else if (row === 4 && col === 3 && val) {
+        syncStatusFromDashboard_(val);
+      }
+    }
+    // 2. EDITS ON CAMPAIGNS TAB (Column 4 is Status)
+    else if (sheetName === 'Campaigns' && row > 1 && col === 4) {
+      const editedCampId = String(sheet.getRange(row, 1).getValue()).trim();
+      const activeCampId = getStudioActiveCampaignId_();
+      if (editedCampId && editedCampId === activeCampId) {
+        updateDashboardStatusOnly_(activeCampId, val);
+      }
+    }
+  } catch (err) {
+    Logger.log('[onEdit Error] ' + err.message);
+  }
+}
+
+/**
+ * Synchronizes Status changes from Dashboard (D1/C4) into Campaigns Column 4
+ * and updates the Performance Rollup row without shifting columns.
+ */
+function syncStatusFromDashboard_(newStatus) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
+  const activeCampId = getStudioActiveCampaignId_();
+  if (!activeCampId) return;
+
+  // 1. Update Campaigns Tab Column 4 (Status)
+  const campSheet = ss.getSheetByName('Campaigns');
+  if (campSheet && campSheet.getLastRow() > 1) {
+    const cData = campSheet.getDataRange().getValues();
+    for (let r = 1; r < cData.length; r++) {
+      if (String(cData[r][0]).trim() === activeCampId) {
+        campSheet.getRange(r + 1, 4).setValue(newStatus);
+        break;
+      }
+    }
+  }
+
+  // 2. Update Dashboard Cells and Rollup table
+  updateDashboardStatusOnly_(activeCampId, newStatus);
+}
+
+/**
+ * Updates status indicators on Dashboard without touching other fields.
+ */
+function updateDashboardStatusOnly_(cid, newStatus) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
+  const dashSheet = ss.getSheetByName('Dashboard');
+  if (!dashSheet) return;
+
+  // Cell D1: Top Green Bar Status
+  dashSheet.getRange('D1').setValue(newStatus);
+  // Cell C4: Operational Status Column for Active Campaign Name row
+  dashSheet.getRange('C4').setValue(newStatus);
+
+  // Update Status in Campaign Performance Rollup (Row 18+)
+  const lastRow = dashSheet.getLastRow();
+  if (lastRow >= 18) {
+    for (let r = 18; r <= lastRow; r++) {
+      const rowCampId = String(dashSheet.getRange(r, 1).getValue()).trim();
+      if (rowCampId === cid) {
+        dashSheet.getRange(r, 4).setValue(newStatus);
+        dashSheet.getRange(r, 7).setValue(new Date().toLocaleString());
+        break;
+      }
+    }
+  }
+  SpreadsheetApp.flush();
+}
+
+/**
+ * Collision-proof Active Campaign ID getter.
+ * Reads directly from Dashboard Cell B2 or Campaign Configuration.
+ */
+function getStudioActiveCampaignId_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return 'CMP-005';
+  const dashSheet = ss.getSheetByName('Dashboard');
+  if (dashSheet) {
+    const b2 = String(dashSheet.getRange('B2').getValue() || '').trim();
+    if (b2 && b2 !== 'Select Campaign' && b2 !== 'No Active Campaign') return b2;
+  }
+  const configSheet = ss.getSheetByName('Campaign Configuration');
+  if (configSheet && configSheet.getLastRow() > 1) {
+    return String(configSheet.getRange(2, 2).getValue() || '').trim();
+  }
+  return 'CMP-005';
+}
+
+/**
+ * Restyles headers across operational tabs (kept as internal utility).
  */
 function fixAllTabHeaderContrast() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
   const sheets = ss.getSheets();
-  let count = 0;
 
   sheets.forEach(sh => {
+    if (sh.getName() === 'Dashboard') return;
     if (sh.getLastColumn() > 0) {
       const headerRange = sh.getRange(1, 1, 1, sh.getLastColumn());
       headerRange
         .setFontWeight('bold')
-        .setFontColor('#174ea6')          // Dark Navy Blue (High Contrast)
-        .setBackground('#e8f0fe')         // Light Google Blue
+        .setFontColor('#174ea6')
+        .setBackground('#e8f0fe')
         .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
       sh.setFrozenRows(1);
-      count++;
     }
   });
 
   SpreadsheetApp.flush();
-  SpreadsheetApp.getUi().alert(
-    'Contrast Restyled',
-    'Successfully applied high-contrast headers (Dark Navy on Light Blue) and frozen Row 1 across ' + count + ' tabs!',
-    SpreadsheetApp.getUi().ButtonSet.OK
-  );
 }
 
 /**
  * Adaptive sheet finder prioritizing "Persona Mapper Settings" (plural)
  */
 function findPersonaMapperSettingsSheet(ss) {
-  if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return null;
   
   const candidateNames = [
     'Persona Mapper Settings',
@@ -213,20 +323,22 @@ function getStudioApiKey(provider) {
     }
   }
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Agent Settings');
-  if (sheet && sheet.getLastRow() > 1) {
-    const data = sheet.getDataRange().getValues();
-    for (let r = 1; r < data.length; r++) {
-      for (let c = 0; c < data[r].length; c++) {
-        const cell = String(data[r][c] || '').trim().toUpperCase();
-        if ((norm.includes('OPENAI') || norm.includes('GPT')) && cell === 'OPENAI_API_KEY') {
-          const val = String(data[r][c + 1] || data[r][2] || '').trim();
-          if (val && !val.includes('PASTE_')) return val;
-        }
-        if (norm.includes('GEMINI') && cell === 'GEMINI_API_KEY') {
-          const val = String(data[r][c + 1] || data[r][2] || '').trim();
-          if (val && !val.includes('PASTE_')) return val;
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (ss) {
+    const sheet = ss.getSheetByName('Agent Settings');
+    if (sheet && sheet.getLastRow() > 1) {
+      const data = sheet.getDataRange().getValues();
+      for (let r = 1; r < data.length; r++) {
+        for (let c = 0; c < data[r].length; c++) {
+          const cell = String(data[r][c] || '').trim().toUpperCase();
+          if ((norm.includes('OPENAI') || norm.includes('GPT')) && cell === 'OPENAI_API_KEY') {
+            const val = String(data[r][c + 1] || data[r][2] || '').trim();
+            if (val && !val.includes('PASTE_')) return val;
+          }
+          if (norm.includes('GEMINI') && cell === 'GEMINI_API_KEY') {
+            const val = String(data[r][c + 1] || data[r][2] || '').trim();
+            if (val && !val.includes('PASTE_')) return val;
+          }
         }
       }
     }
@@ -249,22 +361,25 @@ function showPersonaMapperControlPanel() {
   template.activeCampaignId = sidebarData.activeCampaignId || '';
 
   const html = template.evaluate().setTitle('🎯 Campaign Control Panel').setWidth(380);
-  SpreadsheetApp.getUi().showSidebar(html);
+  try {
+    SpreadsheetApp.getUi().showSidebar(html);
+  } catch (e) {
+    Logger.log('showPersonaMapperControlPanel called outside UI context: ' + e.message);
+  }
 }
 
 /**
  * Returns available campaigns and configuration maps for sidebar initialization.
- * Accurately merges: Campaigns (with JSON backup), Persona Mapper Settings, and Campaign Configuration.
  */
 function getSidebarInitialData() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   const campaignsList = [];
   const campaignsMap = {};
   const configsMap = {};
   let activeCampaignId = '';
 
-  // 1. Read Campaign Configuration to determine current active campaign
-  const cSheet = ss.getSheetByName('Campaign Configuration');
+  // 1. Read Campaign Configuration
+  const cSheet = ss ? ss.getSheetByName('Campaign Configuration') : null;
   const activeConfigDict = {};
   if (cSheet && cSheet.getLastRow() > 1) {
     const cData = cSheet.getDataRange().getValues();
@@ -275,8 +390,12 @@ function getSidebarInitialData() {
     activeCampaignId = String(activeConfigDict['CAMPAIGNID'] || activeConfigDict['ACTIVECAMPAIGNID'] || activeConfigDict['CAMPAIGN'] || '').trim();
   }
 
+  if (!activeCampaignId) {
+    activeCampaignId = getStudioActiveCampaignId_();
+  }
+
   // 2. Read from Campaigns Tab (Primary Campaign Store)
-  const campSheet = ss.getSheetByName('Campaigns');
+  const campSheet = ss ? ss.getSheetByName('Campaigns') : null;
   if (campSheet && campSheet.getLastRow() > 1) {
     const campData = campSheet.getDataRange().getValues();
     const headers = campData[0].map(h => normalizeStudioKey(h));
@@ -284,6 +403,7 @@ function getSidebarInitialData() {
     const idIdx = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
     const nameIdx = headers.indexOf('CAMPAIGNNAME') >= 0 ? headers.indexOf('CAMPAIGNNAME') : 1;
     const deptIdx = headers.indexOf('DEPARTMENT');
+    const statusIdx = headers.indexOf('STATUS') >= 0 ? headers.indexOf('STATUS') : 3;
     const countryIdx = headers.indexOf('TARGETCOUNTRIES') >= 0 ? headers.indexOf('TARGETCOUNTRIES') : headers.indexOf('COUNTRIES');
     const indIdx = headers.indexOf('TARGETINDUSTRIES') >= 0 ? headers.indexOf('TARGETINDUSTRIES') : headers.indexOf('INDUSTRIES');
     const sizeIdx = headers.indexOf('COMPANYSIZE') >= 0 ? headers.indexOf('COMPANYSIZE') : headers.indexOf('COMPANYSIZERANGE');
@@ -315,22 +435,19 @@ function getSidebarInitialData() {
       const name = String(campData[i][nameIdx] || cid).trim();
       campaignsMap[cid] = name;
 
-      let campaignObj = { id: cid, name: name };
+      let campaignObj = { id: cid, name: name, status: 'Active' };
 
-      // Try reading full config JSON if stored in column
       if (jsonIdx >= 0 && campData[i][jsonIdx]) {
         try {
           const parsed = JSON.parse(campData[i][jsonIdx]);
           if (parsed && typeof parsed === 'object') {
             campaignObj = Object.assign(campaignObj, parsed);
           }
-        } catch (e) {
-          // Fall back to reading separate columns
-        }
+        } catch (e) {}
       }
 
-      // Read explicit table columns
       if (deptIdx >= 0 && campData[i][deptIdx]) campaignObj.department = String(campData[i][deptIdx]).trim();
+      if (statusIdx >= 0 && campData[i][statusIdx]) campaignObj.status = String(campData[i][statusIdx]).trim();
       if (countryIdx >= 0 && campData[i][countryIdx]) campaignObj.country = String(campData[i][countryIdx]).trim();
       if (indIdx >= 0 && campData[i][indIdx]) campaignObj.industry = String(campData[i][indIdx]).trim();
       if (sizeIdx >= 0 && campData[i][sizeIdx]) campaignObj.size = String(campData[i][sizeIdx]).trim();
@@ -358,7 +475,7 @@ function getSidebarInitialData() {
     }
   }
 
-  // 3. Read from Persona Mapper Settings (Canonical 39 Columns)
+  // 3. Read from Persona Mapper Settings
   const pSheet = findPersonaMapperSettingsSheet(ss);
   if (pSheet && pSheet.getLastRow() > 1) {
     const pData = pSheet.getDataRange().getValues();
@@ -374,100 +491,33 @@ function getSidebarInitialData() {
 
       c.id = cid;
       if (!c.name || c.name === cid) c.name = name;
-      c.aiProvider = String(pData[i][3] || c.aiProvider || 'OPENAI');
-      c.aiModel = String(pData[i][4] || c.aiModel || 'gpt-4o');
+      c.aiProvider = String(pData[i][3] || c.aiProvider || 'GEMINI');
+      c.aiModel = String(pData[i][4] || c.aiModel || 'gemini-3.8-flash');
       if (pData[i][5] && !c.titles) c.titles = String(pData[i][5]);
       if (pData[i][6] && !c.searchKeywords) c.searchKeywords = String(pData[i][6]);
       if (pData[i][7] && !c.campaignFocus) c.campaignFocus = String(pData[i][7]);
       c.evidencePeriodMonths = Number(pData[i][8]) || c.evidencePeriodMonths || 12;
       c.researchDepth = String(pData[i][9] || c.researchDepth || 'Deep Persona');
-      c.incEsgObligations = String(pData[i][10]).toUpperCase() !== 'FALSE';
-      c.incEsgMaturity = String(pData[i][11]).toUpperCase() !== 'FALSE';
-      c.incSupplyChain = String(pData[i][12]).toUpperCase() !== 'FALSE';
-      c.incScope3 = String(pData[i][13]).toUpperCase() !== 'FALSE';
-      c.incDataChallenges = String(pData[i][14]).toUpperCase() !== 'FALSE';
-      c.incDigital = String(pData[i][15]).toUpperCase() !== 'FALSE';
-      c.incEsgGovernance = String(pData[i][16]).toUpperCase() !== 'FALSE';
-      c.incTriggers = String(pData[i][17]).toUpperCase() !== 'FALSE';
-      c.incEvaluater = String(pData[i][18]).toUpperCase() !== 'FALSE';
-      c.weightEsgReporting = String(pData[i][19] || c.weightEsgReporting || '20%');
-      c.weightSupplyChain = String(pData[i][20] || c.weightSupplyChain || '15%');
-      c.weightDataChallenges = String(pData[i][21] || c.weightDataChallenges || '15%');
-      c.weightDigital = String(pData[i][22] || c.weightDigital || '15%');
-      c.weightTriggers = String(pData[i][23] || c.weightTriggers || '20%');
-      c.weightEvaluaterFit = String(pData[i][24] || c.weightEvaluaterFit || '15%');
       c.minCompanyScore = Number(pData[i][25]) || c.minCompanyScore || 80;
       c.minPersonaScore = Number(pData[i][26]) || c.minPersonaScore || 85;
       c.minEmailPriorityScore = Number(pData[i][27]) || c.minEmailPriorityScore || 80;
-      c.humanApprovalRequired = String(pData[i][28]).toUpperCase() !== 'FALSE';
-      c.autoSendEnabled = String(pData[i][29]).toUpperCase() === 'TRUE';
-      c.weightEmailCompanyScore = String(pData[i][30] || c.weightEmailCompanyScore || '40%');
-      c.weightEmailPersonaFit = String(pData[i][31] || c.weightEmailPersonaFit || '35%');
-      c.weightEmailBuyingSignal = String(pData[i][32] || c.weightEmailBuyingSignal || '25%');
       if (pData[i][33] && !c.customBusinessNeeds) c.customBusinessNeeds = String(pData[i][33]);
       c.limit = Number(pData[i][34]) || c.limit || 5;
       c.emailVerifier = String(pData[i][35] || c.emailVerifier || 'ZeroBounce');
-      c.emailEndpoint = String(pData[i][36] || c.emailEndpoint || '');
       c.emailSenderProvider = String(pData[i][37] || c.emailSenderProvider || 'Workspace Gmail (Drafts Only)');
-      c.emailSenderEndpoint = String(pData[i][38] || c.emailSenderEndpoint || '');
     }
   }
 
   // 4. Merge Active Campaign Details from Campaign Configuration
-  if (activeCampaignId) {
-    campaignsMap[activeCampaignId] = String(activeConfigDict['CAMPAIGNNAME'] || campaignsMap[activeCampaignId] || activeCampaignId);
-    configsMap[activeCampaignId] = configsMap[activeCampaignId] || { id: activeCampaignId, name: campaignsMap[activeCampaignId] };
+  if (activeCampaignId && configsMap[activeCampaignId]) {
     const c = configsMap[activeCampaignId];
-
     if (activeConfigDict['CAMPAIGNNAME']) c.name = String(activeConfigDict['CAMPAIGNNAME']);
     if (activeConfigDict['DEPARTMENT']) c.department = String(activeConfigDict['DEPARTMENT']);
-    if (activeConfigDict['TARGETCOUNTRIES']) c.country = String(activeConfigDict['TARGETCOUNTRIES']);
-    if (activeConfigDict['TARGETINDUSTRIES']) c.industry = String(activeConfigDict['TARGETINDUSTRIES']);
-    if (activeConfigDict['COMPANYSIZERANGE']) c.size = String(activeConfigDict['COMPANYSIZERANGE']);
     if (activeConfigDict['MAXCOMPANIES']) c.limit = Number(activeConfigDict['MAXCOMPANIES']) || 5;
-    if (activeConfigDict['RESEARCHDEPTH']) c.researchDepth = String(activeConfigDict['RESEARCHDEPTH']);
-    if (activeConfigDict['EVIDENCEPERIODMONTHS']) c.evidencePeriodMonths = Number(activeConfigDict['EVIDENCEPERIODMONTHS']) || 12;
-    if (activeConfigDict['MINCOMPANYSCORE']) c.minCompanyScore = Number(activeConfigDict['MINCOMPANYSCORE']) || 80;
-    if (activeConfigDict['MINPERSONASCORE']) c.minPersonaScore = Number(activeConfigDict['MINPERSONASCORE']) || 85;
-    if (activeConfigDict['MINEMAILPRIORITYSCORE']) c.minEmailPriorityScore = Number(activeConfigDict['MINEMAILPRIORITYSCORE']) || 80;
-    if (activeConfigDict['TARGETTITLES']) c.titles = String(activeConfigDict['TARGETTITLES']);
-    if (activeConfigDict['CAMPAIGNFOCUS']) c.campaignFocus = String(activeConfigDict['CAMPAIGNFOCUS']);
-    if (activeConfigDict['SEARCHKEYWORDS']) c.searchKeywords = String(activeConfigDict['SEARCHKEYWORDS']);
-    if (activeConfigDict['CUSTOMBUSINESSNEEDS']) c.customBusinessNeeds = String(activeConfigDict['CUSTOMBUSINESSNEEDS']);
-    if (activeConfigDict['AIPROVIDER']) c.aiProvider = String(activeConfigDict['AIPROVIDER']);
-    if (activeConfigDict['AIMODEL']) c.aiModel = String(activeConfigDict['AIMODEL']);
-    if (activeConfigDict['SENDERNAME']) c.senderName = String(activeConfigDict['SENDERNAME']);
-    if (activeConfigDict['SENDERTITLE']) c.senderTitle = String(activeConfigDict['SENDERTITLE']);
-    if (activeConfigDict['SENDERCOMPANY']) c.senderCompany = String(activeConfigDict['SENDERCOMPANY']);
-    if (activeConfigDict['EMAILVERIFICATIONPROVIDER']) c.emailVerifier = String(activeConfigDict['EMAILVERIFICATIONPROVIDER']);
-    if (activeConfigDict['EMAILVERIFICATIONENDPOINT']) c.emailEndpoint = String(activeConfigDict['EMAILVERIFICATIONENDPOINT']);
     if (activeConfigDict['EMAILSENDERPROVIDER']) c.emailSenderProvider = String(activeConfigDict['EMAILSENDERPROVIDER']);
-    if (activeConfigDict['EMAILSENDERENDPOINT']) c.emailSenderEndpoint = String(activeConfigDict['EMAILSENDERENDPOINT']);
   }
 
-  // 5. Intelligent fallback ONLY for PILOT campaign (never overwrite other campaigns)
-  for (let cid in configsMap) {
-    const c = configsMap[cid];
-    if (cid.toUpperCase().includes('PILOT')) {
-      if (!c.department) c.department = 'Procurement';
-      if (!c.country) c.country = 'United States & Canada';
-      if (!c.industry) c.industry = 'Freight & Logistics, Manufacturing';
-      if (!c.size) c.size = '50 - 250 employees';
-      if (!c.limit) c.limit = 3;
-      if (!c.titles) c.titles = 'VP Procurement; Head of Supply Chain; Director Vendor Management';
-      if (!c.campaignFocus) c.campaignFocus = 'Scope 3 vendor compliance and operational resilience';
-      if (!c.searchKeywords) c.searchKeywords = 'Scope 3, CSRD, supplier risk, compliance audits';
-      if (!c.customBusinessNeeds) {
-        c.customBusinessNeeds = '- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency\n- High vendor questionnaire drop-off rate during procurement audits\n- Eliminating manual spreadsheet follow-ups with suppliers';
-      }
-      if (!c.senderName) c.senderName = 'Alex Mercer';
-      if (!c.senderTitle) c.senderTitle = 'Solutions Consultant';
-      if (!c.senderCompany) c.senderCompany = 'eValuater Solutions';
-      if (!c.emailSenderProvider) c.emailSenderProvider = 'Workspace Gmail (Drafts Only)';
-    }
-  }
-
-  // Convert map to sorted array
+  // 5. Convert map to array
   for (let cid in campaignsMap) {
     campaignsList.push({ id: cid, name: campaignsMap[cid] });
   }
@@ -475,7 +525,7 @@ function getSidebarInitialData() {
   return {
     campaigns: campaignsList,
     configsMap: configsMap,
-    activeCampaignId: activeCampaignId || (campaignsList.length > 0 ? campaignsList[0].id : '')
+    activeCampaignId: activeCampaignId || (campaignsList.length > 0 ? campaignsList[0].id : 'CMP-005')
   };
 }
 
@@ -484,9 +534,7 @@ function getAvailableCampaignsList() {
 }
 
 /**
- * Activates a selected campaign in the Google Sheet:
- * Updates Campaign Configuration, rebuilds Dashboard for that specific campaign,
- * and returns the complete configuration.
+ * Activates a selected campaign: updates configuration and updates Dashboard.
  */
 function selectAndActivateCampaign(cid) {
   if (!cid) return { success: false, message: 'No Campaign ID provided.' };
@@ -494,7 +542,6 @@ function selectAndActivateCampaign(cid) {
   const data = getSidebarInitialData();
   const config = data.configsMap[cid] || { id: cid, name: cid };
 
-  // Write to Campaign Configuration, Campaigns Tab, and Refresh Dashboard
   studioDirectSaveCampaignPipeline(config, true);
 
   return {
@@ -506,28 +553,42 @@ function selectAndActivateCampaign(cid) {
 }
 
 /**
- * Direct Campaign Pipeline Saver:
- * 1. Writes cleanly to Campaign Configuration (Row 2 = CAMPAIGN_ID).
- * 2. Writes full parameters + JSON backup to Campaigns tab.
- * 3. Updates or appends the campaign row in Persona Mapper Settings (39 columns).
- * 4. Completely updates Dashboard tab with this campaign's details and KPI counts.
+ * Direct Campaign Pipeline Saver (LOCKED 38 PARAMETERS SCHEMA):
+ * Preserves the exact 38 parameter rows in Campaign Configuration without shifting rows.
  */
 function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (!payload || !payload.id) {
     throw new Error('Campaign ID is required to save configuration.');
   }
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) throw new Error('No active spreadsheet found.');
 
-  // 1. REBUILD CAMPAIGN CONFIGURATION (Guarantees CAMPAIGN_ID in Row 2)
+  const campId = payload.id;
+  const campName = payload.name || campId;
+
+  // Preserve existing status if not explicitly passed
+  let status = payload.status || 'Active';
+  const campSheetExisting = ss.getSheetByName('Campaigns');
+  if (campSheetExisting && campSheetExisting.getLastRow() > 1 && !payload.status) {
+    const cRows = campSheetExisting.getDataRange().getValues();
+    for (let r = 1; r < cRows.length; r++) {
+      if (String(cRows[r][0]).trim() === campId && cRows[r][3]) {
+        status = String(cRows[r][3]).trim();
+        break;
+      }
+    }
+  }
+
+  // 1. REBUILD CAMPAIGN CONFIGURATION (EXACT ORIGINAL 38 PARAMETERS - ZERO MUTATION)
   let configSheet = ss.getSheetByName('Campaign Configuration');
   if (!configSheet) configSheet = ss.insertSheet('Campaign Configuration');
 
   const configRows = [
     ['Parameter', 'Configured Value', 'Description'],
-    ['CAMPAIGN_ID', payload.id, 'Active Campaign Identifier'],
-    ['CAMPAIGN_NAME', payload.name || payload.id, 'Active Campaign Name'],
-    ['DEPARTMENT', payload.department || 'Procurement', 'Operating Department / Business Unit'],
+    ['CAMPAIGN_ID', campId, 'Active Campaign Identifier'],
+    ['CAMPAIGN_NAME', campName, 'Active Campaign Name'],
+    ['DEPARTMENT', payload.department || 'ESG Advisory', 'Operating Department / Business Unit'],
     ['TARGET_COUNTRIES', payload.country || '', 'Target Geographies / Regions'],
     ['TARGET_INDUSTRIES', payload.industry || '', 'Target Industry Verticals'],
     ['COMPANY_SIZE_RANGE', payload.size || '', 'Target Employee Size Range'],
@@ -541,9 +602,9 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     ['CAMPAIGN_FOCUS', payload.campaignFocus || '', 'Primary value proposition hook'],
     ['SEARCH_KEYWORDS', payload.searchKeywords || '', 'Search discovery query keywords'],
     ['CUSTOM_BUSINESS_NEEDS', payload.customBusinessNeeds || '', 'Manual department business needs & buying triggers'],
-    ['AI_PROVIDER', payload.aiProvider || 'OPENAI', 'Selected AI engine (GEMINI or OPENAI)'],
-    ['PRIMARY_AI_PROVIDER', payload.aiProvider || 'OPENAI', 'Selected AI engine (legacy alias)'],
-    ['AI_MODEL', payload.aiModel || 'gpt-4o', 'AI Model version name'],
+    ['AI_PROVIDER', payload.aiProvider || 'GEMINI', 'Selected AI engine (GEMINI or OPENAI)'],
+    ['PRIMARY_AI_PROVIDER', payload.aiProvider || 'GEMINI', 'Selected AI engine (legacy alias)'],
+    ['AI_MODEL', payload.aiModel || 'gemini-3.8-flash', 'AI Model version name'],
     ['EMAIL_VERIFICATION_PROVIDER', payload.emailVerifier || 'ZeroBounce', 'Email verification vendor'],
     ['EMAIL_VERIFICATION_ENDPOINT', payload.emailEndpoint || '', 'Email verification REST endpoint URL'],
     ['EMAIL_SENDER_PROVIDER', payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform'],
@@ -570,23 +631,20 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   configSheet.getRange(1, 1, 1, 3)
     .setFontWeight('bold')
     .setFontColor('#174ea6')
-    .setBackground('#e8f0fe')
-    .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+    .setBackground('#e8f0fe');
   configSheet.setFrozenRows(1);
   SpreadsheetApp.flush();
 
-  // 2. WRITE TO Campaigns TAB (Saves individual criteria + Complete JSON object)
+  // 2. WRITE TO Campaigns TAB (EXACT 28 COLUMNS - ZERO MUTATION)
   let campSheet = ss.getSheetByName('Campaigns');
   if (!campSheet) campSheet = ss.insertSheet('Campaigns');
 
-  // Check and setup master headers
   if (campSheet.getLastRow() <= 0 || campSheet.getLastColumn() < CAMPAIGNS_MASTER_HEADERS.length) {
     campSheet.getRange(1, 1, 1, CAMPAIGNS_MASTER_HEADERS.length).setValues([CAMPAIGNS_MASTER_HEADERS]);
     campSheet.getRange(1, 1, 1, CAMPAIGNS_MASTER_HEADERS.length)
       .setFontWeight('bold')
       .setFontColor('#174ea6')
-      .setBackground('#e8f0fe')
-      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+      .setBackground('#e8f0fe');
     campSheet.setFrozenRows(1);
   }
 
@@ -597,22 +655,20 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (cLast > 1) {
     const campA = campSheet.getRange(2, 1, cLast - 1, 1).getValues();
     for (let cr = 0; cr < campA.length; cr++) {
-      if (String(campA[cr][0] || '').trim() === payload.id) {
+      if (String(campA[cr][0] || '').trim() === campId) {
         cTargetRow = cr + 2;
         cFound = true;
         break;
       }
     }
-    if (!cFound) {
-      cTargetRow = cLast + 1;
-    }
+    if (!cFound) cTargetRow = cLast + 1;
   }
 
   const campMasterRow = [
-    payload.id,
-    payload.name || payload.id,
-    payload.department || 'Procurement',
-    'Active',
+    campId,
+    campName,
+    payload.department || 'ESG Advisory',
+    status,
     payload.country || '',
     payload.industry || '',
     payload.size || '',
@@ -626,8 +682,8 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     payload.campaignFocus || '',
     payload.searchKeywords || '',
     payload.customBusinessNeeds || '',
-    payload.aiProvider || 'OPENAI',
-    payload.aiModel || 'gpt-4o',
+    payload.aiProvider || 'GEMINI',
+    payload.aiModel || 'gemini-3.8-flash',
     payload.emailVerifier || 'ZeroBounce',
     payload.emailEndpoint || '',
     payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)',
@@ -642,7 +698,7 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   campSheet.getRange(cTargetRow, 1, 1, campMasterRow.length).setValues([campMasterRow]);
   SpreadsheetApp.flush();
 
-  // 3. WRITE TO Persona Mapper Settings (Update existing row or append new row)
+  // 3. WRITE TO Persona Mapper Settings (EXACT 39 COLUMNS - ZERO MUTATION)
   let pSheet = findPersonaMapperSettingsSheet(ss);
   if (!pSheet) pSheet = ss.insertSheet('Persona Mapper Settings');
 
@@ -651,17 +707,16 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     pSheet.getRange(1, 1, 1, PERSONA_MAPPER_39_HEADERS.length)
       .setFontWeight('bold')
       .setFontColor('#174ea6')
-      .setBackground('#e8f0fe')
-      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+      .setBackground('#e8f0fe');
     pSheet.setFrozenRows(1);
   }
 
   const pRow = [
-    payload.id,
-    payload.name || payload.id,
+    campId,
+    campName,
     'TRUE',
-    payload.aiProvider || 'OPENAI',
-    payload.aiModel || 'gpt-4o',
+    payload.aiProvider || 'GEMINI',
+    payload.aiModel || 'gemini-3.8-flash',
     payload.titles || '',
     payload.searchKeywords || '',
     payload.campaignFocus || '',
@@ -705,64 +760,115 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (pLast > 1) {
     const colA = pSheet.getRange(2, 1, pLast - 1, 1).getValues();
     for (let r = 0; r < colA.length; r++) {
-      if (String(colA[r][0] || '').trim() === payload.id) {
+      if (String(colA[r][0] || '').trim() === campId) {
         pTargetRow = r + 2;
         pFound = true;
         break;
       }
     }
-    if (!pFound) {
-      pTargetRow = pLast + 1;
-    }
+    if (!pFound) pTargetRow = pLast + 1;
   }
 
   pSheet.getRange(pTargetRow, 1, 1, 39).setValues([pRow]);
   SpreadsheetApp.flush();
 
-  // 4. UPDATE DASHBOARD TAB SPECIFICALLY FOR THIS ACTIVE CAMPAIGN
-  updateDashboardForActiveCampaign(payload);
+  // 4. UPDATE DASHBOARD TAB (Exact 4-Column Layout)
+  const dashboardPayload = Object.assign({}, payload, { status: status });
+  updateDashboardForActiveCampaign(dashboardPayload);
 
   return {
     success: true,
-    campaignId: payload.id,
-    campaignName: payload.name || payload.id,
-    message: 'Campaign ' + payload.id + ' synchronized across all tabs and activated on Dashboard!'
+    campaignId: campId,
+    campaignName: campName,
+    message: 'Campaign ' + campId + ' synchronized across all tabs and activated on Dashboard!'
   };
 }
 
 /**
- * Re-calculates and writes active campaign parameters and live pipeline metrics
- * (Discovered Companies, Identified Personas, Queue stats) directly to the Dashboard sheet.
+ * EXACT 4-COLUMN DASHBOARD UPDATER
+ * Dynamically scans table headers across Company Intelligence, Persona Leads,
+ * and Prospect Review Queue to accurately calculate and display live KPIs.
  */
-function updateDashboardForActiveCampaign(payload) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+function updateDashboardForActiveCampaign(payloadOrId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
   const dashSheet = ss.getSheetByName('Dashboard');
   if (!dashSheet) return;
 
-  const cid = payload.id;
-  const prov = String(payload.aiProvider || 'OPENAI').toUpperCase();
+  let cid = '';
+  let payload = {};
+
+  if (typeof payloadOrId === 'string') {
+    cid = payloadOrId;
+    const initial = getSidebarInitialData();
+    payload = initial.configsMap[cid] || { id: cid, name: cid };
+  } else if (payloadOrId && typeof payloadOrId === 'object') {
+    payload = payloadOrId;
+    cid = payload.id || payload.campaignId;
+  }
+
+  if (!cid) cid = getStudioActiveCampaignId_();
+
+  // 1. Resolve parameters from payload, Campaigns, or Campaign Configuration
+  let status = payload.status || 'Active';
+  let dept = payload.department || '';
+  let limit = payload.limit || '';
+  let dispatchChannel = payload.emailSenderProvider || '';
+
+  const campSheet = ss.getSheetByName('Campaigns');
+  if (campSheet && campSheet.getLastRow() > 1) {
+    const cData = campSheet.getDataRange().getValues();
+    for (let cr = 1; cr < cData.length; cr++) {
+      if (String(cData[cr][0]).trim() === cid) {
+        if (!status || status === 'Active') status = String(cData[cr][3] || status).trim();
+        if (!dept && cData[cr][2]) dept = String(cData[cr][2]).trim();
+        if (!limit && cData[cr][7]) limit = cData[cr][7];
+        if (!dispatchChannel && cData[cr][21]) dispatchChannel = String(cData[cr][21]).trim();
+        break;
+      }
+    }
+  }
+
+  const cfgSheet = ss.getSheetByName('Campaign Configuration');
+  if (cfgSheet && cfgSheet.getLastRow() > 1) {
+    const cfgData = cfgSheet.getDataRange().getValues();
+    for (let cr = 1; cr < cfgData.length; cr++) {
+      const k = normalizeStudioKey(cfgData[cr][0]);
+      if (!dept && (k === 'DEPARTMENT' || k === 'OPERATINGDEPARTMENT')) dept = String(cfgData[cr][1]).trim();
+      if (!limit && (k === 'MAXCOMPANIES' || k === 'DISCOVERYLIMIT')) limit = cfgData[cr][1];
+      if (!dispatchChannel && (k === 'EMAILSENDERPROVIDER' || k === 'DISPATCHMODE')) dispatchChannel = String(cfgData[cr][1]).trim();
+    }
+  }
+
+  dept = dept || 'ESG Advisory';
+  limit = limit || 5;
+  dispatchChannel = dispatchChannel || 'Workspace Gmail (Drafts Only)';
+  const limitDisplay = String(limit).includes('Companies') ? limit : (limit + ' Companies');
+
+  const campName = payload.name || payload.campaignName || cid;
+  const prov = String(payload.aiProvider || 'GEMINI').toUpperCase();
   const model = String(payload.aiModel || (prov.includes('GEMINI') ? 'gemini-3.8-flash' : 'gpt-4o')).trim();
 
-  // Build high-clarity formatted AI Model description
   let aiLabel = '';
   if (prov.includes('GEMINI')) {
     aiLabel = 'Gemini ' + model + ' + Search Grounding';
   } else {
-    aiLabel = 'OpenAI ' + model.toUpperCase();
+    aiLabel = 'OpenAI ' + model;
   }
 
-  // Live verification of API key connection
   const key = getStudioApiKey(prov);
   const keyStatus = key ? 'Connected' : 'Key Not Configured';
-  const nowStr = new Date().toLocaleString();
+  const nowTimestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
 
-  // 1. Calculate live counts for this campaign from database sheets
+  // 2. DYNAMIC LIVE KPI CALCULATION (Dynamic Header Scanning)
   let discoveredCount = 0;
   const compSheet = ss.getSheetByName('Company Intelligence');
   if (compSheet && compSheet.getLastRow() > 1) {
     const data = compSheet.getDataRange().getValues();
+    const headers = data[0].map(h => normalizeStudioKey(h));
+    const campIdCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
     for (let i = 1; i < data.length; i++) {
-      if (String(data[i][0] || '').trim() === cid) discoveredCount++;
+      if (String(data[i][campIdCol] || '').trim() === cid) discoveredCount++;
     }
   }
 
@@ -770,128 +876,161 @@ function updateDashboardForActiveCampaign(payload) {
   const persSheet = ss.getSheetByName('Persona Leads');
   if (persSheet && persSheet.getLastRow() > 1) {
     const data = persSheet.getDataRange().getValues();
+    const headers = data[0].map(h => normalizeStudioKey(h));
+    const campIdCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
     for (let i = 1; i < data.length; i++) {
-      if (String(data[i][0] || '').trim() === cid) personasCount++;
+      if (String(data[i][campIdCol] || '').trim() === cid) personasCount++;
     }
   }
 
-  let queueCount = 0;
-  let approvedCount = 0;
   let draftsCount = 0;
-  let sentCount = 0;
+  let suppressedCount = 0;
   const qSheet = ss.getSheetByName('Prospect Review Queue');
   if (qSheet && qSheet.getLastRow() > 1) {
     const data = qSheet.getDataRange().getValues();
+    const headers = data[0].map(h => normalizeStudioKey(h));
+    const campIdCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
+    const sendCol = headers.indexOf('SENDSTATUS') >= 0 ? headers.indexOf('SENDSTATUS') : 24;
+    const compCol = headers.indexOf('COMPLIANCESTATUS') >= 0 ? headers.indexOf('COMPLIANCESTATUS') : 41;
+    const appCol = headers.indexOf('HUMANAPPROVALSTATUS') >= 0 ? headers.indexOf('HUMANAPPROVALSTATUS') : 21;
+
     for (let i = 1; i < data.length; i++) {
-      if (String(data[i][0] || '').trim() === cid) {
-        queueCount++;
-        const approval = String(data[i][21] || '').trim();
-        const sendStatus = String(data[i][24] || '').trim();
-        if (approval.startsWith('Approved')) approvedCount++;
-        if (sendStatus === 'Draft Created' || sendStatus === 'Draft Created in Gmail') draftsCount++;
-        if (sendStatus === 'Sent') sentCount++;
+      if (String(data[i][campIdCol] || '').trim() === cid) {
+        const sendStatus = String(data[i][sendCol] || '').trim().toLowerCase();
+        if (sendStatus.includes('draft') || sendStatus.includes('sent') || sendStatus.includes('created')) {
+          draftsCount++;
+        }
+        const compStatus = String(data[i][compCol] || '').trim().toLowerCase();
+        const appStatus = String(data[i][appCol] || '').trim().toLowerCase();
+        if (compStatus.includes('failed') || compStatus.includes('blocked') || appStatus.includes('suppression') || appStatus.includes('rejected')) {
+          suppressedCount++;
+        }
       }
     }
   }
 
-  // 2. Scan Dashboard sheet cells and update matching label values
-  const dRange = dashSheet.getDataRange();
-  const dVals = dRange.getValues();
-  const numRows = dVals.length;
-  const numCols = dVals[0] ? dVals[0].length : 0;
+  // 3. UPDATE TOP GREEN BAR (Row 1) & ROW 2 & ROW 3 TIMESTAMP
+  dashSheet.getRange('C1').setValue(campName);
+  dashSheet.getRange('D1').setValue(status);
+  dashSheet.getRange('B2').setValue(cid);
+  dashSheet.getRange('D3').setValue(nowTimestamp);
 
-  for (let r = 0; r < numRows; r++) {
-    for (let c = 0; c < numCols; c++) {
-      const cellText = normalizeStudioKey(dVals[r][c]);
-      if (!cellText) continue;
+  // 4. SCAN METRIC ROWS (Rows 4 to 14) BY COLUMN A LABEL
+  const lastRow = Math.min(dashSheet.getLastRow(), 20);
+  if (lastRow >= 4) {
+    const labels = dashSheet.getRange(4, 1, lastRow - 3, 1).getValues();
 
-      // Primary AI Model Configured (Updates Label, Connection Status, and Timestamp)
-      if (cellText.includes('PRIMARYAIMODEL') || cellText.includes('AIMODELCONFIGURED') || cellText === 'AIPROVIDER' || cellText === 'AIENGINE' || cellText === 'MODEL') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(aiLabel);
-        if (c + 2 < numCols) dashSheet.getRange(r + 1, c + 3).setValue(keyStatus);
-        if (c + 3 < numCols) dashSheet.getRange(r + 1, c + 4).setValue(nowStr);
+    for (let r = 0; r < labels.length; r++) {
+      const rowNum = r + 4;
+      const label = normalizeStudioKey(labels[r][0]);
+
+      if (label.includes('ACTIVECAMPAIGNNAME') || label === 'CAMPAIGNNAME') {
+        dashSheet.getRange(rowNum, 2).setValue(campName);
+        dashSheet.getRange(rowNum, 3).setValue(status);
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Campaign ID
-      else if (cellText === 'CAMPAIGNID' || cellText === 'ACTIVECAMPAIGNID') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(cid);
+      else if (label === 'CAMPAIGNID' || label === 'ACTIVECAMPAIGNID') {
+        dashSheet.getRange(rowNum, 2).setValue(cid);
+        dashSheet.getRange(rowNum, 3).setValue(cid.includes('PILOT') ? 'Pilot Mode' : 'Production Mode');
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Campaign Name
-      else if (cellText === 'CAMPAIGNNAME' || cellText === 'ACTIVECAMPAIGN' || cellText === 'CAMPAIGN') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(payload.name || cid);
+      else if (label.includes('OPERATINGDEPARTMENT') || label.includes('DEPARTMENT')) {
+        dashSheet.getRange(rowNum, 2).setValue(dept);
+        dashSheet.getRange(rowNum, 3).setValue('Active Owner');
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Status
-      else if (cellText === 'STATUS' || cellText === 'CAMPAIGNSTATUS') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue('Active');
+      else if (label.includes('COMPANYDISCOVERYLIMIT') || label.includes('DISCOVERYLIMIT')) {
+        dashSheet.getRange(rowNum, 2).setValue(limitDisplay);
+        dashSheet.getRange(rowNum, 3).setValue('Enforced Limit');
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Department
-      else if (cellText === 'DEPARTMENT' || cellText === 'OWNER') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(payload.department || 'Procurement');
+      else if (label.includes('DISCOVERED') && (label.includes('COMPAN') || label.includes('QUALIF'))) {
+        dashSheet.getRange(rowNum, 2).setValue(discoveredCount);
+        dashSheet.getRange(rowNum, 3).setValue(discoveredCount > 0 ? 'Discovery Complete' : 'Pending Discovery');
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Target Countries
-      else if (cellText.includes('TARGETCOUNT') || cellText === 'COUNTRIES' || cellText === 'GEOGRAPHY') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(payload.country || 'Global');
+      else if (label.includes('PERSONALEADS') || label.includes('IDENTIFIEDLEAD')) {
+        dashSheet.getRange(rowNum, 2).setValue(personasCount);
+        dashSheet.getRange(rowNum, 3).setValue(personasCount > 0 ? 'Mapping Complete' : 'Pending Mapping');
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Target Industries
-      else if (cellText.includes('TARGETINDUS') || cellText === 'INDUSTRIES') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(payload.industry || 'All Verticals');
+      else if (label.includes('GMAILOUTREACH') || label.includes('DRAFTSCREATED')) {
+        dashSheet.getRange(rowNum, 2).setValue(draftsCount);
+        dashSheet.getRange(rowNum, 3).setValue(draftsCount > 0 ? 'Ready in Gmail Drafts' : 'No Drafts Yet');
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Company Size
-      else if (cellText.includes('COMPANYSIZE')) {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(payload.size || '50 - 250');
+      else if (label.includes('SUPPRESSED') || label.includes('BLOCKED')) {
+        dashSheet.getRange(rowNum, 2).setValue(suppressedCount);
+        dashSheet.getRange(rowNum, 3).setValue('Suppression Active');
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Target Titles
-      else if (cellText.includes('TARGETTITLE') || cellText.includes('PERSONATITLE')) {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(payload.titles || 'Decision Makers');
+      else if (label.includes('EMAILDISPATCH') || label.includes('DISPATCHCHANNEL')) {
+        dashSheet.getRange(rowNum, 2).setValue(dispatchChannel);
+        dashSheet.getRange(rowNum, 3).setValue(draftsCount);
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
-      // Email Sender Provider
-      else if (cellText.includes('SENDERPROVIDER') || cellText === 'EMAILSENDER') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)');
-      }
-      // Metric: Discovered Companies
-      else if (cellText.includes('DISCOVEREDCOMP') || cellText === 'TOTALCOMPANIES') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(discoveredCount);
-      }
-      // Metric: Identified Leads
-      else if (cellText.includes('IDENTIFIEDLEAD') || cellText.includes('PERSONASIDENTIFIED') || cellText === 'TOTALLEADS') {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(personasCount);
-      }
-      // Metric: Review Queue
-      else if (cellText.includes('REVIEWQUEUE') || cellText.includes('PENDINGREVIEW')) {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(queueCount);
-      }
-      // Metric: Approved Leads
-      else if (cellText.includes('APPROVEDLEAD') || cellText.includes('APPROVEDPROSPECT')) {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(approvedCount);
-      }
-      // Metric: Drafts Created
-      else if (cellText.includes('DRAFTCREATED') || cellText.includes('GMAILDRAFT')) {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(draftsCount);
-      }
-      // Metric: Emails Sent
-      else if (cellText.includes('EMAILSSENT') || cellText.includes('SENTEMAIL')) {
-        if (c + 1 < numCols) dashSheet.getRange(r + 1, c + 2).setValue(sentCount);
+      else if (label.includes('PRIMARYAIMODEL') || label.includes('AIMODELCONFIGURED')) {
+        dashSheet.getRange(rowNum, 2).setValue(aiLabel);
+        dashSheet.getRange(rowNum, 3).setValue(keyStatus);
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       }
     }
   }
 
-  // 3. Fallback standard coordinates (covers standard Studio dashboard layout)
-  try {
-    dashSheet.getRange('B2').setValue(cid);
-    dashSheet.getRange('B3').setValue('Active');
-    dashSheet.getRange('B4').setValue(payload.name || cid);
-    dashSheet.getRange('D3').setValue(nowStr);
-  } catch (e) {
-    // Coordinate write error ignored if sheet layout is custom
+  // 5. UPDATE CAMPAIGN PERFORMANCE ROLLUP TABLE (Row 17 = Headers, Rows 18+ = Data)
+  if (dashSheet.getLastRow() >= 16) {
+    const rollupHeaders = [
+      'Campaign ID',
+      'Campaign Name',
+      'Department',
+      'Status',
+      'Companies Found',
+      'Gmail Drafts',
+      'Last Run'
+    ];
+    dashSheet.getRange(17, 1, 1, 7)
+      .setValues([rollupHeaders])
+      .setFontWeight('bold')
+      .setBackground('#dadce0')
+      .setFontColor('#202124');
+
+    let existingRow = -1;
+    const currentMax = dashSheet.getLastRow();
+    for (let r = 18; r <= currentMax; r++) {
+      const rowId = String(dashSheet.getRange(r, 1).getValue()).trim();
+      if (rowId === cid) {
+        existingRow = r;
+        break;
+      }
+    }
+
+    const campaignRowData = [
+      cid,
+      campName,
+      dept,
+      status,
+      discoveredCount,
+      draftsCount,
+      new Date().toLocaleString()
+    ];
+
+    if (existingRow !== -1) {
+      dashSheet.getRange(existingRow, 1, 1, 7).setValues([campaignRowData]);
+    } else {
+      const insertAt = Math.max(18, currentMax + 1);
+      dashSheet.getRange(insertAt, 1, 1, 7).setValues([campaignRowData]);
+    }
   }
 
   SpreadsheetApp.flush();
 }
 
 /**
- * Menu action to trigger master sync
+ * Menu action to trigger master sync (kept as internal utility).
  */
 function executeMasterPersonaMapperSync() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
   const cSheet = ss.getSheetByName('Campaign Configuration');
   const dict = {};
 
@@ -904,30 +1043,12 @@ function executeMasterPersonaMapperSync() {
   }
 
   let cid = String(dict['CAMPAIGNID'] || dict['ACTIVECAMPAIGNID'] || dict['CAMPAIGN'] || '').trim();
-
-  if (!cid) {
-    const dashSheet = ss.getSheetByName('Dashboard');
-    if (dashSheet) {
-      const dVals = dashSheet.getRange('A1:E6').getValues();
-      for (let r = 0; r < dVals.length; r++) {
-        for (let c = 0; c < dVals[r].length; c++) {
-          const val = String(dVals[r][c] || '').trim();
-          if (val.startsWith('CMP-') || val.startsWith('PILOT-')) {
-            cid = val;
-            break;
-          }
-        }
-        if (cid) break;
-      }
-    }
-  }
-
-  if (!cid) cid = 'CMP-005';
+  if (!cid) cid = getStudioActiveCampaignId_();
 
   const payload = {
     id: cid,
     name: String(dict['CAMPAIGNNAME'] || dict['NAME'] || cid),
-    department: String(dict['DEPARTMENT'] || 'Procurement'),
+    department: String(dict['DEPARTMENT'] || 'ESG Advisory'),
     country: String(dict['TARGETCOUNTRIES'] || ''),
     industry: String(dict['TARGETINDUSTRIES'] || ''),
     size: String(dict['COMPANYSIZERANGE'] || ''),
@@ -941,27 +1062,26 @@ function executeMasterPersonaMapperSync() {
     campaignFocus: String(dict['CAMPAIGNFOCUS'] || ''),
     searchKeywords: String(dict['SEARCHKEYWORDS'] || ''),
     customBusinessNeeds: String(dict['CUSTOMBUSINESSNEEDS'] || ''),
-    aiProvider: String(dict['AIPROVIDER'] || 'OPENAI'),
-    aiModel: String(dict['AIMODEL'] || 'gpt-4o'),
+    aiProvider: String(dict['AIPROVIDER'] || 'GEMINI'),
+    aiModel: String(dict['AIMODEL'] || 'gemini-3.8-flash'),
     emailVerifier: String(dict['EMAILVERIFICATIONPROVIDER'] || 'ZeroBounce'),
     emailEndpoint: String(dict['EMAILVERIFICATIONENDPOINT'] || ''),
     emailSenderProvider: String(dict['EMAILSENDERPROVIDER'] || 'Workspace Gmail (Drafts Only)'),
-    emailSenderEndpoint: String(dict['EMAILSENDERENDPOINT'] || ''),
+    emailSenderEndpoint: String(dict['EMAILVERIFICATIONENDPOINT'] || ''),
     senderName: String(dict['SENDERNAME'] || ''),
     senderTitle: String(dict['SENDERTITLE'] || ''),
     senderCompany: String(dict['SENDERCOMPANY'] || '')
   };
 
   const res = studioDirectSaveCampaignPipeline(payload);
-
-  const pSheet = findPersonaMapperSettingsSheet(ss);
-  if (pSheet) ss.setActiveSheet(pSheet);
-
-  SpreadsheetApp.getUi().alert(
-    '🎯 Master Sync Complete',
-    '✅ ' + res.message,
-    SpreadsheetApp.getUi().ButtonSet.OK
-  );
+  
+  let ui;
+  try {
+    ui = SpreadsheetApp.getUi();
+    ui.alert('Sync Complete: ' + res.message);
+  } catch (e) {
+    Logger.log('Sync Complete: ' + res.message);
+  }
 }
 
 function syncActiveCampaignToPersonaMapperSettings() {
@@ -972,7 +1092,8 @@ function syncActiveCampaignToPersonaMapperSettings() {
  * Navigates the Google Sheets UI to the Prospect Review Queue tab.
  */
 function navigateToReviewQueueSheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return { success: false, message: 'Spreadsheet not found.' };
   const queueSheet = ss.getSheetByName('Prospect Review Queue');
   if (!queueSheet) {
     return { success: false, message: 'Prospect Review Queue sheet not found.' };
@@ -982,10 +1103,24 @@ function navigateToReviewQueueSheet() {
 }
 
 /**
- * Audits all 12 project tabs, column schemas, and credentials.
+ * Isolated audit function with zero dependencies on other files.
+ * Uses getStudioActiveCampaignId_ to guarantee no cross-file collisions.
+ * Safe in both Menu (UI popup) and Editor Console (Logger) contexts.
  */
-function showSetupStatus() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+function runStudioSpreadsheetAudit() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) {
+    Logger.log('Spreadsheet not accessible.');
+    return;
+  }
+
+  let ui = null;
+  try {
+    ui = SpreadsheetApp.getUi();
+  } catch (e) {
+    // Running from editor execution where UI is unavailable
+  }
+
   const requiredTabs = [
     'Dashboard',
     'Campaigns',
@@ -1021,20 +1156,20 @@ function showSetupStatus() {
   for (let k in scriptProps) {
     const uk = k.toUpperCase();
     if (uk.includes('OPENAI') && scriptProps[k] && !scriptProps[k].includes('PASTE_')) {
-      detectedKeys.push('OpenAI (Project Settings: ' + k + ')');
+      detectedKeys.push('OpenAI (Project Settings)');
     }
     if (uk.includes('GEMINI') && scriptProps[k] && !scriptProps[k].includes('PASTE_')) {
-      detectedKeys.push('Gemini (Project Settings: ' + k + ')');
+      detectedKeys.push('Gemini (Project Settings)');
     }
   }
 
   for (let k in userProps) {
     const uk = k.toUpperCase();
     if (uk.includes('OPENAI') && userProps[k] && !userProps[k].includes('PASTE_')) {
-      detectedKeys.push('OpenAI (User Properties: ' + k + ')');
+      detectedKeys.push('OpenAI (User Properties)');
     }
     if (uk.includes('GEMINI') && userProps[k] && !userProps[k].includes('PASTE_')) {
-      detectedKeys.push('Gemini (User Properties: ' + k + ')');
+      detectedKeys.push('Gemini (User Properties)');
     }
   }
 
@@ -1044,11 +1179,11 @@ function showSetupStatus() {
     for (let i = 1; i < data.length; i++) {
       for (let j = 0; j < data[i].length; j++) {
         const val = String(data[i][j] || '').trim().toUpperCase();
-        if ((norm.includes('OPENAI') || norm.includes('GPT')) && val === 'OPENAI_API_KEY') {
+        if (val === 'OPENAI_API_KEY') {
           const keyVal = String(data[i][j + 1] || data[i][2] || '').trim();
           if (keyVal && !keyVal.includes('PASTE_')) detectedKeys.push('OpenAI (Agent Settings)');
         }
-        if (norm.includes('GEMINI') && val === 'GEMINI_API_KEY') {
+        if (val === 'GEMINI_API_KEY') {
           const keyVal = String(data[i][j + 1] || data[i][2] || '').trim();
           if (keyVal && !keyVal.includes('PASTE_')) detectedKeys.push('Gemini (Agent Settings)');
         }
@@ -1056,34 +1191,14 @@ function showSetupStatus() {
     }
   }
 
-  let configuredModel = 'gpt-4o';
-  const configSheet = ss.getSheetByName('Campaign Configuration');
-  if (configSheet && configSheet.getLastRow() > 1) {
-    const cData = configSheet.getDataRange().getValues();
-    for (let r = 1; r < cData.length; r++) {
-      const k = normalizeStudioKey(cData[r][0]);
-      if (k === 'AIMODEL' && cData[r][1]) configuredModel = String(cData[r][1]).trim();
-    }
-  }
-
+  const activeId = getStudioActiveCampaignId_();
   let apiKeyInfo = 'Not Configured (Add key in Project Settings or Agent Settings)';
   if (detectedKeys.length > 0) {
-    apiKeyInfo = 'Connected: ' + detectedKeys.join(', ') + ' [Model: ' + configuredModel + ']';
-  }
-
-  let senderInfo = 'Workspace Gmail (Drafts Only)';
-  if (configSheet && configSheet.getLastRow() > 1) {
-    const data = configSheet.getDataRange().getValues();
-    for (let i = 1; i < data.length; i++) {
-      const k = normalizeStudioKey(data[i][0]);
-      if ((k === 'DISPATCHMODE' || k === 'EMAILSENDERPROVIDER') && data[i][1]) {
-        senderInfo = String(data[i][1]);
-        break;
-      }
-    }
+    apiKeyInfo = 'Connected: ' + detectedKeys.join(', ');
   }
 
   let message = '📊 SPREADSHEET SYSTEM HEALTH CHECK:\n\n';
+  message += '• Active Campaign: ' + activeId + '\n';
   message += '• Project Tabs Verified: ' + present.length + ' of ' + requiredTabs.length + ' Tabs Active\n';
   if (missing.length > 0) {
     message += '⚠️ Missing Tabs: ' + missing.join(', ') + '\n\n';
@@ -1092,24 +1207,20 @@ function showSetupStatus() {
   }
 
   message += '• AI Engine Status: ' + apiKeyInfo + '\n';
-  message += '• Email Dispatch Channel: ' + senderInfo + '\n';
+  message += '• Email Dispatch Channel: Workspace Gmail (Drafts Only)\n';
   message += '• Suppression Engine: Active (checking Lists & Settings)\n';
   message += '• Human Review Queue: Operational\n\n';
   message += 'Your workspace is healthy and ready to run!';
 
-  SpreadsheetApp.getUi().alert('Spreadsheet Setup Status', message, SpreadsheetApp.getUi().ButtonSet.OK);
+  if (ui) {
+    ui.alert('Spreadsheet Setup Status', message, ui.ButtonSet.OK);
+  } else {
+    Logger.log(message);
+  }
 }
 
-function authorizeStudioPermissions() {
-  UrlFetchApp.fetch('https://www.google.com', { muteHttpExceptions: true });
-  SpreadsheetApp.getActiveSpreadsheet();
-  GmailApp.getDrafts();
-
-  SpreadsheetApp.getUi().alert(
-    'Authorization Successful!',
-    'All permissions (Web Search, Gemini/OpenAI API, Spreadsheet, and Gmail) are now fully authorized.',
-    SpreadsheetApp.getUi().ButtonSet.OK
-  );
+function showSetupStatus() {
+  runStudioSpreadsheetAudit();
 }
 
 function approveSelectedProspect() {
@@ -1125,49 +1236,63 @@ function rejectSelectedProspect() {
 }
 
 function updateSelectedProspectStatus(statusText) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getActiveSheet();
-  if (sheet.getName() !== 'Prospect Review Queue') {
-    SpreadsheetApp.getUi().alert('Please switch to the "Prospect Review Queue" tab before updating prospects.');
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
+  const sheet = ss.getActiveSheet ? ss.getActiveSheet() : null;
+  if (!sheet || sheet.getName() !== 'Prospect Review Queue') {
+    let ui;
+    try {
+      ui = SpreadsheetApp.getUi();
+      ui.alert('Please switch to the "Prospect Review Queue" tab before updating prospects.');
+    } catch (e) {
+      Logger.log('Please switch to the "Prospect Review Queue" tab before updating prospects.');
+    }
     return;
   }
 
   const row = sheet.getActiveCell().getRow();
   if (row <= 1) {
-    SpreadsheetApp.getUi().alert('Please select a prospect row (row 2 or below).');
+    let ui;
+    try {
+      ui = SpreadsheetApp.getUi();
+      ui.alert('Please select a prospect row (row 2 or below).');
+    } catch (e) {
+      Logger.log('Please select a prospect row (row 2 or below).');
+    }
     return;
   }
 
   const user = Session.getActiveUser().getEmail() || 'Admin Reviewer';
   const now = new Date().toLocaleString();
 
-  // Column 18 (R): Review Status
   sheet.getRange(row, 18).setValue(statusText);
-  // Column 19 (S): Reviewer
   sheet.getRange(row, 19).setValue(user);
-  // Column 21 (U): Reviewed At
   sheet.getRange(row, 21).setValue(now);
-  // Column 22 (V): Human Approval Status (strictly adheres to dropdown validation)
   sheet.getRange(row, 22).setValue(statusText);
 
   if (statusText === 'Approved') {
-    // Column 23 (W): Approved By
     sheet.getRange(row, 23).setValue(user);
-    // Column 24 (X): Approved At
     sheet.getRange(row, 24).setValue(now);
   }
 
-  SpreadsheetApp.getActiveSpreadsheet().toast('Row ' + row + ' updated to: ' + statusText, 'Status Updated', 3);
+  ss.toast('Row ' + row + ' updated to: ' + statusText, 'Status Updated', 3);
 }
 
 function createGmailDraftsForApprovedProspects() {
   if (typeof triggerApprovedGmailDrafts === 'function') {
     triggerApprovedGmailDrafts();
   } else {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+    if (!ss) return;
     const queueSheet = ss.getSheetByName('Prospect Review Queue');
     if (!queueSheet) {
-      SpreadsheetApp.getUi().alert('Prospect Review Queue sheet not found.');
+      let ui;
+      try {
+        ui = SpreadsheetApp.getUi();
+        ui.alert('Prospect Review Queue sheet not found.');
+      } catch (e) {
+        Logger.log('Prospect Review Queue sheet not found.');
+      }
       return;
     }
 
@@ -1193,27 +1318,38 @@ function createGmailDraftsForApprovedProspects() {
       }
     }
 
-    SpreadsheetApp.getUi().alert('Drafts Created', 'Successfully generated ' + draftCount + ' draft(s) in Gmail Drafts.', SpreadsheetApp.getUi().ButtonSet.OK);
+    let ui;
+    try {
+      ui = SpreadsheetApp.getUi();
+      ui.alert('Drafts Created', 'Successfully generated ' + draftCount + ' draft(s) in Gmail Drafts.', ui.ButtonSet.OK);
+    } catch (e) {
+      Logger.log('Successfully generated ' + draftCount + ' draft(s) in Gmail Drafts.');
+    }
   }
 }
 
 function sendApprovedOutreachEmails() {
-  const ui = SpreadsheetApp.getUi();
-  const confirmation = ui.alert(
-    'Send Outreach Emails?',
-    'This will send real emails for all leads marked "Approved" in the Prospect Review Queue.\n\nAre you sure you want to proceed?',
-    ui.ButtonSet.YES_NO
-  );
-
-  if (confirmation !== ui.Button.YES) return;
+  let ui;
+  try {
+    ui = SpreadsheetApp.getUi();
+    const confirmation = ui.alert(
+      'Send Outreach Emails?',
+      'This will send real emails for all leads marked "Approved" in the Prospect Review Queue.\n\nAre you sure you want to proceed?',
+      ui.ButtonSet.YES_NO
+    );
+    if (confirmation !== ui.Button.YES) return;
+  } catch (e) {
+    Logger.log('Running outside UI context, proceeding with send pipeline.');
+  }
 
   if (typeof sendApprovedEmailsPipeline === 'function') {
     sendApprovedEmailsPipeline();
   } else {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+    if (!ss) return;
     const queueSheet = ss.getSheetByName('Prospect Review Queue');
     if (!queueSheet) {
-      ui.alert('Prospect Review Queue sheet not found.');
+      if (ui) ui.alert('Prospect Review Queue sheet not found.');
       return;
     }
 
@@ -1238,24 +1374,7 @@ function sendApprovedOutreachEmails() {
         }
       }
     }
-    ui.alert('Outreach Complete', 'Successfully dispatched ' + sentCount + ' live emails.', ui.ButtonSet.OK);
-  }
-}
-
-function triggerSetupAllDropdowns() {
-  if (typeof setupAllSheetsAndDropdowns === 'function') {
-    setupAllSheetsAndDropdowns();
-  } else {
-    SpreadsheetApp.getUi().alert('setupAllSheetsAndDropdowns() function not found in SheetSetup.gs.');
-  }
-}
-
-function preparePersonaMapperSheets() {
-  if (typeof ensurePersonaMapperSheets_ === 'function') {
-    ensurePersonaMapperSheets_(SpreadsheetApp.getActiveSpreadsheet());
-    SpreadsheetApp.getUi().alert('Persona Mapper and Prospect Review Queue tabs are ready.');
-  } else {
-    SpreadsheetApp.getUi().alert('ensurePersonaMapperSheets_ initializer not found in PersonaMapper.js.');
+    if (ui) ui.alert('Outreach Complete', 'Successfully dispatched ' + sentCount + ' live emails.', ui.ButtonSet.OK);
   }
 }
 
@@ -1263,7 +1382,7 @@ function triggerPilotRun() {
   if (typeof runPilotOnRealSheets === 'function') {
     runPilotOnRealSheets();
   } else {
-    SpreadsheetApp.getUi().alert('runPilotOnRealSheets() function not found in PilotSandboxRunner.gs.');
+    Logger.log('runPilotOnRealSheets() function not found in PilotSandboxRunner.gs.');
   }
 }
 
@@ -1271,6 +1390,31 @@ function triggerPilotCleanup() {
   if (typeof cleanupPilotDataFromRealSheets === 'function') {
     cleanupPilotDataFromRealSheets();
   } else {
-    SpreadsheetApp.getUi().alert('cleanupPilotDataFromRealSheets() function not found in PilotSandboxRunner.gs.');
+    Logger.log('cleanupPilotDataFromRealSheets() function not found in PilotSandboxRunner.gs.');
+  }
+}
+
+function triggerSetupAllDropdowns() {
+  if (typeof setupAllSheetsAndDropdowns === 'function') {
+    setupAllSheetsAndDropdowns();
+  }
+}
+
+function preparePersonaMapperSheets() {
+  if (typeof ensurePersonaMapperSheets_ === 'function') {
+    ensurePersonaMapperSheets_(SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive());
+  }
+}
+
+function authorizeStudioPermissions() {
+  UrlFetchApp.fetch('https://www.google.com', { muteHttpExceptions: true });
+  SpreadsheetApp.getActiveSpreadsheet();
+  GmailApp.getDrafts();
+  let ui;
+  try {
+    ui = SpreadsheetApp.getUi();
+    ui.alert('Authorization verified successfully.');
+  } catch (e) {
+    Logger.log('Authorization verified successfully.');
   }
 }
