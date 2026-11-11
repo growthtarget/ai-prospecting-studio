@@ -6,7 +6,7 @@
       * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
       body { margin: 0; padding: 12px; background: #f8f9fa; color: #202124; font-size: 13px; }
       .card { background: #fff; border: 1px solid #dadce0; border-radius: 8px; padding: 12px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(60,64,67,0.08); }
-      .header-title { font-size: 15px; font-weight: 700; color: #1a73e8; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+      .header-title { font-size: 15px; font-weight: 700; color: #174ea6; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
       .field { margin-bottom: 10px; }
       label { display: block; font-size: 11px; font-weight: 600; color: #5f6368; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.3px; }
       select, input[type="text"], input[type="number"], textarea { width: 100%; padding: 7px 9px; border: 1px solid #dadce0; border-radius: 4px; font-size: 12px; color: #202124; background: #fff; }
@@ -21,18 +21,18 @@
       .btn-primary:hover { background: #1557b0; }
       .btn-success { background: #1e8e3e; color: #fff; }
       .btn-success:hover { background: #188038; }
-      .btn-secondary { background: #fff; color: #1a73e8; border: 1px solid #dadce0; }
+      .btn-secondary { background: #fff; color: #174ea6; border: 1px solid #dadce0; }
       .btn-secondary:hover { background: #f1f3f4; }
       .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; }
       .row { display: flex; gap: 8px; }
       .row .field { flex: 1; }
       .status { font-size: 11px; padding: 8px; border-radius: 4px; margin-top: 8px; display: none; line-height: 1.4; }
-      .status.info { display: block; background: #e8f0fe; color: #1a73e8; border: 1px solid #d2e3fc; }
+      .status.info { display: block; background: #e8f0fe; color: #174ea6; border: 1px solid #d2e3fc; }
       .status.success { display: block; background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
       .status.error { display: block; background: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }
       .hint { font-size: 11px; color: #5f6368; margin-top: 3px; font-style: italic; }
       hr { border: 0; border-top: 1px solid #eee; margin: 12px 0; }
-      .subheading { font-weight: 700; font-size: 11px; color: #1a73e8; text-transform: uppercase; margin: 8px 0 6px 0; }
+      .subheading { font-weight: 700; font-size: 11px; color: #174ea6; text-transform: uppercase; margin: 8px 0 6px 0; }
       .custom-needs-container { background: #f1f3f4; border: 1px dashed #c6c9cc; border-radius: 6px; padding: 10px; margin-top: 10px; }
     </style>
   </head>
@@ -169,7 +169,7 @@
         </div>
         <div class="field">
           <label for="campaignFocus">Campaign Focus / Objective Hook</label>
-          <input type="text" id="campaignFocus" placeholder="e.g. Clean power transition audits and supplier ESG reporting"></input>
+          <input type="text" id="campaignFocus" placeholder="e.g. Clean power transition audits and supplier ESG reporting">
         </div>
         <div class="field">
           <label for="searchKeywords">Additional Search Keywords</label>
@@ -185,7 +185,7 @@
         <span id="iconIntelligence">▼</span>
       </div>
       <div id="secIntelligence">
-        <label style="color:#1a73e8; font-weight:700;">Standard ESG Signals</label>
+        <label style="color:#174ea6; font-weight:700;">Standard ESG Signals</label>
         <div class="checkbox-grid">
           <label class="checkbox-item"><input type="checkbox" id="incEsgObligations" checked> ESG Reporting Obligations (CSRD/GRI)</label>
           <label class="checkbox-item"><input type="checkbox" id="incEsgMaturity" checked> ESG Reporting Maturity</label>
@@ -209,7 +209,7 @@
               <option value="procurement">Procurement (Vendor Risk, Questionnaire Drag, Tier-1 Audits)</option>
               <option value="cybersecurity">Cybersecurity & IT (SOC 2, ISO 27001, AWS Migration)</option>
               <option value="enterprise_saas">Enterprise SaaS (Legacy ERP Migration, API Modernization)</option>
-              <option value="fintech">FinTech & Wealth (Banking Regulations, AML, Payment Compliance)</option>
+              <option value="fintech">FinTech & Banking (Banking Regulations, AML, Payment Compliance)</option>
               <option value="hr_talent">HR & People Ops (Engineering Backlog, High Churn, Remote Scale)</option>
             </select>
           </div>
@@ -298,13 +298,13 @@
         <div class="field">
           <label for="aiProviderSelect">AI Provider</label>
           <select id="aiProviderSelect" onchange="onProviderChanged()">
-            <option value="OPENAI" selected>OpenAI (GPT-4o)</option>
-            <option value="GEMINI">Google Gemini (Search Grounding & Fast)</option>
+            <option value="GEMINI" selected>Google Gemini (Search Grounding & Fast)</option>
+            <option value="OPENAI">OpenAI (GPT-4o)</option>
           </select>
         </div>
         <div class="field">
           <label for="aiModelInput">AI Model Name</label>
-          <input type="text" id="aiModelInput" value="gpt-4o">
+          <input type="text" id="aiModelInput" value="gemini-3.8-flash">
         </div>
       </div>
     </div>
@@ -338,10 +338,10 @@
         <!-- Part B: Email Sender Platform -->
         <div class="subheading">Email Dispatch Channel</div>
         <div class="field">
-          <label for="senderProviderSelect" style="color:#1a73e8; font-weight:700;">Email Sender Provider</label>
+          <label for="senderProviderSelect" style="color:#174ea6; font-weight:700;">Email Sender Provider</label>
           <select id="senderProviderSelect" onchange="onSenderChanged()">
-            <option value="Workspace Gmail (Direct Send)">Workspace Gmail (Direct Send)</option>
             <option value="Workspace Gmail (Drafts Only)" selected>Workspace Gmail (Drafts Only)</option>
+            <option value="Workspace Gmail (Direct Send)">Workspace Gmail (Direct Send)</option>
             <option value="Smartlead">Smartlead (enter campaign ID below)</option>
             <option value="Instantly">Instantly (enter campaign ID below)</option>
             <option value="Custom Webhook">Custom Webhook (enter webhook URL below)</option>
@@ -397,8 +397,8 @@
           document.getElementById('campaignSelect').value = selectVal;
           onCampaignSelected(true);
         } else {
-          document.getElementById('campaignIdInput').value = 'CMP-005';
-          document.getElementById('campaignNameInput').value = 'Energy Canada';
+          document.getElementById('campaignIdInput').value = 'CMP-001';
+          document.getElementById('campaignNameInput').value = 'Enterprise Scope 3 & ESG Supply Chain Readiness';
           applyDepartmentPreset('procurement');
         }
       };
@@ -498,7 +498,7 @@
           }
         }
 
-        // Set specific targeting fields without Pilot defaults
+        // Targeting Profile
         document.getElementById('targetCountries').value = data.country || '';
         document.getElementById('targetIndustries').value = data.industry || '';
         document.getElementById('companySize').value = data.size || '';
@@ -538,15 +538,15 @@
         document.getElementById('humanApprovalRequired').checked = data.humanApprovalRequired !== false;
         document.getElementById('autoSendEnabled').checked = data.autoSendEnabled === true;
 
-        document.getElementById('aiProviderSelect').value = data.aiProvider || 'OPENAI';
-        document.getElementById('aiModelInput').value = data.aiModel || (data.aiProvider === 'GEMINI' ? 'gemini-2.5-flash' : 'gpt-4o');
+        const aiProv = data.aiProvider || 'GEMINI';
+        document.getElementById('aiProviderSelect').value = aiProv;
+        document.getElementById('aiModelInput').value = data.aiModel || (aiProv === 'GEMINI' ? 'gemini-3.8-flash' : 'gpt-4o');
 
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
         document.getElementById('senderProviderSelect').value = data.emailSenderProvider || 'Workspace Gmail (Drafts Only)';
         document.getElementById('senderEndpointInput').value = data.emailSenderEndpoint || '';
 
-        // Sender profile fields (no hardcoded pilot fallback)
         document.getElementById('senderName').value = data.senderName || '';
         document.getElementById('senderTitle').value = data.senderTitle || '';
         document.getElementById('senderCompany').value = data.senderCompany || '';
@@ -559,12 +559,10 @@
         const cid = document.getElementById('campaignSelect').value;
         if (!cid) return;
 
-        // 1. Immediately populate from local cache
         const localData = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : { id: cid };
         populateFormWithData(localData);
         showStatus('Loaded configuration for ' + cid, 'info');
 
-        // 2. Synchronize active state with the Google Sheet and update Dashboard in background
         if (!skipSync) {
           google.script.run
             .withSuccessHandler(function(res) {
@@ -577,7 +575,7 @@
               }
             })
             .withFailureHandler(function(err) {
-              showStatus('⚠️ Loaded locally, but background sheet activation failed: ' + err.message, 'error');
+              showStatus('⚠️ Loaded locally, but sheet sync failed: ' + err.message, 'error');
             })
             .selectAndActivateCampaign(cid);
         }
@@ -586,7 +584,7 @@
       function onProviderChanged() {
         const p = document.getElementById('aiProviderSelect').value;
         const m = document.getElementById('aiModelInput');
-        if (p === 'GEMINI') m.value = 'gemini-2.5-flash';
+        if (p === 'GEMINI') m.value = 'gemini-3.8-flash';
         if (p === 'OPENAI') m.value = 'gpt-4o';
       }
 
@@ -628,7 +626,7 @@
         const cid = document.getElementById('campaignIdInput').value.trim();
         const cname = document.getElementById('campaignNameInput').value.trim();
         if (!cid) {
-          alert('Please enter a Campaign ID (e.g. CMP-005)');
+          alert('Please enter a Campaign ID (e.g. CMP-001)');
           return;
         }
 
@@ -674,7 +672,7 @@
           autoSendEnabled: document.getElementById('autoSendEnabled').checked,
 
           aiProvider: document.getElementById('aiProviderSelect').value,
-          aiModel: document.getElementById('aiModelInput').value.trim() || 'gpt-4o',
+          aiModel: document.getElementById('aiModelInput').value.trim() || 'gemini-3.8-flash',
 
           emailVerifier: document.getElementById('emailVerifierSelect').value,
           emailEndpoint: document.getElementById('emailEndpoint').value.trim(),

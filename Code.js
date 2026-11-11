@@ -741,12 +741,12 @@ function updateDashboardForActiveCampaign(payload) {
 
   const cid = payload.id;
   const prov = String(payload.aiProvider || 'OPENAI').toUpperCase();
-  const model = String(payload.aiModel || (prov.includes('GEMINI') ? 'gemini-2.5-flash' : 'gpt-4o')).trim();
+  const model = String(payload.aiModel || (prov.includes('GEMINI') ? 'gemini-3.8-flash' : 'gpt-4o')).trim();
 
   // Build high-clarity formatted AI Model description
   let aiLabel = '';
   if (prov.includes('GEMINI')) {
-    aiLabel = 'Gemini ' + (model.includes('2.5') ? '2.5 Flash' : model) + ' + Search Grounding';
+    aiLabel = 'Gemini ' + model + ' + Search Grounding';
   } else {
     aiLabel = 'OpenAI ' + model.toUpperCase();
   }
@@ -788,7 +788,7 @@ function updateDashboardForActiveCampaign(payload) {
         const approval = String(data[i][21] || '').trim();
         const sendStatus = String(data[i][24] || '').trim();
         if (approval.startsWith('Approved')) approvedCount++;
-        if (sendStatus === 'Draft Created') draftsCount++;
+        if (sendStatus === 'Draft Created' || sendStatus === 'Draft Created in Gmail') draftsCount++;
         if (sendStatus === 'Sent') sentCount++;
       }
     }
@@ -981,24 +981,6 @@ function navigateToReviewQueueSheet() {
   return { success: true, message: 'Switched to Prospect Review Queue.' };
 }
 
-function runCompanyDiscoveryFromSidebar(cid) {
-  if (typeof runCompanyDiscoveryForSelectedCampaign === 'function') {
-    return runCompanyDiscoveryForSelectedCampaign(cid);
-  } else if (typeof runCompanyDiscovery === 'function') {
-    return runCompanyDiscovery(cid);
-  }
-  throw new Error('Discovery engine is not loaded in this project.');
-}
-
-function runPersonaMapperFromSidebar(cid) {
-  if (typeof runPersonaMapperForSelectedCampaign === 'function') {
-    return runPersonaMapperForSelectedCampaign(cid);
-  } else if (typeof runPersonaMapper === 'function') {
-    return runPersonaMapper(cid);
-  }
-  throw new Error('Persona Mapper engine is not loaded in this project.');
-}
-
 /**
  * Audits all 12 project tabs, column schemas, and credentials.
  */
@@ -1062,11 +1044,11 @@ function showSetupStatus() {
     for (let i = 1; i < data.length; i++) {
       for (let j = 0; j < data[i].length; j++) {
         const val = String(data[i][j] || '').trim().toUpperCase();
-        if (val === 'OPENAI_API_KEY') {
+        if ((norm.includes('OPENAI') || norm.includes('GPT')) && val === 'OPENAI_API_KEY') {
           const keyVal = String(data[i][j + 1] || data[i][2] || '').trim();
           if (keyVal && !keyVal.includes('PASTE_')) detectedKeys.push('OpenAI (Agent Settings)');
         }
-        if (val === 'GEMINI_API_KEY') {
+        if (norm.includes('GEMINI') && val === 'GEMINI_API_KEY') {
           const keyVal = String(data[i][j + 1] || data[i][2] || '').trim();
           if (keyVal && !keyVal.includes('PASTE_')) detectedKeys.push('Gemini (Agent Settings)');
         }
@@ -1089,12 +1071,12 @@ function showSetupStatus() {
     apiKeyInfo = 'Connected: ' + detectedKeys.join(', ') + ' [Model: ' + configuredModel + ']';
   }
 
-  let senderInfo = 'Google Workspace (Drafts Only)';
+  let senderInfo = 'Workspace Gmail (Drafts Only)';
   if (configSheet && configSheet.getLastRow() > 1) {
     const data = configSheet.getDataRange().getValues();
     for (let i = 1; i < data.length; i++) {
       const k = normalizeStudioKey(data[i][0]);
-      if (k === 'DISPATCHMODE' && data[i][1]) {
+      if ((k === 'DISPATCHMODE' || k === 'EMAILSENDERPROVIDER') && data[i][1]) {
         senderInfo = String(data[i][1]);
         break;
       }
@@ -1131,15 +1113,15 @@ function authorizeStudioPermissions() {
 }
 
 function approveSelectedProspect() {
-  updateSelectedProspectStatus('Approved - Ready for Outreach');
+  updateSelectedProspectStatus('Approved');
 }
 
 function markSelectedProspectNeedsEditing() {
-  updateSelectedProspectStatus('Needs Human Review');
+  updateSelectedProspectStatus('Needs Review');
 }
 
 function rejectSelectedProspect() {
-  updateSelectedProspectStatus('Rejected - Unqualified');
+  updateSelectedProspectStatus('Rejected');
 }
 
 function updateSelectedProspectStatus(statusText) {
@@ -1156,9 +1138,25 @@ function updateSelectedProspectStatus(statusText) {
     return;
   }
 
+  const user = Session.getActiveUser().getEmail() || 'Admin Reviewer';
+  const now = new Date().toLocaleString();
+
+  // Column 18 (R): Review Status
+  sheet.getRange(row, 18).setValue(statusText);
+  // Column 19 (S): Reviewer
+  sheet.getRange(row, 19).setValue(user);
+  // Column 21 (U): Reviewed At
+  sheet.getRange(row, 21).setValue(now);
+  // Column 22 (V): Human Approval Status (strictly adheres to dropdown validation)
   sheet.getRange(row, 22).setValue(statusText);
-  sheet.getRange(row, 23).setValue(Session.getActiveUser().getEmail() || 'Admin Reviewer');
-  sheet.getRange(row, 24).setValue(new Date().toLocaleString());
+
+  if (statusText === 'Approved') {
+    // Column 23 (W): Approved By
+    sheet.getRange(row, 23).setValue(user);
+    // Column 24 (X): Approved At
+    sheet.getRange(row, 24).setValue(now);
+  }
+
   SpreadsheetApp.getActiveSpreadsheet().toast('Row ' + row + ' updated to: ' + statusText, 'Status Updated', 3);
 }
 
@@ -1183,10 +1181,11 @@ function createGmailDraftsForApprovedProspects() {
       const subject = String(data[i][14] || '').trim();
       const body = String(data[i][15] || '').trim();
 
-      if (approval.startsWith('Approved') && sendStatus !== 'Draft Created' && sendStatus !== 'Sent' && email && subject && body) {
+      if (approval.startsWith('Approved') && sendStatus !== 'Draft Created' && sendStatus !== 'Draft Created in Gmail' && sendStatus !== 'Sent' && email && subject && body) {
         try {
           GmailApp.createDraft(email, subject, body);
-          queueSheet.getRange(i + 1, 25).setValue('Draft Created');
+          queueSheet.getRange(i + 1, 25).setValue('Draft Created in Gmail');
+          queueSheet.getRange(i + 1, 26).setValue(new Date().toLocaleString());
           draftCount++;
         } catch (err) {
           queueSheet.getRange(i + 1, 27).setValue(err.message);
@@ -1244,33 +1243,34 @@ function sendApprovedOutreachEmails() {
 }
 
 function triggerSetupAllDropdowns() {
-  if (typeof setupAllDropdownValidations === 'function') {
-    setupAllDropdownValidations();
+  if (typeof setupAllSheetsAndDropdowns === 'function') {
+    setupAllSheetsAndDropdowns();
   } else {
-    SpreadsheetApp.getUi().alert('SheetSetup.gs dropdown initializer not found.');
+    SpreadsheetApp.getUi().alert('setupAllSheetsAndDropdowns() function not found in SheetSetup.gs.');
   }
 }
 
 function preparePersonaMapperSheets() {
-  if (typeof setupPersonaMapperSheets === 'function') {
-    setupPersonaMapperSheets();
+  if (typeof ensurePersonaMapperSheets_ === 'function') {
+    ensurePersonaMapperSheets_(SpreadsheetApp.getActiveSpreadsheet());
+    SpreadsheetApp.getUi().alert('Persona Mapper and Prospect Review Queue tabs are ready.');
   } else {
-    SpreadsheetApp.getUi().alert('Persona Mapper setup initializer not found.');
+    SpreadsheetApp.getUi().alert('ensurePersonaMapperSheets_ initializer not found in PersonaMapper.js.');
   }
 }
 
 function triggerPilotRun() {
-  if (typeof runAuthenticPilotSimulation === 'function') {
-    runAuthenticPilotSimulation();
+  if (typeof runPilotOnRealSheets === 'function') {
+    runPilotOnRealSheets();
   } else {
-    SpreadsheetApp.getUi().alert('PilotSandboxRunner.gs not found.');
+    SpreadsheetApp.getUi().alert('runPilotOnRealSheets() function not found in PilotSandboxRunner.gs.');
   }
 }
 
 function triggerPilotCleanup() {
-  if (typeof cleanupSandboxPilotData === 'function') {
-    cleanupSandboxPilotData();
+  if (typeof cleanupPilotDataFromRealSheets === 'function') {
+    cleanupPilotDataFromRealSheets();
   } else {
-    SpreadsheetApp.getUi().alert('PilotSandboxRunner.gs cleanup not found.');
+    SpreadsheetApp.getUi().alert('cleanupPilotDataFromRealSheets() function not found in PilotSandboxRunner.gs.');
   }
 }

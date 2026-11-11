@@ -3,20 +3,20 @@
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
  * AUTOMATED SHEET & DROPDOWN SETUP ENGINE
  * ============================================================================
- * File: SheetSetup.gs
+ * File: SheetSetup.gs / SheetSetup.js
  * 
  * PURPOSE:
- * 1. Pre-populates "Campaign Configuration" with all required parameters.
- * 2. Injects native Google Sheets dropdown menus across ALL tabs to eliminate
- *    manual typing and human error.
- * 3. Ensures 100% column schema consistency across the entire workbook.
+ * 1. Pre-populates "Campaign Configuration" with all 38 standardized parameters.
+ * 2. Injects native Google Sheets dropdown menus dynamically by parameter key.
+ * 3. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across tabs.
+ * 4. Ensures 100% column schema consistency across the entire workbook.
  * ============================================================================
  */
 
 function setupAllSheetsAndDropdowns() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   
-  // 1. Setup Campaign Configuration with Parameter Table & In-Cell Dropdowns
+  // 1. Setup Campaign Configuration with Full 38 Parameters & Dynamic Dropdowns
   setupCampaignConfigurationTab(ss);
   
   // 2. Setup Campaigns Tab with Dropdowns
@@ -37,12 +37,13 @@ function setupAllSheetsAndDropdowns() {
   // 7. Setup Agent Settings Tab with Dropdowns
   setupAgentSettingsTabDropdowns(ss);
 
-  ss.toast('All tabs formatted and native dropdown menus applied successfully!', '✅ Setup Complete', 10);
+  SpreadsheetApp.flush();
+  ss.toast('All tabs formatted and dynamic dropdown menus applied successfully!', '✅ Setup Complete', 10);
   Logger.log('>>> ALL TABS & DROPDOWNS CONFIGURED SUCCESSFULLY <<<');
 }
 
 /**
- * 1. Formats "Campaign Configuration" with Parameters, Default Values, and Dropdowns
+ * 1. Formats "Campaign Configuration" with 38 Parameters, Canonical Values, and Dynamic Dropdowns
  */
 function setupCampaignConfigurationTab(ss) {
   const sheet = getOrCreateSheet(ss, 'Campaign Configuration');
@@ -52,60 +53,98 @@ function setupCampaignConfigurationTab(ss) {
   sheet.appendRow(headers);
   sheet.getRange(1, 1, 1, 3)
     .setFontWeight('bold')
-    .setBackground('#1a73e8')
-    .setFontColor('#ffffff');
+    .setFontColor('#174ea6')
+    .setBackground('#e8f0fe')
+    .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+  sheet.setFrozenRows(1);
 
   const configRows = [
-    ['CAMPAIGN_ID', 'CMP-2026-001', 'Unique campaign identifier tag'],
-    ['CAMPAIGN_NAME', 'Enterprise Scope 3 & ESG Supply Chain Readiness', 'Human-readable campaign title'],
-    ['DEPARTMENT_OWNER', 'ESG Advisory', 'Department managing this campaign'],
-    ['TARGET_INDUSTRIES', 'Freight & Logistics, Industrial Equipment', 'Target industry verticals'],
-    ['TARGET_GEOGRAPHY', 'United States & Canada', 'Target geographic focus'],
-    ['COMPANY_SIZE', '50 - 250 employees', 'Ideal employee size range'],
-    ['RESEARCH_DEPTH', 'Deep Persona', 'Depth of web & executive footprint scanning'],
-    ['MIN_COMPANY_FIT_SCORE', '80', 'Threshold to qualify companies for persona research'],
-    ['MIN_PERSONA_FIT_SCORE', '85', 'Threshold for automated email draft approval'],
-    ['MAX_COMPANIES_LIMIT', '25', 'Max target companies to evaluate in this run'],
-    ['MAX_PERSONAS_PER_COMPANY', '2', 'Maximum decision-makers mapped per company'],
-    ['SENDER_NAME', 'Alex Mercer', 'Sender name appearing in outreach copy & email signature'],
-    ['SENDER_COMPANY', 'eValuater Solutions', 'Sender company name appearing in email body'],
-    ['SENDER_TITLE', 'Solutions Consultant', 'Sender job title in signature'],
-    ['DISPATCH_MODE', 'Google Workspace (Drafts Only)', 'Outreach dispatch channel'],
-    ['ENABLE_SEARCH_GROUNDING', 'TRUE', 'Enables real-time Google Search grounding with Gemini'],
-    ['EMAIL_VERIFICATION_PROVIDER', 'ZeroBounce', 'Selected email verification service'],
-    ['STATUS', 'Active', 'Operational status of this campaign configuration']
+    ['CAMPAIGN_ID', 'CMP-2026-001', 'Active Campaign Identifier'],
+    ['CAMPAIGN_NAME', 'Enterprise Scope 3 & ESG Supply Chain Readiness', 'Active Campaign Name'],
+    ['DEPARTMENT', 'ESG Advisory', 'Operating Department / Business Unit'],
+    ['TARGET_COUNTRIES', 'United States & Canada', 'Target Geographies / Regions'],
+    ['TARGET_INDUSTRIES', 'Freight & Logistics, Industrial Equipment', 'Target Industry Verticals'],
+    ['COMPANY_SIZE_RANGE', '50 - 250 employees', 'Target Employee Size Range'],
+    ['MAX_COMPANIES', '5', 'Maximum target companies to discover per run'],
+    ['RESEARCH_DEPTH', 'Deep Persona', 'Depth of company research and profiling'],
+    ['EVIDENCE_PERIOD_MONTHS', '12', 'Historical lookback window in months'],
+    ['MIN_COMPANY_SCORE', '80', 'Minimum company qualification threshold (0-100)'],
+    ['MIN_PERSONA_SCORE', '85', 'Minimum persona fit confidence threshold (0-100)'],
+    ['MIN_EMAIL_PRIORITY_SCORE', '80', 'Minimum email priority score for sending (0-100)'],
+    ['TARGET_TITLES', 'VP Procurement; Head of Supply Chain; Director of Sustainability', 'Semicolon-delimited target job titles'],
+    ['CAMPAIGN_FOCUS', 'Scope 3 vendor emissions transparency and CSRD readiness', 'Primary value proposition hook'],
+    ['SEARCH_KEYWORDS', 'Scope 3, CSRD, GHG Protocol, supplier risk, compliance audits', 'Search discovery query keywords'],
+    ['CUSTOM_BUSINESS_NEEDS', '- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency\n- High vendor questionnaire drop-off rate during procurement audits\n- Eliminating manual spreadsheet follow-ups with suppliers', 'Manual department business needs & buying triggers'],
+    ['AI_PROVIDER', 'GEMINI', 'Selected AI engine (GEMINI or OPENAI)'],
+    ['PRIMARY_AI_PROVIDER', 'GEMINI', 'Selected AI engine (legacy alias)'],
+    ['AI_MODEL', 'gemini-3.8-flash', 'AI Model version name'],
+    ['EMAIL_VERIFICATION_PROVIDER', 'ZeroBounce', 'Email verification vendor'],
+    ['EMAIL_VERIFICATION_ENDPOINT', 'https://api.zerobounce.net/v2/validate', 'Email verification REST endpoint URL'],
+    ['EMAIL_SENDER_PROVIDER', 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform'],
+    ['DISPATCH_MODE', 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform mode'],
+    ['EMAIL_SENDER_ENDPOINT', '', 'Sender campaign UUID or webhook URL'],
+    ['SENDER_NAME', 'Alex Mercer', 'Display name for outreach email signature'],
+    ['SENDER_TITLE', 'Solutions Consultant', 'Sender job title for email signature'],
+    ['SENDER_COMPANY', 'eValuater Solutions', 'Sender company name for email signature'],
+    ['INCLUDE_ESG_OBLIGATIONS', 'TRUE', 'Evaluate CSRD/GRI obligations'],
+    ['INCLUDE_ESG_MATURITY', 'TRUE', 'Evaluate ESG reporting maturity'],
+    ['INCLUDE_SUPPLY_CHAIN', 'TRUE', 'Evaluate supply chain complexity'],
+    ['INCLUDE_SCOPE3', 'TRUE', 'Evaluate Scope 3 emissions exposure'],
+    ['INCLUDE_DATA_CHALLENGES', 'TRUE', 'Evaluate sustainability data challenges'],
+    ['INCLUDE_DIGITAL', 'TRUE', 'Evaluate digital transformation & AI adoption'],
+    ['INCLUDE_ESG_GOVERNANCE', 'TRUE', 'Evaluate ESG board oversight'],
+    ['INCLUDE_TRIGGERS', 'TRUE', 'Evaluate commercial buying triggers'],
+    ['INCLUDE_EVALUATER', 'TRUE', 'Evaluate eValuater solution fit'],
+    ['HUMAN_APPROVAL_REQUIRED', 'TRUE', 'Requires human review in queue before sending'],
+    ['AUTO_SEND_ENABLED', 'FALSE', 'Auto-send emails immediately upon approval']
   ];
 
   sheet.getRange(2, 1, configRows.length, 3).setValues(configRows);
 
-  // Apply In-Cell Dropdown Validations to Column B for specific parameters
-  const dropdownRules = {
-    3: ['ESG Advisory', 'Enterprise Sales', 'Procurement', 'Marketing', 'Executive Leadership'], // Row 4 (idx 3): DEPARTMENT_OWNER
-    4: ['Freight & Logistics, Industrial Equipment', 'FinTech / SaaS', 'Healthcare & Pharma', 'Energy & CleanTech', 'Retail & Consumer Goods'], // Row 5: TARGET_INDUSTRIES
-    5: ['United States & Canada', 'United States Only', 'Canada Only', 'Europe / UK', 'Global'], // Row 6: TARGET_GEOGRAPHY
-    6: ['10 - 50 employees', '50 - 250 employees', '250 - 1000 employees', '1000+ Enterprise'], // Row 7: COMPANY_SIZE
-    7: ['Standard', 'Deep Persona', 'Comprehensive / Forensic'], // Row 8: RESEARCH_DEPTH
-    8: ['70', '75', '80', '85', '90'], // Row 9: MIN_COMPANY_FIT_SCORE
-    9: ['75', '80', '85', '90', '95'], // Row 10: MIN_PERSONA_FIT_SCORE
-    10: ['10', '25', '50', '100', '250'], // Row 11: MAX_COMPANIES_LIMIT
-    11: ['1', '2', '3', '5'], // Row 12: MAX_PERSONAS_PER_COMPANY
-    15: ['Google Workspace (Drafts Only)', 'Google Workspace (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'], // Row 16: DISPATCH_MODE
-    16: ['TRUE', 'FALSE'], // Row 17: ENABLE_SEARCH_GROUNDING
-    17: ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None'], // Row 18: EMAIL_VERIFICATION_PROVIDER
-    18: ['Draft', 'Active', 'Paused', 'Completed'] // Row 19: STATUS
+  // Dynamic Parameter Dropdown Rules Definition (Key-Based)
+  const dynamicRules = {
+    'DEPARTMENT': ['Procurement', 'ESG Advisory', 'Enterprise Sales', 'Cybersecurity & IT', 'Operations & Compliance', 'Enterprise SaaS / IT', 'FinTech & Banking', 'HR & Talent Ops', 'Marketing', 'Executive Leadership'],
+    'TARGET_COUNTRIES': ['United States & Canada', 'United States Only', 'Canada Only', 'Sweden, Norway, Denmark', 'United Kingdom & Europe', 'Global'],
+    'TARGET_INDUSTRIES': ['Freight & Logistics, Industrial Equipment', 'Energy, CleanTech & Utilities', 'Manufacturing, Industrial, BioTech', 'Financial Services / FinTech SaaS', 'Retail & Consumer Goods'],
+    'COMPANY_SIZE_RANGE': ['10 - 50 employees', '50 - 250 employees', '250 - 1000 employees', '1000+ Enterprise'],
+    'MAX_COMPANIES': ['3', '5', '10', '25', '50'],
+    'RESEARCH_DEPTH': ['Standard', 'Deep Persona', 'Comprehensive / Forensic'],
+    'EVIDENCE_PERIOD_MONTHS': ['6', '12', '24'],
+    'MIN_COMPANY_SCORE': ['70', '75', '80', '85', '90'],
+    'MIN_PERSONA_SCORE': ['75', '80', '85', '90', '95'],
+    'MIN_EMAIL_PRIORITY_SCORE': ['70', '75', '80', '85', '90'],
+    'AI_PROVIDER': ['GEMINI', 'OPENAI'],
+    'PRIMARY_AI_PROVIDER': ['GEMINI', 'OPENAI'],
+    'AI_MODEL': ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gpt-4o', 'gpt-4o-mini', 'o1-mini'],
+    'EMAIL_VERIFICATION_PROVIDER': ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None'],
+    'EMAIL_SENDER_PROVIDER': ['Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Google Workspace (Drafts Only)', 'Google Workspace (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'],
+    'DISPATCH_MODE': ['Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Google Workspace (Drafts Only)', 'Google Workspace (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'],
+    'INCLUDE_ESG_OBLIGATIONS': ['TRUE', 'FALSE'],
+    'INCLUDE_ESG_MATURITY': ['TRUE', 'FALSE'],
+    'INCLUDE_SUPPLY_CHAIN': ['TRUE', 'FALSE'],
+    'INCLUDE_SCOPE3': ['TRUE', 'FALSE'],
+    'INCLUDE_DATA_CHALLENGES': ['TRUE', 'FALSE'],
+    'INCLUDE_DIGITAL': ['TRUE', 'FALSE'],
+    'INCLUDE_ESG_GOVERNANCE': ['TRUE', 'FALSE'],
+    'INCLUDE_TRIGGERS': ['TRUE', 'FALSE'],
+    'INCLUDE_EVALUATER': ['TRUE', 'FALSE'],
+    'HUMAN_APPROVAL_REQUIRED': ['TRUE', 'FALSE'],
+    'AUTO_SEND_ENABLED': ['TRUE', 'FALSE']
   };
 
-  Object.keys(dropdownRules).forEach(rowOffset => {
-    const rowNum = parseInt(rowOffset, 10) + 1; // header offset
-    const rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(dropdownRules[rowOffset], true)
-      .setAllowInvalid(false)
-      .build();
-    sheet.getRange(rowNum, 2).setDataValidation(rule);
-  });
+  // Dynamically apply validation rules by scanning Column A parameter names
+  const lastRow = sheet.getLastRow();
+  const paramKeys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+
+  for (let r = 0; r < paramKeys.length; r++) {
+    const key = String(paramKeys[r][0] || '').trim().toUpperCase();
+    if (dynamicRules[key]) {
+      applyDropdownToRange(sheet.getRange(r + 2, 2), dynamicRules[key]);
+    }
+  }
 
   sheet.autoResizeColumns(1, 3);
-  sheet.setColumnWidth(2, 320);
+  sheet.setColumnWidth(2, 340);
   sheet.setColumnWidth(3, 400);
 }
 
@@ -114,20 +153,36 @@ function setupCampaignConfigurationTab(ss) {
  */
 function setupCampaignsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Campaigns');
+  styleHeaderRow(sheet);
   
   // Column D: Status
   applyDropdownToRange(sheet.getRange('D2:D500'), [
     'Draft', 'Active', 'Paused', 'Completed', 'Pilot Active'
   ]);
 
-  // Column E: Company Limit
-  applyDropdownToRange(sheet.getRange('E2:E500'), [
-    '10', '25', '50', '100', '250'
+  // Column H: Discovery Limit
+  applyDropdownToRange(sheet.getRange('H2:H500'), [
+    '3', '5', '10', '25', '50'
   ]);
 
-  // Column F: Research Depth
-  applyDropdownToRange(sheet.getRange('F2:F500'), [
+  // Column I: Research Depth
+  applyDropdownToRange(sheet.getRange('I2:I500'), [
     'Standard', 'Deep Persona', 'Comprehensive / Forensic'
+  ]);
+
+  // Column R: AI Provider
+  applyDropdownToRange(sheet.getRange('R2:R500'), [
+    'GEMINI', 'OPENAI'
+  ]);
+
+  // Column T: Email Verifier Provider
+  applyDropdownToRange(sheet.getRange('T2:T500'), [
+    'ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None'
+  ]);
+
+  // Column V: Email Sender Provider
+  applyDropdownToRange(sheet.getRange('V2:V500'), [
+    'Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'
   ]);
 }
 
@@ -136,6 +191,7 @@ function setupCampaignsTabDropdowns(ss) {
  */
 function setupReviewQueueTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Prospect Review Queue');
+  styleHeaderRow(sheet);
 
   // Column M (Col 13): Priority Tier
   applyDropdownToRange(sheet.getRange('M2:M1000'), ['Tier 1', 'Tier 2', 'Tier 3']);
@@ -145,12 +201,12 @@ function setupReviewQueueTabDropdowns(ss) {
 
   // Column V (Col 22): Human Approval Status
   applyDropdownToRange(sheet.getRange('V2:V1000'), [
-    'Approved', 'Approved (Auto-Pilot)', 'Pending Review', 'Rejected (Suppression Guard)', 'Rejected'
+    'Approved', 'Approved (Auto-Pilot)', 'Needs Review', 'Pending Review', 'Rejected (Suppression Guard)', 'Rejected'
   ]);
 
   // Column Y (Col 25): Send Status
   applyDropdownToRange(sheet.getRange('Y2:Y1000'), [
-    'Queued', 'Draft Created in Gmail', 'Sent', 'Suppressed - Not Sent', 'Draft Failed'
+    'Queued', 'Draft Created in Gmail', 'Draft Created', 'Sent', 'Suppressed - Not Sent', 'Draft Failed'
   ]);
 
   // Column AP (Col 42): Compliance Status
@@ -169,10 +225,11 @@ function setupReviewQueueTabDropdowns(ss) {
  */
 function setupCompanyIntelligenceTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Company Intelligence');
+  styleHeaderRow(sheet);
 
   // Column J (Col 10): ESG Reporting Maturity
   applyDropdownToRange(sheet.getRange('J2:J1000'), [
-    'Early Stage', 'Developing', 'Mature', 'Advanced'
+    'Early Stage', 'Developing / Spreadsheet-reliant', 'Developing', 'Mature', 'Advanced', 'N/A'
   ]);
 
   // Column Q (Col 17): eValuater Solution Fit
@@ -182,12 +239,12 @@ function setupCompanyIntelligenceTabDropdowns(ss) {
 
   // Column V (Col 22): Verification Status
   applyDropdownToRange(sheet.getRange('V2:V1000'), [
-    'Verified', 'Unverified', 'Disqualified'
+    'Verified', 'Unverified', 'Disqualified', 'Needs review'
   ]);
 
   // Column W (Col 23): Human Review Status
   applyDropdownToRange(sheet.getRange('W2:W1000'), [
-    'Pending', 'Accepted', 'Rejected'
+    'Accepted', 'Pending', 'Rejected'
   ]);
 }
 
@@ -196,6 +253,7 @@ function setupCompanyIntelligenceTabDropdowns(ss) {
  */
 function setupPersonaLeadsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Persona Leads');
+  styleHeaderRow(sheet);
 
   // Column I (Col 9): Persona Type
   applyDropdownToRange(sheet.getRange('I2:I1000'), [
@@ -204,7 +262,7 @@ function setupPersonaLeadsTabDropdowns(ss) {
 
   // Column O (Col 15): Verification Status
   applyDropdownToRange(sheet.getRange('O2:O1000'), [
-    'Verified', 'Unverified', 'Pending'
+    'Verified', 'Unverified', 'Pending', 'Disqualified'
   ]);
 
   // Column S (Col 19): Review Status
@@ -223,6 +281,7 @@ function setupPersonaLeadsTabDropdowns(ss) {
  */
 function setupListsAndSettingsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Lists & Settings');
+  styleHeaderRow(sheet);
 
   // Column A: List Name
   applyDropdownToRange(sheet.getRange('A2:A500'), [
@@ -245,12 +304,13 @@ function setupListsAndSettingsTabDropdowns(ss) {
  */
 function setupAgentSettingsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Agent Settings');
+  styleHeaderRow(sheet);
   
   // Row 2 Col C (Primary AI Provider)
   applyDropdownToRange(sheet.getRange('C2'), ['gemini', 'openai']);
 
   // Row 3 Col C (Gemini Model)
-  applyDropdownToRange(sheet.getRange('C3'), ['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']);
+  applyDropdownToRange(sheet.getRange('C3'), ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']);
 
   // Row 4 Col C (OpenAI Model)
   applyDropdownToRange(sheet.getRange('C4'), ['gpt-4o', 'gpt-4o-mini', 'o1-mini']);
@@ -260,6 +320,20 @@ function setupAgentSettingsTabDropdowns(ss) {
 
   // Row 9 Col C (Google Search Grounding)
   applyDropdownToRange(sheet.getRange('C9'), ['TRUE', 'FALSE']);
+}
+
+/**
+ * Helper: Applies high-contrast navy on light blue header styling
+ */
+function styleHeaderRow(sheet) {
+  if (sheet.getLastColumn() > 0) {
+    sheet.getRange(1, 1, 1, sheet.getLastColumn())
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+    sheet.setFrozenRows(1);
+  }
 }
 
 /**
