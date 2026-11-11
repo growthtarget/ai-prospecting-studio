@@ -52,19 +52,19 @@
       <div class="row">
         <div class="field">
           <label for="campaignIdInput">Campaign ID</label>
-          <input type="text" id="campaignIdInput" placeholder="e.g. CMP-001">
+          <input type="text" id="campaignIdInput" placeholder="e.g. CMP-005">
         </div>
         <div class="field">
           <label for="campaignNameInput">Campaign Name</label>
-          <input type="text" id="campaignNameInput" placeholder="e.g. Nordic ESG Q1">
+          <input type="text" id="campaignNameInput" placeholder="e.g. Procurement Audit Q1">
         </div>
       </div>
       <div class="field">
         <label for="departmentOwner">Department / Owner</label>
         <select id="departmentOwner">
-          <option value="ESG Advisory" selected>ESG Advisory</option>
+          <option value="Procurement" selected>Procurement</option>
+          <option value="ESG Advisory">ESG Advisory</option>
           <option value="Enterprise Sales">Enterprise Sales</option>
-          <option value="Procurement">Procurement</option>
           <option value="Cybersecurity & IT">Cybersecurity & IT</option>
           <option value="Marketing">Marketing</option>
           <option value="Executive Leadership">Executive Leadership</option>
@@ -161,15 +161,15 @@
 
         <div class="field">
           <label for="targetTitles">Target Persona Titles</label>
-          <textarea id="targetTitles" placeholder="e.g. Chief Sustainability Officer; VP Procurement; Head of ESG Reporting"></textarea>
+          <textarea id="targetTitles" placeholder="e.g. VP Procurement; Head of Supply Chain; Director Vendor Management"></textarea>
         </div>
         <div class="field">
           <label for="campaignFocus">Campaign Focus / Objective Hook</label>
-          <input type="text" id="campaignFocus" placeholder="e.g. Supply chain compliance, Scope 3 reporting, AI adoption">
+          <input type="text" id="campaignFocus" placeholder="e.g. Scope 3 vendor emissions transparency and supply chain audits">
         </div>
         <div class="field">
           <label for="searchKeywords">Additional Search Keywords</label>
-          <input type="text" id="searchKeywords" placeholder="e.g. CSRD, Scope 3, supplier audits, carbon footprint">
+          <input type="text" id="searchKeywords" placeholder="e.g. CSRD, Scope 3, supplier audits, vendor questionnaires">
         </div>
       </div>
     </div>
@@ -202,8 +202,8 @@
           <div class="field" style="margin-bottom:6px;">
             <select id="presetNeedSelect" onchange="applyDepartmentPreset(this.value)">
               <option value="">-- Quick Load Department Preset (Optional) --</option>
+              <option value="procurement" selected>Procurement (Vendor Risk, Questionnaire Drag, Tier-1 Audits)</option>
               <option value="cybersecurity">Cybersecurity & IT (SOC 2, ISO 27001, AWS Migration)</option>
-              <option value="procurement">Procurement (Vendor Risk, Questionnaire Drag, Tier-1 Audits)</option>
               <option value="enterprise_saas">Enterprise SaaS (Legacy ERP Migration, API Modernization)</option>
               <option value="fintech">FinTech & Wealth (Banking Regulations, AML, Payment Compliance)</option>
               <option value="hr_talent">HR & People Ops (Engineering Backlog, High Churn, Remote Scale)</option>
@@ -211,15 +211,15 @@
           </div>
 
           <textarea id="customBusinessNeeds" rows="3" placeholder="e.g.
-- Migrating core infrastructure to AWS/GCP
-- Senior engineers spending sprint cycles gathering manual audit evidence
-- Vendor questionnaire drop-off during procurement reviews"></textarea>
+- High vendor questionnaire drop-off rate during procurement audits
+- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency
+- Eliminating manual spreadsheet follow-ups with suppliers"></textarea>
           <div class="hint">The AI uses these criteria to qualify companies and craft personalized outreach angles.</div>
         </div>
       </div>
     </div>
 
-    <!-- 3. Scoring Weights & Automation Settings (Persona Mapper Setting Columns 20-33) -->
+    <!-- 3. Scoring Weights & Automation Settings -->
     <div class="card">
       <div class="section-toggle" onclick="toggleSection('secWeights')">
         <span>3. Opportunity Weights & Automation</span>
@@ -294,13 +294,13 @@
         <div class="field">
           <label for="aiProviderSelect">AI Provider</label>
           <select id="aiProviderSelect" onchange="onProviderChanged()">
-            <option value="GEMINI" selected>Google Gemini (Search Grounding & Fast)</option>
-            <option value="OPENAI">OpenAI (GPT-4o)</option>
+            <option value="OPENAI" selected>OpenAI (GPT-4o)</option>
+            <option value="GEMINI">Google Gemini (Search Grounding & Fast)</option>
           </select>
         </div>
         <div class="field">
           <label for="aiModelInput">AI Model Name</label>
-          <input type="text" id="aiModelInput" value="gemini-3.8-flash">
+          <input type="text" id="aiModelInput" value="gpt-4o">
         </div>
       </div>
     </div>
@@ -391,10 +391,14 @@
           const firstId = serverCampaigns[0].id;
           document.getElementById('campaignSelect').value = firstId;
           onCampaignSelected();
+        } else {
+          document.getElementById('campaignIdInput').value = 'CMP-005';
+          document.getElementById('campaignNameInput').value = 'Procurement Vendor Audit Q1';
+          applyDepartmentPreset('procurement');
         }
       };
 
-      function renderCampaignOptions(campaigns) {
+      function renderCampaignOptions(campaigns, selectedId) {
         const select = document.getElementById('campaignSelect');
         select.innerHTML = '<option value="">-- Choose or Enter Campaign --</option>';
         if (campaigns && campaigns.length) {
@@ -404,9 +408,7 @@
             opt.textContent = c.id + ' - ' + (c.name || 'Untitled');
             select.appendChild(opt);
           });
-          showStatus('Loaded ' + campaigns.length + ' campaign(s).', 'success');
-        } else {
-          showStatus('Type your unique Campaign ID & Name, set your criteria, then click Save.', 'info');
+          if (selectedId) select.value = selectedId;
         }
       }
 
@@ -428,28 +430,30 @@
         box.className = 'status ' + (type || 'info');
       }
 
-      function refreshCampaigns() {
-        showStatus('Refreshing campaigns list...', 'info');
+      function refreshCampaigns(quiet) {
+        if (!quiet) showStatus('Refreshing campaigns list...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
             if (res && res.campaigns) {
               serverCampaigns = res.campaigns;
               serverConfigsMap = res.configsMap || {};
-              renderCampaignOptions(serverCampaigns);
+              const curId = document.getElementById('campaignIdInput').value.trim();
+              renderCampaignOptions(serverCampaigns, curId);
+              if (!quiet) showStatus('Loaded ' + serverCampaigns.length + ' campaign(s).', 'success');
             }
           })
           .withFailureHandler(function(err) {
-            showStatus('Failed to load campaigns: ' + err.message, 'error');
+            if (!quiet) showStatus('Failed to load campaigns: ' + err.message, 'error');
           })
           .getSidebarInitialData();
       }
 
       function applyDepartmentPreset(preset) {
         const area = document.getElementById('customBusinessNeeds');
-        if (preset === 'cybersecurity') {
-          area.value = "- Automating SOC 2 / ISO 27001 continuous compliance controls\n- Migrating legacy infrastructure to AWS/GCP with security guardrails\n- Eliminating developer bandwidth lost to manual audit evidence gathering";
-        } else if (preset === 'procurement') {
+        if (preset === 'procurement') {
           area.value = "- High vendor questionnaire drop-off rate during procurement audits\n- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency\n- Eliminating manual spreadsheet follow-ups with suppliers";
+        } else if (preset === 'cybersecurity') {
+          area.value = "- Automating SOC 2 / ISO 27001 continuous compliance controls\n- Migrating legacy infrastructure to AWS/GCP with security guardrails\n- Eliminating developer bandwidth lost to manual audit evidence gathering";
         } else if (preset === 'enterprise_saas') {
           area.value = "- Modernizing legacy ERP to cloud architecture\n- Streamlining engineering sprint velocity with banking partner API compliance\n- Reducing high technical debt in CI/CD pipeline";
         } else if (preset === 'fintech') {
@@ -467,7 +471,7 @@
         const data = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : {};
 
         document.getElementById('campaignNameInput').value = data.name || '';
-        document.getElementById('departmentOwner').value = data.department || 'ESG Advisory';
+        document.getElementById('departmentOwner').value = data.department || 'Procurement';
         document.getElementById('targetCountries').value = data.country || '';
         document.getElementById('targetIndustries').value = data.industry || '';
         document.getElementById('companySize').value = data.size || '';
@@ -481,7 +485,6 @@
         document.getElementById('searchKeywords').value = data.searchKeywords || '';
         document.getElementById('customBusinessNeeds').value = data.customBusinessNeeds || '';
 
-        // Toggles
         document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
         document.getElementById('incEsgMaturity').checked = data.incEsgMaturity !== false;
         document.getElementById('incSupplyChain').checked = data.incSupplyChain !== false;
@@ -492,7 +495,6 @@
         document.getElementById('incTriggers').checked = data.incTriggers !== false;
         document.getElementById('incEvaluater').checked = data.incEvaluater !== false;
 
-        // Weights & Automation
         document.getElementById('weightEsgReporting').value = data.weightEsgReporting || '20%';
         document.getElementById('weightSupplyChain').value = data.weightSupplyChain || '15%';
         document.getElementById('weightDataChallenges').value = data.weightDataChallenges || '15%';
@@ -507,17 +509,14 @@
         document.getElementById('humanApprovalRequired').checked = data.humanApprovalRequired !== false;
         document.getElementById('autoSendEnabled').checked = data.autoSendEnabled === true;
 
-        // AI Provider
-        document.getElementById('aiProviderSelect').value = data.aiProvider || 'GEMINI';
-        document.getElementById('aiModelInput').value = data.aiModel || 'gemini-3.8-flash';
+        document.getElementById('aiProviderSelect').value = data.aiProvider || 'OPENAI';
+        document.getElementById('aiModelInput').value = data.aiModel || 'gpt-4o';
 
-        // Verification & Sender
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
         document.getElementById('senderProviderSelect').value = data.emailSenderProvider || 'Workspace Gmail (Drafts Only)';
         document.getElementById('senderEndpointInput').value = data.emailSenderEndpoint || '';
 
-        // Sender Identity
         document.getElementById('senderName').value = data.senderName || 'Alex Mercer';
         document.getElementById('senderTitle').value = data.senderTitle || 'Solutions Consultant';
         document.getElementById('senderCompany').value = data.senderCompany || 'eValuater Solutions';
@@ -571,7 +570,7 @@
         const cid = document.getElementById('campaignIdInput').value.trim();
         const cname = document.getElementById('campaignNameInput').value.trim();
         if (!cid) {
-          alert('Please enter a Campaign ID (e.g. CMP-001)');
+          alert('Please enter a Campaign ID (e.g. CMP-005)');
           return;
         }
 
@@ -592,7 +591,6 @@
           searchKeywords: document.getElementById('searchKeywords').value.trim(),
           customBusinessNeeds: document.getElementById('customBusinessNeeds').value.trim(),
 
-          // All 9 Criteria Toggles
           incEsgObligations: document.getElementById('incEsgObligations').checked,
           incEsgMaturity: document.getElementById('incEsgMaturity').checked,
           incSupplyChain: document.getElementById('incSupplyChain').checked,
@@ -603,7 +601,6 @@
           incTriggers: document.getElementById('incTriggers').checked,
           incEvaluater: document.getElementById('incEvaluater').checked,
 
-          // Opportunity Weights
           weightEsgReporting: document.getElementById('weightEsgReporting').value.trim() || '20%',
           weightSupplyChain: document.getElementById('weightSupplyChain').value.trim() || '15%',
           weightDataChallenges: document.getElementById('weightDataChallenges').value.trim() || '15%',
@@ -611,7 +608,6 @@
           weightTriggers: document.getElementById('weightTriggers').value.trim() || '20%',
           weightEvaluaterFit: document.getElementById('weightEvaluaterFit').value.trim() || '15%',
 
-          // Email Priority & Automation Rules
           minEmailPriorityScore: Number(document.getElementById('minEmailPriorityScore').value) || 80,
           weightEmailCompanyScore: document.getElementById('weightEmailCompanyScore').value.trim() || '40%',
           weightEmailPersonaFit: document.getElementById('weightEmailPersonaFit').value.trim() || '35%',
@@ -619,17 +615,14 @@
           humanApprovalRequired: document.getElementById('humanApprovalRequired').checked,
           autoSendEnabled: document.getElementById('autoSendEnabled').checked,
 
-          // AI Provider Config
           aiProvider: document.getElementById('aiProviderSelect').value,
-          aiModel: document.getElementById('aiModelInput').value.trim() || 'gemini-3.8-flash',
+          aiModel: document.getElementById('aiModelInput').value.trim() || 'gpt-4o',
 
-          // Email Verification & Sender
           emailVerifier: document.getElementById('emailVerifierSelect').value,
           emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
           emailSenderProvider: document.getElementById('senderProviderSelect').value,
           emailSenderEndpoint: document.getElementById('senderEndpointInput').value.trim(),
 
-          // Sender Identity
           senderName: document.getElementById('senderName').value.trim(),
           senderTitle: document.getElementById('senderTitle').value.trim(),
           senderCompany: document.getElementById('senderCompany').value.trim()
@@ -637,16 +630,16 @@
 
         serverConfigsMap[cid] = payload;
 
-        showStatus('Saving campaign settings to sheet...', 'info');
+        showStatus('Saving campaign settings directly across all tabs...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
-            showStatus(res.message || 'Saved successfully!', 'success');
-            refreshCampaigns();
+            showStatus('✅ ' + (res.message || 'Saved successfully!'), 'success');
+            refreshCampaigns(true);
           })
           .withFailureHandler(function(err) {
             showStatus('Save error: ' + err.message, 'error');
           })
-          .saveCampaignFullConfig(payload);
+          .studioDirectSaveCampaignPipeline(payload);
       }
 
       function runDiscovery() {
