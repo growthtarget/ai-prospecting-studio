@@ -7,11 +7,11 @@
  * 
  * CAPABILITIES:
  * 1. Multi-AI Support: Routes dynamically to GEMINI or OPENAI (GPT-4o).
- * 2. Multi-Department Email Copy: Uses DEPARTMENT_OWNER & CUSTOM_BUSINESS_NEEDS
+ * 2. Multi-Department Email Copy: Uses DEPARTMENT & CUSTOM_BUSINESS_NEEDS
  *    to write tailored peer-to-peer outreach with your branded sender profile.
  * 3. Dual-Tab Intelligence: Enriches "Persona Leads" and "Prospect Review Queue".
- * 4. Dual Settings Fallback: Reads from "Campaign Configuration", "Agent Settings",
- *    and "Persona Mapper Settings" seamlessly.
+ * 4. Dual Settings Fallback: Reads & synchronizes "Campaign Configuration", 
+ *    "Agent Settings", and "Persona Mapper Settings" (all 39 columns) seamlessly.
  * ============================================================================
  */
 
@@ -30,7 +30,234 @@ const PERSONA_MAPPER_SHEETS_ = {
 };
 
 /**
- * Called directly from the Sidebar Control Panel (No blocking popups; returns results to sidebar)
+ * Universal Sync Function: Synchronizes Active Campaign into Persona Mapper Settings
+ * and creates the CAMPAIGN_ID row in Campaign Configuration.
+ */
+function syncActiveCampaignToPersonaMapperSettings() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  ensurePersonaMapperSheets_(spreadsheet);
+
+  const cSheet = spreadsheet.getSheetByName('Campaign Configuration');
+  const dict = {};
+
+  if (cSheet && cSheet.getLastRow() > 1) {
+    const cData = cSheet.getDataRange().getValues();
+    for (let i = 1; i < cData.length; i++) {
+      const k = String(cData[i][0] || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (k) dict[k] = cData[i][1];
+    }
+  }
+
+  // Detect Campaign ID from Config, Dashboard, or Fallback
+  let cid = String(dict['CAMPAIGNID'] || dict['ACTIVECAMPAIGNID'] || dict['CAMPAIGN'] || '').trim();
+
+  if (!cid) {
+    const dashSheet = spreadsheet.getSheetByName('Dashboard');
+    if (dashSheet) {
+      const dVals = dashSheet.getRange('A1:E6').getValues();
+      for (let r = 0; r < dVals.length; r++) {
+        for (let c = 0; c < dVals[r].length; c++) {
+          const val = String(dVals[r][c] || '').trim();
+          if (val.startsWith('CMP-')) {
+            cid = val;
+            break;
+          }
+        }
+        if (cid) break;
+      }
+    }
+  }
+
+  if (!cid) cid = 'CMP-004';
+
+  const payload = {
+    id: cid,
+    name: String(dict['CAMPAIGNNAME'] || dict['NAME'] || cid),
+    department: String(dict['DEPARTMENT'] || dict['DEPARTMENTOWNER'] || 'Procurement'),
+    country: String(dict['TARGETCOUNTRIES'] || 'United States & Canada'),
+    industry: String(dict['TARGETINDUSTRIES'] || 'Freight & Logistics, Manufacturing'),
+    size: String(dict['COMPANYSIZERANGE'] || '50 - 250 employees'),
+    limit: Number(dict['MAXCOMPANIES']) || 5,
+    researchDepth: String(dict['RESEARCHDEPTH'] || 'Deep Persona'),
+    evidencePeriodMonths: Number(dict['EVIDENCEPERIODMONTHS']) || 12,
+    minCompanyScore: Number(dict['MINCOMPANYSCORE'] || dict['MINCOMPANYFITSCORE']) || 80,
+    minPersonaScore: Number(dict['MINPERSONASCORE'] || dict['MINPERSONAFITSCORE']) || 85,
+    minEmailPriorityScore: Number(dict['MINEMAILPRIORITYSCORE']) || 80,
+    titles: String(dict['TARGETTITLES'] || dict['TARGETPERSONATITLES'] || 'VP Procurement; Head of Supply Chain'),
+    campaignFocus: String(dict['CAMPAIGNFOCUS'] || 'Scope 3 vendor transparency'),
+    searchKeywords: String(dict['SEARCHKEYWORDS'] || 'CSRD, supplier audits'),
+    customBusinessNeeds: String(dict['CUSTOMBUSINESSNEEDS'] || ''),
+    aiProvider: String(dict['AIPROVIDER'] || dict['PRIMARYAIPROVIDER'] || 'OPENAI'),
+    aiModel: String(dict['AIMODEL'] || 'gpt-4o'),
+    emailVerifier: String(dict['EMAILVERIFICATIONPROVIDER'] || 'ZeroBounce'),
+    emailEndpoint: String(dict['EMAILVERIFICATIONENDPOINT'] || ''),
+    emailSenderProvider: String(dict['EMAILSENDERPROVIDER'] || 'Workspace Gmail (Drafts Only)'),
+    emailSenderEndpoint: String(dict['EMAILSENDERENDPOINT'] || ''),
+    senderName: String(dict['SENDERNAME'] || 'Alex Mercer'),
+    senderTitle: String(dict['SENDERTITLE'] || 'Solutions Consultant'),
+    senderCompany: String(dict['SENDERCOMPANY'] || 'eValuater Solutions')
+  };
+
+  const res = savePersonaMapperSettingsRow_(spreadsheet, payload);
+
+  const pSheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.settings);
+  if (pSheet) spreadsheet.setActiveSheet(pSheet);
+
+  SpreadsheetApp.getUi().alert(
+    '🎯 Sync Complete',
+    '✅ Successfully populated Persona Mapper Settings (Row 2, 39 columns) and added CAMPAIGN_ID to Campaign Configuration for ' + cid + '!\n\n' + res.message,
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+/**
+ * Saves all 39 columns directly into Row 2 of Persona Mapper Settings
+ * and updates Campaign Configuration with CAMPAIGN_ID and all parameters.
+ */
+function savePersonaMapperSettingsRow_(spreadsheet, payload) {
+  let targetRow = 2;
+
+  // 1. Write 39 columns into Persona Mapper Settings
+  const pSheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.settings) || spreadsheet.insertSheet(PERSONA_MAPPER_SHEETS_.settings);
+  if (pSheet) {
+    pSheet.getRange(1, 1, 1, PERSONA_MAPPER_HEADERS_.settings.length).setValues([PERSONA_MAPPER_HEADERS_.settings]);
+    pSheet.getRange(1, 1, 1, PERSONA_MAPPER_HEADERS_.settings.length)
+      .setFontWeight('bold')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true);
+    pSheet.setFrozenRows(1);
+
+    const pRow = [
+      payload.id,                                                  // 1: Campaign ID
+      payload.name || payload.id,                                 // 2: Campaign Name
+      'TRUE',                                                      // 3: Persona Mapper Enabled
+      payload.aiProvider || 'OPENAI',                              // 4: AI Provider
+      payload.aiModel || 'gpt-4o',                                 // 5: AI Model
+      payload.titles || '',                                        // 6: Persona Titles
+      payload.searchKeywords || '',                                // 7: Search Keywords
+      payload.campaignFocus || '',                                 // 8: Campaign Focus
+      Number(payload.evidencePeriodMonths) || 12,                  // 9: Evidence Period Months
+      payload.researchDepth || 'Deep Persona',                     // 10: Research Depth
+      payload.incEsgObligations !== false ? 'TRUE' : 'FALSE',      // 11: Include ESG Reporting Obligations
+      payload.incEsgMaturity !== false ? 'TRUE' : 'FALSE',         // 12: Include ESG Reporting Maturity
+      payload.incSupplyChain !== false ? 'TRUE' : 'FALSE',         // 13: Include Supply Chain Complexity
+      payload.incScope3 !== false ? 'TRUE' : 'FALSE',              // 14: Include Scope 3 Exposure
+      payload.incDataChallenges !== false ? 'TRUE' : 'FALSE',      // 15: Include Sustainability Data Challenges
+      payload.incDigital !== false ? 'TRUE' : 'FALSE',             // 16: Include Digital Transformation
+      payload.incEsgGovernance !== false ? 'TRUE' : 'FALSE',       // 17: Include ESG Governance
+      payload.incTriggers !== false ? 'TRUE' : 'FALSE',            // 18: Include Business Triggers
+      payload.incEvaluater !== false ? 'TRUE' : 'FALSE',           // 19: Include eValuater Solution Fit
+      payload.weightEsgReporting || '20%',                         // 20: Weight ESG Reporting Relevance
+      payload.weightSupplyChain || '15%',                          // 21: Weight Supply Chain Complexity
+      payload.weightDataChallenges || '15%',                       // 22: Weight Sustainability Data Needs
+      payload.weightDigital || '15%',                              // 23: Weight Digital Transformation Relevance
+      payload.weightTriggers || '20%',                             // 24: Weight Business Triggers
+      payload.weightEvaluaterFit || '15%',                         // 25: Weight eValuater Solution Fit
+      Number(payload.minCompanyScore) || 80,                       // 26: Minimum Company Opportunity Score
+      Number(payload.minPersonaScore) || 85,                       // 27: Minimum Persona Confidence
+      Number(payload.minEmailPriorityScore) || 80,                 // 28: Minimum Email Priority Score
+      payload.humanApprovalRequired !== false ? 'TRUE' : 'FALSE',  // 29: Human Approval Required
+      payload.autoSendEnabled === true ? 'TRUE' : 'FALSE',         // 30: Auto Send Enabled
+      payload.weightEmailCompanyScore || '40%',                    // 31: Email Priority Weight Company Score
+      payload.weightEmailPersonaFit || '35%',                      // 32: Email Priority Weight Persona Fit
+      payload.weightEmailBuyingSignal || '25%',                    // 33: Email Priority Weight Buying Signal
+      payload.customBusinessNeeds || '',                           // 34: Notes (Holds custom business needs)
+      Number(payload.limit) || 5,                                  // 35: Max Companies Per Run
+      payload.emailVerifier || 'ZeroBounce',                       // 36: Email Verification Provider
+      payload.emailEndpoint || '',                                 // 37: Email Verification Endpoint
+      payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)', // 38: Email Sender Provider
+      payload.emailSenderEndpoint || ''                            // 39: Email Sender Endpoint
+    ];
+
+    const colA = pSheet.getRange('A1:A100').getValues();
+    let existingRow = -1;
+    let firstBlank = -1;
+
+    for (let r = 1; r < colA.length; r++) {
+      const val = String(colA[r][0] || '').trim();
+      if (val.toUpperCase() === payload.id.toUpperCase()) {
+        existingRow = r + 1;
+        break;
+      }
+      if (!val && firstBlank === -1) {
+        firstBlank = r + 1;
+      }
+    }
+
+    if (existingRow > 0) targetRow = existingRow;
+    else if (firstBlank > 0) targetRow = firstBlank;
+    else targetRow = pSheet.getLastRow() + 1;
+
+    pSheet.getRange(targetRow, 1, 1, 39).setValues([pRow]);
+    SpreadsheetApp.flush();
+  }
+
+  // 2. Ensure CAMPAIGN_ID and all fields exist in Campaign Configuration
+  const configSheet = spreadsheet.getSheetByName('Campaign Configuration');
+  if (configSheet) {
+    const configEntries = [
+      ['CAMPAIGN_ID', payload.id, 'Active Campaign Identifier'],
+      ['CAMPAIGN_NAME', payload.name || payload.id, 'Active Campaign Name'],
+      ['DEPARTMENT', payload.department || 'Procurement', 'Operating Department / Business Unit'],
+      ['TARGET_COUNTRIES', payload.country || '', 'Target Geographies / Regions'],
+      ['TARGET_INDUSTRIES', payload.industry || '', 'Target Industry Verticals'],
+      ['COMPANY_SIZE_RANGE', payload.size || '', 'Target Employee Size Range'],
+      ['MAX_COMPANIES', payload.limit || 5, 'Maximum target companies to discover per run'],
+      ['RESEARCH_DEPTH', payload.researchDepth || 'Deep Persona', 'Depth of company research and profiling'],
+      ['EVIDENCE_PERIOD_MONTHS', payload.evidencePeriodMonths || 12, 'Historical lookback window in months'],
+      ['MIN_COMPANY_SCORE', payload.minCompanyScore || 80, 'Minimum company qualification threshold (0-100)'],
+      ['MIN_PERSONA_SCORE', payload.minPersonaScore || 85, 'Minimum persona fit confidence threshold (0-100)'],
+      ['MIN_EMAIL_PRIORITY_SCORE', payload.minEmailPriorityScore || 80, 'Minimum email priority score for sending (0-100)'],
+      ['TARGET_TITLES', payload.titles || '', 'Semicolon-delimited target job titles'],
+      ['CAMPAIGN_FOCUS', payload.campaignFocus || '', 'Primary value proposition hook'],
+      ['SEARCH_KEYWORDS', payload.searchKeywords || '', 'Search discovery query keywords'],
+      ['CUSTOM_BUSINESS_NEEDS', payload.customBusinessNeeds || '', 'Manual department business needs & buying triggers'],
+      ['AI_PROVIDER', payload.aiProvider || 'OPENAI', 'Selected AI engine (GEMINI or OPENAI)'],
+      ['AI_MODEL', payload.aiModel || 'gpt-4o', 'AI Model version name'],
+      ['EMAIL_VERIFICATION_PROVIDER', payload.emailVerifier || 'ZeroBounce', 'Email verification vendor'],
+      ['EMAIL_VERIFICATION_ENDPOINT', payload.emailEndpoint || '', 'Email verification REST endpoint URL'],
+      ['EMAIL_SENDER_PROVIDER', payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform'],
+      ['DISPATCH_MODE', payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform mode'],
+      ['EMAIL_SENDER_ENDPOINT', payload.emailSenderEndpoint || '', 'Sender campaign UUID or webhook URL'],
+      ['SENDER_NAME', payload.senderName || '', 'Display name for outreach email signature'],
+      ['SENDER_TITLE', payload.senderTitle || '', 'Sender job title for email signature'],
+      ['SENDER_COMPANY', payload.senderCompany || '', 'Sender company name for email signature'],
+      ['INCLUDE_ESG_OBLIGATIONS', 'TRUE', 'Evaluate CSRD/GRI obligations'],
+      ['INCLUDE_ESG_MATURITY', 'TRUE', 'Evaluate ESG reporting maturity'],
+      ['INCLUDE_SUPPLY_CHAIN', 'TRUE', 'Evaluate supply chain complexity'],
+      ['INCLUDE_SCOPE3', 'TRUE', 'Evaluate Scope 3 emissions exposure'],
+      ['INCLUDE_DATA_CHALLENGES', 'TRUE', 'Evaluate sustainability data challenges'],
+      ['INCLUDE_DIGITAL', 'TRUE', 'Evaluate digital transformation & AI adoption'],
+      ['INCLUDE_ESG_GOVERNANCE', 'TRUE', 'Evaluate ESG board oversight'],
+      ['INCLUDE_TRIGGERS', 'TRUE', 'Evaluate commercial buying triggers'],
+      ['INCLUDE_EVALUATER', 'TRUE', 'Evaluate eValuater solution fit'],
+      ['HUMAN_APPROVAL_REQUIRED', 'TRUE', 'Requires human review in queue before sending'],
+      ['AUTO_SEND_ENABLED', 'FALSE', 'Auto-send emails immediately upon approval']
+    ];
+
+    const cData = configSheet.getLastRow() > 1 ? configSheet.getDataRange().getValues() : [['Parameter', 'Configured Value', 'Description']];
+    const keyMap = {};
+    for (let r = 1; r < cData.length; r++) {
+      const k = String(cData[r][0] || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (k) keyMap[k] = r + 1;
+    }
+
+    configEntries.forEach(entry => {
+      const normK = entry[0].toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (keyMap[normK]) {
+        configSheet.getRange(keyMap[normK], 2).setValue(entry[1]);
+        if (entry[2]) configSheet.getRange(keyMap[normK], 3).setValue(entry[2]);
+      } else {
+        configSheet.appendRow(entry);
+      }
+    });
+  }
+
+  return { success: true, message: 'Saved to Row ' + targetRow + ' in Persona Mapper Settings.' };
+}
+
+/**
+ * Called directly from the Sidebar Control Panel
  */
 function runPersonaMapperFromSidebar(campaignId) {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -45,8 +272,7 @@ function runPersonaMapperFromSidebar(campaignId) {
       return { success: false, message: 'Persona Mapper is disabled for this campaign. Enable it in settings.' };
     }
 
-    // Resolve AI Provider & Model dynamically
-    const providerChoice = String(settings['AI Provider'] || 'GEMINI').toUpperCase();
+    const providerChoice = String(settings['AI Provider'] || 'OPENAI').toUpperCase();
     const modelChoice = resolvePersonaAiModel_(providerChoice, settings['AI Model']);
     const providerLabel = providerChoice === 'OPENAI' ? 'OpenAI (' + modelChoice + ')' : 'Google Gemini (' + modelChoice + ')';
 
@@ -65,7 +291,7 @@ function runPersonaMapperFromSidebar(campaignId) {
 
     for (let index = start; index < end; index++) {
       const company = companies[index];
-      const aiResponse = callAI({
+      const aiResponse = executeAiCall_({
         provider: providerChoice,
         model: modelChoice,
         prompt: buildPersonaMapperPrompt_(company, settings),
@@ -121,7 +347,7 @@ function runPersonaMapperFromSidebar(campaignId) {
 }
 
 /**
- * Called from the Top Menu (Uses standard dialogs)
+ * Called from the Top Menu
  */
 function runPersonaMapperForSelectedCampaign() {
   const ui = SpreadsheetApp.getUi();
@@ -138,7 +364,7 @@ function runPersonaMapperForSelectedCampaign() {
       return; 
     }
     
-    const providerChoice = String(settings['AI Provider'] || 'GEMINI').toUpperCase();
+    const providerChoice = String(settings['AI Provider'] || 'OPENAI').toUpperCase();
     const modelChoice = resolvePersonaAiModel_(providerChoice, settings['AI Model']);
     const providerLabel = providerChoice === 'OPENAI' ? 'OpenAI (' + modelChoice + ')' : 'Google Gemini (' + modelChoice + ')';
 
@@ -159,7 +385,7 @@ function runPersonaMapperForSelectedCampaign() {
     for (let index = start; index < end; index++) {
       const company = companies[index];
       try {
-        const aiResponse = callAI({
+        const aiResponse = executeAiCall_({
           provider: providerChoice,
           model: modelChoice,
           prompt: buildPersonaMapperPrompt_(company, settings),
@@ -208,23 +434,11 @@ function runPersonaMapperForSelectedCampaign() {
  * Builds the Multi-Department Persona Research & Outreach Prompt
  */
 function buildPersonaMapperPrompt_(company, settings) {
-  const department = settings['Department'] || 'Enterprise Operations';
+  const department = settings['Department'] || 'Procurement';
   const senderName = settings['Sender Name'] || 'Alex Mercer';
   const senderTitle = settings['Sender Title'] || 'Solutions Consultant';
   const senderCompany = settings['Sender Company'] || 'eValuater Solutions';
   const customNeeds = settings['Custom Business Needs'] || settings['Campaign Focus'] || 'operational scalability and automated compliance';
-
-  const criteria = [
-    ['Include ESG Reporting Obligations','reporting obligations and regulatory compliance'],
-    ['Include ESG Reporting Maturity','reporting maturity and disclosures'],
-    ['Include Supply Chain Complexity','vendor/supplier infrastructure and supply chain complexity'],
-    ['Include Scope 3 Exposure','Scope 3 value-chain data exposure'],
-    ['Include Sustainability Data Challenges','data collection and audit evidence challenges'],
-    ['Include Digital Transformation','cloud infrastructure, CI/CD, automation, and digital signals'],
-    ['Include ESG Governance','governance ownership, executive oversight, and team structure'],
-    ['Include Business Triggers','recent commercial, technology, or regulatory triggers'],
-    ['Include eValuater Solution Fit','department solution alignment']
-  ].filter(function(item){return toBoolean_(settings[item[0]]);}).map(function(item){return item[1];});
 
   return [
     'Act as the Senior B2B Account Researcher, Executive Persona Mapper, and Outbound Email Copywriter.',
@@ -250,7 +464,7 @@ function buildPersonaMapperPrompt_(company, settings) {
     '',
     'EMAIL CURATION INSTRUCTIONS (IMPORTANT):',
     '• Draft a peer-to-peer cold outreach message under 150 words from ' + senderName + ' (' + senderTitle + ' at ' + senderCompany + ').',
-    '• Open with a personalized hook referencing the decision-maker\'s specific verified initiative or the company\'s current operational context.',
+    '• Open with a personalized hook referencing the decision-maker\'s specific verified initiative or current operational context.',
     '• Frame how ' + senderCompany + ' eliminates the specific pain point (' + customNeeds.slice(0, 100) + ') without slowing sprint cycles.',
     '• Propose a brief, low-friction 7-minute introductory call next week.',
     '• Sign off with ' + senderName + ', ' + senderTitle + ' | ' + senderCompany + '.',
@@ -332,12 +546,12 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
   const agentSheet = spreadsheet.getSheetByName('Agent Settings');
 
   const merged = {
-    'Campaign ID': campaignId || 'CMP-001',
+    'Campaign ID': campaignId || 'CMP-004',
     'Campaign Name': '',
     'Persona Mapper Enabled': true,
-    'AI Provider': 'GEMINI',
-    'AI Model': '',
-    'Department': 'ESG Advisory',
+    'AI Provider': 'OPENAI',
+    'AI Model': 'gpt-4o',
+    'Department': 'Procurement',
     'Persona Titles': '',
     'Search Keywords': '',
     'Campaign Focus': '',
@@ -369,30 +583,26 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
     'Weight eValuater Solution Fit': 10
   };
 
-  // 1. Read from Campaign Configuration tab
+  // 1. Read from Campaign Configuration tab (Supporting all naming variations)
   if (configSheet && configSheet.getLastRow() > 1) {
     const data = configSheet.getDataRange().getValues();
-    const isKeyValue = String(data[0][0]).toLowerCase().includes('parameter');
-
-    if (isKeyValue) {
-      for (let r = 1; r < data.length; r++) {
-        const k = String(data[r][0] || '').trim().toUpperCase();
-        const v = data[r][1];
-        if (k === 'CAMPAIGN_NAME' && v) merged['Campaign Name'] = String(v);
-        if (k === 'DEPARTMENT_OWNER' && v) merged['Department'] = String(v);
-        if (k === 'PRIMARY_AI_PROVIDER' && v) merged['AI Provider'] = String(v).trim().toUpperCase();
-        if ((k === 'AI_MODEL' || k === 'GEMINI_MODEL' || k === 'OPENAI_MODEL') && v) merged['AI Model'] = String(v).trim();
-        if (k === 'TARGET_PERSONA_TITLES' && v) merged['Persona Titles'] = String(v);
-        if (k === 'SEARCH_KEYWORDS' && v) merged['Search Keywords'] = String(v);
-        if (k === 'CAMPAIGN_FOCUS' && v) merged['Campaign Focus'] = String(v);
-        if (k === 'CUSTOM_BUSINESS_NEEDS' && v) merged['Custom Business Needs'] = String(v);
-        if (k === 'SENDER_NAME' && v) merged['Sender Name'] = String(v);
-        if (k === 'SENDER_TITLE' && v) merged['Sender Title'] = String(v);
-        if (k === 'SENDER_COMPANY' && v) merged['Sender Company'] = String(v);
-        if (k === 'RESEARCH_DEPTH' && v) merged['Research Depth'] = String(v);
-        if (k === 'MIN_PERSONA_FIT_SCORE' && v) merged['Minimum Company Opportunity Score'] = Number(v);
-        if (k === 'EMAIL_VERIFICATION_PROVIDER' && v) merged['Email Verification Provider'] = String(v);
-      }
+    for (let r = 1; r < data.length; r++) {
+      const k = String(data[r][0] || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const v = data[r][1];
+      if ((k === 'CAMPAIGNNAME' || k === 'NAME') && v) merged['Campaign Name'] = String(v);
+      if ((k === 'DEPARTMENT' || k === 'DEPARTMENTOWNER') && v) merged['Department'] = String(v);
+      if ((k === 'AIPROVIDER' || k === 'PRIMARYAIPROVIDER') && v) merged['AI Provider'] = String(v).trim().toUpperCase();
+      if ((k === 'AIMODEL' || k === 'OPENAIMODEL' || k === 'GEMINIMODEL') && v) merged['AI Model'] = String(v).trim();
+      if ((k === 'TARGETTITLES' || k === 'TARGETPERSONATITLES') && v) merged['Persona Titles'] = String(v);
+      if (k === 'SEARCHKEYWORDS' && v) merged['Search Keywords'] = String(v);
+      if (k === 'CAMPAIGNFOCUS' && v) merged['Campaign Focus'] = String(v);
+      if (k === 'CUSTOMBUSINESSNEEDS' && v) merged['Custom Business Needs'] = String(v);
+      if (k === 'SENDERNAME' && v) merged['Sender Name'] = String(v);
+      if (k === 'SENDERTITLE' && v) merged['Sender Title'] = String(v);
+      if (k === 'SENDERCOMPANY' && v) merged['Sender Company'] = String(v);
+      if (k === 'RESEARCHDEPTH' && v) merged['Research Depth'] = String(v);
+      if ((k === 'MINCOMPANYSCORE' || k === 'MINPERSONAFITSCORE') && v) merged['Minimum Company Opportunity Score'] = Number(v);
+      if (k === 'EMAILVERIFICATIONPROVIDER' && v) merged['Email Verification Provider'] = String(v);
     }
   }
 
@@ -427,6 +637,51 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
 }
 
 /**
+ * Unified AI Caller with Script Properties and Fallback
+ */
+function executeAiCall_(options) {
+  if (typeof callAI === 'function') {
+    try {
+      return callAI(options);
+    } catch (e) {
+      Logger.log('Global callAI failed, using direct fallback: ' + e.message);
+    }
+  }
+
+  const provider = String(options.provider || 'OPENAI').toUpperCase();
+  const scriptProps = PropertiesService.getScriptProperties().getProperties();
+  let apiKey = scriptProps[provider === 'OPENAI' ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY'] || '';
+
+  if (!apiKey && typeof getStudioApiKey === 'function') {
+    apiKey = getStudioApiKey(provider);
+  }
+
+  if (provider === 'OPENAI') {
+    const url = 'https://api.openai.com/v1/chat/completions';
+    const payload = {
+      model: options.model || 'gpt-4o',
+      messages: [{ role: 'user', content: options.prompt }],
+      response_format: options.json ? { type: 'json_object' } : undefined,
+      temperature: 0.2
+    };
+
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'Authorization': 'Bearer ' + apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    const body = JSON.parse(response.getContentText() || '{}');
+    const text = body.choices && body.choices[0] && body.choices[0].message ? body.choices[0].message.content : '{}';
+    return { text: text, json: JSON.parse(text), citations: [] };
+  }
+
+  throw new Error('No API key configured for ' + provider + ' in Project Settings.');
+}
+
+/**
  * Filter Companies for Persona Enrichment
  */
 function getPersonaMapperCompanies_(spreadsheet, campaignId, settings) {
@@ -437,7 +692,6 @@ function getPersonaMapperCompanies_(spreadsheet, campaignId, settings) {
   return getSheetRecords_(sheet).filter(function(row) {
     if (String(row['Campaign ID'] || '').trim() !== String(campaignId).trim()) return false;
     
-    // Check Status / Qualification
     const qualification = String(row['Status'] || row['Qualification result'] || row['Qualification Result'] || '').trim().toLowerCase();
     if (qualification && !/qualified|approved|pass|verified/.test(qualification)) return false;
 
@@ -675,14 +929,10 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet) {
   };
 }
 
-/**
- * Checks Verifier API key from Agent Settings tab AND Script Properties
- */
 function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
   const provider = String(settings['Email Verification Provider'] || 'ZeroBounce').trim();
   let apiKey = PropertiesService.getScriptProperties().getProperty('EMAIL_VERIFICATION_API_KEY') || '';
 
-  // Dual lookup: Check "Agent Settings" sheet if Script Properties is empty
   if (!apiKey && spreadsheet) {
     const agentSheet = spreadsheet.getSheetByName('Agent Settings');
     if (agentSheet && agentSheet.getLastRow() > 1) {
@@ -753,7 +1003,7 @@ function isPersonalEmailDomain_(domain) {
 function approveSelectedProspect() {
   const item = getSelectedEmailQueueRow_(); 
   if (!item) return;
-  const r = item.record, ui = SpreadsheetApp.getUi();
+  const ui = SpreadsheetApp.getUi();
   const answer = ui.alert('Approve for outreach?', 'This records human approval in Prospect Review Queue.', ui.ButtonSet.YES_NO);
   if (answer !== ui.Button.YES) return;
 
@@ -821,7 +1071,7 @@ function getPersonaMapperCampaignId_(spreadsheet, ui) {
       if (record['Campaign ID']) return String(record['Campaign ID']).trim(); 
     }
   }
-  const response = ui.prompt('Persona Mapper', 'Enter the Campaign ID to enrich (e.g. CMP-001):', ui.ButtonSet.OK_CANCEL);
+  const response = ui.prompt('Persona Mapper', 'Enter the Campaign ID to enrich (e.g. CMP-004):', ui.ButtonSet.OK_CANCEL);
   if (response.getSelectedButton() !== ui.Button.OK) return '';
   return String(response.getResponseText() || '').trim();
 }
@@ -855,6 +1105,8 @@ function ensurePersonaMapperSheets_(spreadsheet) {
     if (sh.getLastRow() === 0 || sh.getLastColumn() === 0) {
       if (sh.getMaxColumns() < d[1].length) sh.insertColumnsAfter(sh.getMaxColumns(), d[1].length - sh.getMaxColumns());
       sh.getRange(1, 1, 1, d[1].length).setValues([d[1]]);
+      sh.getRange(1, 1, 1, d[1].length).setFontWeight('bold').setBackground('#e8f0fe');
+      sh.setFrozenRows(1);
       return;
     }
     let headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0].map(function(v){ return String(v || '').trim(); });

@@ -15,7 +15,7 @@
       .checkbox-grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; }
       .checkbox-item { display: flex; align-items: flex-start; font-size: 12px; color: #3c4043; cursor: pointer; }
       .checkbox-item input { margin-right: 6px; margin-top: 2px; }
-      .section-toggle { font-size: 12px; font-weight: 700; color: #3c4043; padding: 8px 0; border-bottom: 1px solid #eee; margin-top: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; cursor: pointer; }
+      .section-toggle { font-size: 12px; font-weight: 700; color: #3c4043; padding: 8px 0; border-bottom: 1px solid #eee; margin-top: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; cursor: pointer; user-select: none; }
       .btn { display: block; width: 100%; padding: 9px; font-size: 12px; font-weight: 600; text-align: center; border-radius: 4px; border: none; cursor: pointer; transition: background 0.2s; margin-top: 6px; }
       .btn-primary { background: #1a73e8; color: #fff; }
       .btn-primary:hover { background: #1557b0; }
@@ -72,7 +72,7 @@
       </div>
     </div>
 
-    <!-- Target Company & Persona Profile -->
+    <!-- 1. Target Company & Persona Profile -->
     <div class="card">
       <div class="section-toggle" onclick="toggleSection('secTargeting')">
         <span>1. Targeting & Criteria Profile</span>
@@ -119,18 +119,28 @@
           </div>
         </div>
 
-        <div class="field">
-          <label for="researchDepth">Research Depth</label>
-          <select id="researchDepth">
-            <option value="Standard">Standard (Fast Website & Title Match)</option>
-            <option value="Deep Persona" selected>Deep Persona (LinkedIn Activity, Talks & Quotes)</option>
-            <option value="Comprehensive / Forensic">Comprehensive / Forensic (CSRD, Scope 3 & Disclosures)</option>
-          </select>
+        <div class="row">
+          <div class="field">
+            <label for="researchDepth">Research Depth</label>
+            <select id="researchDepth">
+              <option value="Standard">Standard (Fast Website & Title Match)</option>
+              <option value="Deep Persona" selected>Deep Persona (LinkedIn Activity, Talks & Quotes)</option>
+              <option value="Comprehensive / Forensic">Comprehensive / Forensic (CSRD, Scope 3 & Disclosures)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="evidencePeriodMonths">Evidence Period</label>
+            <select id="evidencePeriodMonths">
+              <option value="6">Last 6 Months</option>
+              <option value="12" selected>Last 12 Months</option>
+              <option value="24">Last 24 Months</option>
+            </select>
+          </div>
         </div>
 
         <div class="row">
           <div class="field">
-            <label for="minCompanyScore">Min Company Fit Score</label>
+            <label for="minCompanyScore">Min Company Score</label>
             <select id="minCompanyScore">
               <option value="70">70 (Broad Discovery)</option>
               <option value="75">75 (Balanced)</option>
@@ -139,7 +149,7 @@
             </select>
           </div>
           <div class="field">
-            <label for="minPersonaScore">Min Persona Fit Score</label>
+            <label for="minPersonaScore">Min Persona Fit</label>
             <select id="minPersonaScore">
               <option value="75">75 (Standard Match)</option>
               <option value="80">80 (Direct Title Match)</option>
@@ -164,7 +174,7 @@
       </div>
     </div>
 
-    <!-- Business Needs & Intelligence Criteria (Multi-Department Custom Needs) -->
+    <!-- 2. Business Needs & Buying Triggers -->
     <div class="card">
       <div class="section-toggle" onclick="toggleSection('secIntelligence')">
         <span>2. Business Needs & Buying Triggers</span>
@@ -174,10 +184,12 @@
         <label style="color:#1a73e8; font-weight:700;">Standard ESG Signals</label>
         <div class="checkbox-grid">
           <label class="checkbox-item"><input type="checkbox" id="incEsgObligations" checked> ESG Reporting Obligations (CSRD/GRI)</label>
-          <label class="checkbox-item"><input type="checkbox" id="incScope3" checked> Scope 3 & Value-Chain Data Exposure</label>
+          <label class="checkbox-item"><input type="checkbox" id="incEsgMaturity" checked> ESG Reporting Maturity</label>
           <label class="checkbox-item"><input type="checkbox" id="incSupplyChain" checked> Supply Chain Complexity</label>
+          <label class="checkbox-item"><input type="checkbox" id="incScope3" checked> Scope 3 & Value-Chain Data Exposure</label>
           <label class="checkbox-item"><input type="checkbox" id="incDataChallenges" checked> Sustainability Data Management Needs</label>
           <label class="checkbox-item"><input type="checkbox" id="incDigital" checked> Digital Transformation / AI Signals</label>
+          <label class="checkbox-item"><input type="checkbox" id="incEsgGovernance" checked> ESG Board Oversight & Governance</label>
           <label class="checkbox-item"><input type="checkbox" id="incTriggers" checked> Commercial & Leadership Triggers</label>
           <label class="checkbox-item"><input type="checkbox" id="incEvaluater" checked> eValuater / EvA Solution Fit</label>
         </div>
@@ -202,15 +214,80 @@
 - Migrating core infrastructure to AWS/GCP
 - Senior engineers spending sprint cycles gathering manual audit evidence
 - Vendor questionnaire drop-off during procurement reviews"></textarea>
-          <div class="hint">The AI will use these criteria to score companies and generate personalized email hooks.</div>
+          <div class="hint">The AI uses these criteria to qualify companies and craft personalized outreach angles.</div>
         </div>
       </div>
     </div>
 
-    <!-- AI Engine & Provider Config -->
+    <!-- 3. Scoring Weights & Automation Settings (Persona Mapper Setting Columns 20-33) -->
+    <div class="card">
+      <div class="section-toggle" onclick="toggleSection('secWeights')">
+        <span>3. Opportunity Weights & Automation</span>
+        <span id="iconWeights">▶</span>
+      </div>
+      <div id="secWeights" style="display:none;">
+        <div class="subheading">Opportunity Fit Weights</div>
+        <div class="row">
+          <div class="field">
+            <label for="weightEsgReporting">ESG Reporting</label>
+            <input type="text" id="weightEsgReporting" value="20%">
+          </div>
+          <div class="field">
+            <label for="weightSupplyChain">Supply Chain</label>
+            <input type="text" id="weightSupplyChain" value="15%">
+          </div>
+          <div class="field">
+            <label for="weightDataChallenges">Data Needs</label>
+            <input type="text" id="weightDataChallenges" value="15%">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="weightDigital">Digital / AI</label>
+            <input type="text" id="weightDigital" value="15%">
+          </div>
+          <div class="field">
+            <label for="weightTriggers">Triggers</label>
+            <input type="text" id="weightTriggers" value="20%">
+          </div>
+          <div class="field">
+            <label for="weightEvaluaterFit">Solution Fit</label>
+            <input type="text" id="weightEvaluaterFit" value="15%">
+          </div>
+        </div>
+
+        <div class="subheading">Email Priority Scoring & Dispatch Rules</div>
+        <div class="row">
+          <div class="field">
+            <label for="minEmailPriorityScore">Min Email Priority</label>
+            <input type="number" id="minEmailPriorityScore" value="80" min="50" max="100">
+          </div>
+          <div class="field">
+            <label for="weightEmailCompanyScore">Company Weight</label>
+            <input type="text" id="weightEmailCompanyScore" value="40%">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="weightEmailPersonaFit">Persona Weight</label>
+            <input type="text" id="weightEmailPersonaFit" value="35%">
+          </div>
+          <div class="field">
+            <label for="weightEmailBuyingSignal">Signals Weight</label>
+            <input type="text" id="weightEmailBuyingSignal" value="25%">
+          </div>
+        </div>
+        <div class="checkbox-grid" style="margin-top:6px;">
+          <label class="checkbox-item"><input type="checkbox" id="humanApprovalRequired" checked> Human Approval Required Before Dispatch</label>
+          <label class="checkbox-item"><input type="checkbox" id="autoSendEnabled"> Auto-Send Enabled (Dispatches when Approved)</label>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. AI Engine & Provider Config -->
     <div class="card">
       <div class="section-toggle" onclick="toggleSection('secAI')">
-        <span>3. AI Engine & Model Config</span>
+        <span>4. AI Engine & Model Config</span>
         <span id="iconAI">▶</span>
       </div>
       <div id="secAI" style="display:none;">
@@ -228,10 +305,10 @@
       </div>
     </div>
 
-    <!-- Email Verification & Sender Config -->
+    <!-- 5. Email Verification & Sender Config -->
     <div class="card">
       <div class="section-toggle" onclick="toggleSection('secEmail')">
-        <span>4. Email Verification & Sender Profile</span>
+        <span>5. Email Verification & Sender Profile</span>
         <span id="iconEmail">▼</span>
       </div>
       <div id="secEmail">
@@ -310,6 +387,11 @@
       window.onload = function() {
         renderCampaignOptions(serverCampaigns);
         onSenderChanged();
+        if (serverCampaigns && serverCampaigns.length > 0) {
+          const firstId = serverCampaigns[0].id;
+          document.getElementById('campaignSelect').value = firstId;
+          onCampaignSelected();
+        }
       };
 
       function renderCampaignOptions(campaigns) {
@@ -349,13 +431,17 @@
       function refreshCampaigns() {
         showStatus('Refreshing campaigns list...', 'info');
         google.script.run
-          .withSuccessHandler(function(campaigns) {
-            renderCampaignOptions(campaigns);
+          .withSuccessHandler(function(res) {
+            if (res && res.campaigns) {
+              serverCampaigns = res.campaigns;
+              serverConfigsMap = res.configsMap || {};
+              renderCampaignOptions(serverCampaigns);
+            }
           })
           .withFailureHandler(function(err) {
             showStatus('Failed to load campaigns: ' + err.message, 'error');
           })
-          .getAvailableCampaignsList();
+          .getSidebarInitialData();
       }
 
       function applyDepartmentPreset(preset) {
@@ -387,6 +473,7 @@
         document.getElementById('companySize').value = data.size || '';
         document.getElementById('companyLimit').value = data.limit || 5;
         document.getElementById('researchDepth').value = data.researchDepth || 'Deep Persona';
+        document.getElementById('evidencePeriodMonths').value = data.evidencePeriodMonths || '12';
         document.getElementById('minCompanyScore').value = data.minCompanyScore || '80';
         document.getElementById('minPersonaScore').value = data.minPersonaScore || '85';
         document.getElementById('targetTitles').value = data.titles || '';
@@ -394,28 +481,48 @@
         document.getElementById('searchKeywords').value = data.searchKeywords || '';
         document.getElementById('customBusinessNeeds').value = data.customBusinessNeeds || '';
 
+        // Toggles
+        document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
+        document.getElementById('incEsgMaturity').checked = data.incEsgMaturity !== false;
+        document.getElementById('incSupplyChain').checked = data.incSupplyChain !== false;
+        document.getElementById('incScope3').checked = data.incScope3 !== false;
+        document.getElementById('incDataChallenges').checked = data.incDataChallenges !== false;
+        document.getElementById('incDigital').checked = data.incDigital !== false;
+        document.getElementById('incEsgGovernance').checked = data.incEsgGovernance !== false;
+        document.getElementById('incTriggers').checked = data.incTriggers !== false;
+        document.getElementById('incEvaluater').checked = data.incEvaluater !== false;
+
+        // Weights & Automation
+        document.getElementById('weightEsgReporting').value = data.weightEsgReporting || '20%';
+        document.getElementById('weightSupplyChain').value = data.weightSupplyChain || '15%';
+        document.getElementById('weightDataChallenges').value = data.weightDataChallenges || '15%';
+        document.getElementById('weightDigital').value = data.weightDigital || '15%';
+        document.getElementById('weightTriggers').value = data.weightTriggers || '20%';
+        document.getElementById('weightEvaluaterFit').value = data.weightEvaluaterFit || '15%';
+
+        document.getElementById('minEmailPriorityScore').value = data.minEmailPriorityScore || '80';
+        document.getElementById('weightEmailCompanyScore').value = data.weightEmailCompanyScore || '40%';
+        document.getElementById('weightEmailPersonaFit').value = data.weightEmailPersonaFit || '35%';
+        document.getElementById('weightEmailBuyingSignal').value = data.weightEmailBuyingSignal || '25%';
+        document.getElementById('humanApprovalRequired').checked = data.humanApprovalRequired !== false;
+        document.getElementById('autoSendEnabled').checked = data.autoSendEnabled === true;
+
+        // AI Provider
         document.getElementById('aiProviderSelect').value = data.aiProvider || 'GEMINI';
         document.getElementById('aiModelInput').value = data.aiModel || 'gemini-3.8-flash';
+
+        // Verification & Sender
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
-        
         document.getElementById('senderProviderSelect').value = data.emailSenderProvider || 'Workspace Gmail (Drafts Only)';
         document.getElementById('senderEndpointInput').value = data.emailSenderEndpoint || '';
 
+        // Sender Identity
         document.getElementById('senderName').value = data.senderName || 'Alex Mercer';
         document.getElementById('senderTitle').value = data.senderTitle || 'Solutions Consultant';
         document.getElementById('senderCompany').value = data.senderCompany || 'eValuater Solutions';
 
         onSenderChanged();
-
-        document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
-        document.getElementById('incScope3').checked = data.incScope3 !== false;
-        document.getElementById('incSupplyChain').checked = data.incSupplyChain !== false;
-        document.getElementById('incDataChallenges').checked = data.incDataChallenges !== false;
-        document.getElementById('incDigital').checked = data.incDigital !== false;
-        document.getElementById('incTriggers').checked = data.incTriggers !== false;
-        document.getElementById('incEvaluater').checked = data.incEvaluater !== false;
-
         showStatus('Loaded configuration for ' + cid, 'success');
       }
 
@@ -475,30 +582,57 @@
           country: document.getElementById('targetCountries').value.trim(),
           industry: document.getElementById('targetIndustries').value.trim(),
           size: document.getElementById('companySize').value.trim(),
-          limit: document.getElementById('companyLimit').value || 5,
+          limit: Number(document.getElementById('companyLimit').value) || 5,
           researchDepth: document.getElementById('researchDepth').value,
-          minCompanyScore: document.getElementById('minCompanyScore').value,
-          minPersonaScore: document.getElementById('minPersonaScore').value,
+          evidencePeriodMonths: Number(document.getElementById('evidencePeriodMonths').value) || 12,
+          minCompanyScore: Number(document.getElementById('minCompanyScore').value) || 80,
+          minPersonaScore: Number(document.getElementById('minPersonaScore').value) || 85,
           titles: document.getElementById('targetTitles').value.trim(),
           campaignFocus: document.getElementById('campaignFocus').value.trim(),
           searchKeywords: document.getElementById('searchKeywords').value.trim(),
           customBusinessNeeds: document.getElementById('customBusinessNeeds').value.trim(),
+
+          // All 9 Criteria Toggles
+          incEsgObligations: document.getElementById('incEsgObligations').checked,
+          incEsgMaturity: document.getElementById('incEsgMaturity').checked,
+          incSupplyChain: document.getElementById('incSupplyChain').checked,
+          incScope3: document.getElementById('incScope3').checked,
+          incDataChallenges: document.getElementById('incDataChallenges').checked,
+          incDigital: document.getElementById('incDigital').checked,
+          incEsgGovernance: document.getElementById('incEsgGovernance').checked,
+          incTriggers: document.getElementById('incTriggers').checked,
+          incEvaluater: document.getElementById('incEvaluater').checked,
+
+          // Opportunity Weights
+          weightEsgReporting: document.getElementById('weightEsgReporting').value.trim() || '20%',
+          weightSupplyChain: document.getElementById('weightSupplyChain').value.trim() || '15%',
+          weightDataChallenges: document.getElementById('weightDataChallenges').value.trim() || '15%',
+          weightDigital: document.getElementById('weightDigital').value.trim() || '15%',
+          weightTriggers: document.getElementById('weightTriggers').value.trim() || '20%',
+          weightEvaluaterFit: document.getElementById('weightEvaluaterFit').value.trim() || '15%',
+
+          // Email Priority & Automation Rules
+          minEmailPriorityScore: Number(document.getElementById('minEmailPriorityScore').value) || 80,
+          weightEmailCompanyScore: document.getElementById('weightEmailCompanyScore').value.trim() || '40%',
+          weightEmailPersonaFit: document.getElementById('weightEmailPersonaFit').value.trim() || '35%',
+          weightEmailBuyingSignal: document.getElementById('weightEmailBuyingSignal').value.trim() || '25%',
+          humanApprovalRequired: document.getElementById('humanApprovalRequired').checked,
+          autoSendEnabled: document.getElementById('autoSendEnabled').checked,
+
+          // AI Provider Config
           aiProvider: document.getElementById('aiProviderSelect').value,
           aiModel: document.getElementById('aiModelInput').value.trim() || 'gemini-3.8-flash',
+
+          // Email Verification & Sender
           emailVerifier: document.getElementById('emailVerifierSelect').value,
           emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
           emailSenderProvider: document.getElementById('senderProviderSelect').value,
           emailSenderEndpoint: document.getElementById('senderEndpointInput').value.trim(),
+
+          // Sender Identity
           senderName: document.getElementById('senderName').value.trim(),
           senderTitle: document.getElementById('senderTitle').value.trim(),
-          senderCompany: document.getElementById('senderCompany').value.trim(),
-          incEsgObligations: document.getElementById('incEsgObligations').checked,
-          incScope3: document.getElementById('incScope3').checked,
-          incSupplyChain: document.getElementById('incSupplyChain').checked,
-          incDataChallenges: document.getElementById('incDataChallenges').checked,
-          incDigital: document.getElementById('incDigital').checked,
-          incTriggers: document.getElementById('incTriggers').checked,
-          incEvaluater: document.getElementById('incEvaluater').checked
+          senderCompany: document.getElementById('senderCompany').value.trim()
         };
 
         serverConfigsMap[cid] = payload;
@@ -506,7 +640,7 @@
         showStatus('Saving campaign settings to sheet...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
-            showStatus(res.message, 'success');
+            showStatus(res.message || 'Saved successfully!', 'success');
             refreshCampaigns();
           })
           .withFailureHandler(function(err) {
@@ -519,7 +653,7 @@
         const cid = document.getElementById('campaignIdInput').value.trim();
         if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
         
-        showStatus('🔍 Gemini is searching the web for target companies... Please wait.', 'info');
+        showStatus('🔍 AI is searching the web for target companies... Please wait.', 'info');
         
         google.script.run
           .withSuccessHandler(function(res) {
