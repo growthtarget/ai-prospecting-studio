@@ -56,7 +56,7 @@
         </div>
         <div class="field">
           <label for="campaignNameInput">Campaign Name</label>
-          <input type="text" id="campaignNameInput" placeholder="e.g. Procurement Audit Q1">
+          <input type="text" id="campaignNameInput" placeholder="e.g. Energy Canada">
         </div>
       </div>
       <div class="field">
@@ -66,6 +66,10 @@
           <option value="ESG Advisory">ESG Advisory</option>
           <option value="Enterprise Sales">Enterprise Sales</option>
           <option value="Cybersecurity & IT">Cybersecurity & IT</option>
+          <option value="Operations & Compliance">Operations & Compliance</option>
+          <option value="Enterprise SaaS / IT">Enterprise SaaS / IT</option>
+          <option value="FinTech & Banking">FinTech & Banking</option>
+          <option value="HR & Talent Ops">HR & Talent Ops</option>
           <option value="Marketing">Marketing</option>
           <option value="Executive Leadership">Executive Leadership</option>
         </select>
@@ -81,11 +85,11 @@
       <div id="secTargeting">
         <div class="field">
           <label for="targetCountries">Target Countries / Regions</label>
-          <input type="text" id="targetCountries" list="countryPresets" placeholder="e.g. United States, Canada, Sweden, Norway">
+          <input type="text" id="targetCountries" list="countryPresets" placeholder="e.g. Canada Only, United States, Global">
           <datalist id="countryPresets">
+            <option value="Canada Only">
             <option value="United States & Canada">
             <option value="United States Only">
-            <option value="Canada Only">
             <option value="Sweden, Norway, Denmark">
             <option value="United Kingdom & Europe">
             <option value="Global">
@@ -93,19 +97,19 @@
         </div>
         <div class="field">
           <label for="targetIndustries">Target Industries</label>
-          <input type="text" id="targetIndustries" list="industryPresets" placeholder="e.g. Freight & Logistics, Manufacturing">
+          <input type="text" id="targetIndustries" list="industryPresets" placeholder="e.g. Energy, CleanTech & Utilities">
           <datalist id="industryPresets">
+            <option value="Energy, CleanTech & Utilities">
             <option value="Freight & Logistics, Industrial Equipment">
             <option value="Manufacturing, Industrial, BioTech">
             <option value="Financial Services / FinTech SaaS">
-            <option value="Energy, CleanTech & Utilities">
             <option value="Retail & Consumer Goods">
           </datalist>
         </div>
         <div class="row">
           <div class="field">
             <label for="companySize">Company Size (FTEs)</label>
-            <input type="text" id="companySize" list="sizePresets" placeholder="e.g. 50 - 250">
+            <input type="text" id="companySize" list="sizePresets" placeholder="e.g. 50 - 250 employees">
             <datalist id="sizePresets">
               <option value="10 - 50 employees">
               <option value="50 - 250 employees">
@@ -161,15 +165,15 @@
 
         <div class="field">
           <label for="targetTitles">Target Persona Titles</label>
-          <textarea id="targetTitles" placeholder="e.g. VP Procurement; Head of Supply Chain; Director Vendor Management"></textarea>
+          <textarea id="targetTitles" placeholder="e.g. VP Procurement; Head of Supply Chain; Director of Energy Operations"></textarea>
         </div>
         <div class="field">
           <label for="campaignFocus">Campaign Focus / Objective Hook</label>
-          <input type="text" id="campaignFocus" placeholder="e.g. Scope 3 vendor emissions transparency and supply chain audits">
+          <input type="text" id="campaignFocus" placeholder="e.g. Clean power transition audits and supplier ESG reporting"></input>
         </div>
         <div class="field">
           <label for="searchKeywords">Additional Search Keywords</label>
-          <input type="text" id="searchKeywords" placeholder="e.g. CSRD, Scope 3, supplier audits, vendor questionnaires">
+          <input type="text" id="searchKeywords" placeholder="e.g. Scope 1-3, CleanTech, renewable energy procurement, CSRD">
         </div>
       </div>
     </div>
@@ -202,7 +206,7 @@
           <div class="field" style="margin-bottom:6px;">
             <select id="presetNeedSelect" onchange="applyDepartmentPreset(this.value)">
               <option value="">-- Quick Load Department Preset (Optional) --</option>
-              <option value="procurement" selected>Procurement (Vendor Risk, Questionnaire Drag, Tier-1 Audits)</option>
+              <option value="procurement">Procurement (Vendor Risk, Questionnaire Drag, Tier-1 Audits)</option>
               <option value="cybersecurity">Cybersecurity & IT (SOC 2, ISO 27001, AWS Migration)</option>
               <option value="enterprise_saas">Enterprise SaaS (Legacy ERP Migration, API Modernization)</option>
               <option value="fintech">FinTech & Wealth (Banking Regulations, AML, Payment Compliance)</option>
@@ -356,16 +360,16 @@
         <div class="row">
           <div class="field">
             <label for="senderName">Sender Display Name</label>
-            <input type="text" id="senderName" value="Alex Mercer" placeholder="e.g. Alex Mercer">
+            <input type="text" id="senderName" placeholder="e.g. Jordan Smith">
           </div>
           <div class="field">
             <label for="senderTitle">Sender Job Title</label>
-            <input type="text" id="senderTitle" value="Solutions Consultant" placeholder="e.g. VP Sustainability">
+            <input type="text" id="senderTitle" placeholder="e.g. Director of Partnerships">
           </div>
         </div>
         <div class="field">
           <label for="senderCompany">Sender Company Name</label>
-          <input type="text" id="senderCompany" value="eValuater Solutions" placeholder="e.g. eValuater Solutions">
+          <input type="text" id="senderCompany" placeholder="e.g. Energy Canada Solutions">
         </div>
       </div>
     </div>
@@ -383,17 +387,18 @@
     <script>
       var serverCampaigns = <?!= (typeof initialCampaigns !== 'undefined' && initialCampaigns) ? JSON.stringify(initialCampaigns) : '[]' ?>;
       var serverConfigsMap = <?!= (typeof initialConfigsMap !== 'undefined' && initialConfigsMap) ? JSON.stringify(initialConfigsMap) : '{}' ?>;
+      var currentActiveId = '<?= (typeof activeCampaignId !== 'undefined' && activeCampaignId) ? activeCampaignId : "" ?>';
 
       window.onload = function() {
-        renderCampaignOptions(serverCampaigns);
+        renderCampaignOptions(serverCampaigns, currentActiveId);
         onSenderChanged();
         if (serverCampaigns && serverCampaigns.length > 0) {
-          const firstId = serverCampaigns[0].id;
-          document.getElementById('campaignSelect').value = firstId;
-          onCampaignSelected();
+          const selectVal = currentActiveId || serverCampaigns[0].id;
+          document.getElementById('campaignSelect').value = selectVal;
+          onCampaignSelected(true);
         } else {
           document.getElementById('campaignIdInput').value = 'CMP-005';
-          document.getElementById('campaignNameInput').value = 'Procurement Vendor Audit Q1';
+          document.getElementById('campaignNameInput').value = 'Energy Canada';
           applyDepartmentPreset('procurement');
         }
       };
@@ -431,14 +436,18 @@
       }
 
       function refreshCampaigns(quiet) {
-        if (!quiet) showStatus('Refreshing campaigns list...', 'info');
+        if (!quiet) showStatus('Refreshing campaigns list from spreadsheet...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
             if (res && res.campaigns) {
               serverCampaigns = res.campaigns;
               serverConfigsMap = res.configsMap || {};
-              const curId = document.getElementById('campaignIdInput').value.trim();
+              const curId = document.getElementById('campaignSelect').value.trim() || res.activeCampaignId;
               renderCampaignOptions(serverCampaigns, curId);
+              if (curId && serverConfigsMap[curId]) {
+                document.getElementById('campaignSelect').value = curId;
+                populateFormWithData(serverConfigsMap[curId]);
+              }
               if (!quiet) showStatus('Loaded ' + serverCampaigns.length + ' campaign(s).', 'success');
             }
           })
@@ -463,23 +472,43 @@
         }
       }
 
-      function onCampaignSelected() {
-        const cid = document.getElementById('campaignSelect').value;
-        if (!cid) return;
+      function populateFormWithData(data) {
+        if (!data) return;
+        const cid = data.id || '';
         document.getElementById('campaignIdInput').value = cid;
-        
-        const data = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : {};
+        document.getElementById('campaignNameInput').value = data.name || cid;
 
-        document.getElementById('campaignNameInput').value = data.name || '';
-        document.getElementById('departmentOwner').value = data.department || 'Procurement';
+        // Set department with dynamic fallback
+        if (data.department) {
+          const deptSelect = document.getElementById('departmentOwner');
+          let matched = false;
+          for (let i = 0; i < deptSelect.options.length; i++) {
+            if (deptSelect.options[i].value.toLowerCase() === data.department.toLowerCase()) {
+              deptSelect.selectedIndex = i;
+              matched = true;
+              break;
+            }
+          }
+          if (!matched) {
+            const newOpt = document.createElement('option');
+            newOpt.value = data.department;
+            newOpt.textContent = data.department;
+            deptSelect.appendChild(newOpt);
+            deptSelect.value = data.department;
+          }
+        }
+
+        // Set specific targeting fields without Pilot defaults
         document.getElementById('targetCountries').value = data.country || '';
         document.getElementById('targetIndustries').value = data.industry || '';
         document.getElementById('companySize').value = data.size || '';
-        document.getElementById('companyLimit').value = data.limit || 5;
+        document.getElementById('companyLimit').value = Number(data.limit) || 5;
+
         document.getElementById('researchDepth').value = data.researchDepth || 'Deep Persona';
-        document.getElementById('evidencePeriodMonths').value = data.evidencePeriodMonths || '12';
-        document.getElementById('minCompanyScore').value = data.minCompanyScore || '80';
-        document.getElementById('minPersonaScore').value = data.minPersonaScore || '85';
+        document.getElementById('evidencePeriodMonths').value = String(data.evidencePeriodMonths || '12');
+        document.getElementById('minCompanyScore').value = String(data.minCompanyScore || '80');
+        document.getElementById('minPersonaScore').value = String(data.minPersonaScore || '85');
+
         document.getElementById('targetTitles').value = data.titles || '';
         document.getElementById('campaignFocus').value = data.campaignFocus || '';
         document.getElementById('searchKeywords').value = data.searchKeywords || '';
@@ -502,7 +531,7 @@
         document.getElementById('weightTriggers').value = data.weightTriggers || '20%';
         document.getElementById('weightEvaluaterFit').value = data.weightEvaluaterFit || '15%';
 
-        document.getElementById('minEmailPriorityScore').value = data.minEmailPriorityScore || '80';
+        document.getElementById('minEmailPriorityScore').value = Number(data.minEmailPriorityScore) || 80;
         document.getElementById('weightEmailCompanyScore').value = data.weightEmailCompanyScore || '40%';
         document.getElementById('weightEmailPersonaFit').value = data.weightEmailPersonaFit || '35%';
         document.getElementById('weightEmailBuyingSignal').value = data.weightEmailBuyingSignal || '25%';
@@ -510,25 +539,54 @@
         document.getElementById('autoSendEnabled').checked = data.autoSendEnabled === true;
 
         document.getElementById('aiProviderSelect').value = data.aiProvider || 'OPENAI';
-        document.getElementById('aiModelInput').value = data.aiModel || 'gpt-4o';
+        document.getElementById('aiModelInput').value = data.aiModel || (data.aiProvider === 'GEMINI' ? 'gemini-2.5-flash' : 'gpt-4o');
 
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
         document.getElementById('senderProviderSelect').value = data.emailSenderProvider || 'Workspace Gmail (Drafts Only)';
         document.getElementById('senderEndpointInput').value = data.emailSenderEndpoint || '';
 
-        document.getElementById('senderName').value = data.senderName || 'Alex Mercer';
-        document.getElementById('senderTitle').value = data.senderTitle || 'Solutions Consultant';
-        document.getElementById('senderCompany').value = data.senderCompany || 'eValuater Solutions';
+        // Sender profile fields (no hardcoded pilot fallback)
+        document.getElementById('senderName').value = data.senderName || '';
+        document.getElementById('senderTitle').value = data.senderTitle || '';
+        document.getElementById('senderCompany').value = data.senderCompany || '';
 
         onSenderChanged();
-        showStatus('Loaded configuration for ' + cid, 'success');
+        onVerifierChanged();
+      }
+
+      function onCampaignSelected(skipSync) {
+        const cid = document.getElementById('campaignSelect').value;
+        if (!cid) return;
+
+        // 1. Immediately populate from local cache
+        const localData = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : { id: cid };
+        populateFormWithData(localData);
+        showStatus('Loaded configuration for ' + cid, 'info');
+
+        // 2. Synchronize active state with the Google Sheet and update Dashboard in background
+        if (!skipSync) {
+          google.script.run
+            .withSuccessHandler(function(res) {
+              if (res && res.success) {
+                if (res.config) {
+                  serverConfigsMap[cid] = res.config;
+                  populateFormWithData(res.config);
+                }
+                showStatus('✅ ' + cid + ' is now active on Dashboard and across all tabs!', 'success');
+              }
+            })
+            .withFailureHandler(function(err) {
+              showStatus('⚠️ Loaded locally, but background sheet activation failed: ' + err.message, 'error');
+            })
+            .selectAndActivateCampaign(cid);
+        }
       }
 
       function onProviderChanged() {
         const p = document.getElementById('aiProviderSelect').value;
         const m = document.getElementById('aiModelInput');
-        if (p === 'GEMINI') m.value = 'gemini-3.8-flash';
+        if (p === 'GEMINI') m.value = 'gemini-2.5-flash';
         if (p === 'OPENAI') m.value = 'gpt-4o';
       }
 
@@ -630,7 +688,7 @@
 
         serverConfigsMap[cid] = payload;
 
-        showStatus('Saving campaign settings directly across all tabs...', 'info');
+        showStatus('Saving campaign settings across all tabs & updating Dashboard...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
             showStatus('✅ ' + (res.message || 'Saved successfully!'), 'success');
