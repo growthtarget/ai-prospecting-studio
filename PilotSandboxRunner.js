@@ -9,12 +9,12 @@
  * 1. Generates & Synchronizes ALL 12 Tabs for the Pilot Run:
  *    - Updates "Campaign Configuration" with canonical parameters & company limit.
  *    - Generates 39-column row in "Persona Mapper Settings" for PILOT-CMP-001.
- *    - Populates "Dashboard" with styled KPIs and active metrics.
- *    - Populates "Campaigns" (28 master cols), "Company Database", "Company Intelligence", 
- *      "Persona Leads", "Research Evidence", and "Prospect Review Queue".
+ *    - Restores and populates "Dashboard" with the complete 10-row KPI table.
+ *    - Populates "Campaigns" (28 master cols), "Company Database" (Col J Campaign ID), 
+ *      "Company Intelligence", "Persona Leads", "Research Evidence", and "Prospect Review Queue".
  * 2. Creates Safe Gmail Drafts for qualified leads in your personal Gmail.
  * 3. Enforces real-time suppression rules from "Lists & Settings".
- * 4. Clean purge: Removes pilot records and resets the Dashboard cleanly to Standby.
+ * 4. Safe Purge: Removes pilot records from ALL tabs without erasing Dashboard structure.
  * ============================================================================
  */
 
@@ -50,7 +50,7 @@ const PILOT_CONFIG = {
  * MAIN ENTRY POINT: Runs the full pilot, generates settings, and updates Dashboard.
  */
 function runPilotOnRealSheets() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   Logger.log('===============================================================');
   Logger.log('>>> STARTING FULL WORKSPACE PILOT: ' + PILOT_CONFIG.CAMPAIGN_ID + ' <<<');
   Logger.log('===============================================================');
@@ -59,7 +59,7 @@ function runPilotOnRealSheets() {
     // Step 0: Ensure all 12 project tabs exist with high-contrast styling
     validateRequiredTabs(ss);
 
-    // Step 1: Clean previous pilot test rows from all tabs
+    // Step 1: Clean previous pilot test rows from all tabs (including Company Database Col J)
     purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
     Logger.log('Step 1: Purged previous pilot records.');
 
@@ -80,10 +80,10 @@ function runPilotOnRealSheets() {
     writePilotCampaign(ss, PILOT_CONFIG);
     Logger.log('Step 5: Master campaign record written to "Campaigns" with limit ' + PILOT_CONFIG.COMPANY_LIMIT);
 
-    // Step 6: Write Master Company Directory to "Company Database"
+    // Step 6: Write Master Company Directory to "Company Database" (Stamped with Col J Campaign ID)
     const rawCompanies = getPilotCompanyDatabaseRecords(PILOT_CONFIG);
     writePilotCompanyDatabase(ss, rawCompanies);
-    Logger.log('Step 6: Master companies written to "Company Database".');
+    Logger.log('Step 6: Master companies written to "Company Database" with Column J Campaign ID.');
 
     // Step 7: Write 25-Column Enriched Intelligence to "Company Intelligence"
     const enrichedCompanies = getPilotCompaniesData(PILOT_CONFIG);
@@ -269,7 +269,6 @@ function generatePersonaMapperSettingsRow(ss, config) {
     }
   }
 
-  // Append full 39-column pilot row
   const row = [
     config.CAMPAIGN_ID,
     config.CAMPAIGN_NAME,
@@ -401,7 +400,7 @@ function writePilotCampaign(ss, config) {
 }
 
 /**
- * Step 6: Master Company Database records
+ * Step 6: Master Company Database records (Includes Column J: Campaign ID)
  */
 function getPilotCompanyDatabaseRecords(config) {
   const dateStr = new Date().toISOString().split('T')[0];
@@ -451,18 +450,33 @@ function getPilotCompanyDatabaseRecords(config) {
   ];
 }
 
+/**
+ * Writes pilot companies to "Company Database" and guarantees Column J is Campaign ID.
+ */
 function writePilotCompanyDatabase(ss, list) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.COMPANY_DATABASE);
   if (!sheet) return;
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const rows = list.map(item => buildRowFromHeaders(headers, item));
-  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+
+  // Guarantee Column J Header exists as "Campaign ID"
+  const lastCol = Math.max(sheet.getLastColumn(), 10);
+  const currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  let hasCampaignCol = currentHeaders.some(h => String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') === 'campaignid');
+
+  if (!hasCampaignCol) {
+    sheet.getRange(1, 10).setValue('Campaign ID')
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+  }
+
+  const updatedHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 10)).getValues()[0];
+  const rows = list.map(item => buildRowFromHeaders(updatedHeaders, item));
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, updatedHeaders.length).setValues(rows);
 }
 
 /**
  * Step 7: Enriched intelligence for "Company Intelligence" (All 25 Columns)
- * NOTE: Column Q ('eValuater Solution Fit') strictly adheres to validation values:
- * ['High', 'Medium', 'Low', 'Disqualified - Direct Competitor']
  */
 function getPilotCompaniesData(config) {
   const now = new Date();
@@ -868,50 +882,66 @@ function logPilotExecution(ss, processedQueue) {
 }
 
 /**
- * Step 12: Generates the Executive Master Dashboard with Live KPIs & Campaign Tracker
+ * Step 12: Restores and writes the authentic 10-row KPI structure and Rollup table.
  */
 function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCount, blockedCount) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
   if (!sheet) return;
-  sheet.clear();
 
-  const now = new Date().toLocaleString();
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
 
-  // Header Title
-  sheet.getRange(1, 1, 1, 4)
-    .setValues([['🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD', '', '', '']])
-    .setFontSize(14)
-    .setFontWeight('bold')
-    .setBackground('#1a73e8')
-    .setFontColor('#ffffff');
+  // Top Green Banner (Row 1) & Campaign ID (Row 2)
+  sheet.getRange('A1').setValue('🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD');
+  sheet.getRange('B1').setValue('Campaign');
+  sheet.getRange('C1').setValue(config.CAMPAIGN_NAME);
+  sheet.getRange('D1').setValue('Pilot Active');
+  sheet.getRange('A1:D1').setBackground('#2d5945').setFontColor('#ffffff').setFontWeight('bold');
 
-  // KPI Overview Cards
+  sheet.getRange('B2').setValue(config.CAMPAIGN_ID).setFontWeight('bold');
+
+  // Header Row (Row 3)
   const kpiHeaders = [['Metric KPI', 'Current Value', 'Operational Status', 'Last Updated']];
+  sheet.getRange('A3:D3').setValues(kpiHeaders).setFontWeight('bold').setBackground('#202124').setFontColor('#ffffff');
+
+  // Complete 10 Metric Rows (Rows 4 to 13)
   const kpiData = [
     ['Active Campaign Name', config.CAMPAIGN_NAME, 'Active', now],
     ['Campaign ID', config.CAMPAIGN_ID, 'Pilot Mode', now],
     ['Operating Department', config.DEPARTMENT, 'Active Owner', now],
     ['Company Discovery Limit', config.COMPANY_LIMIT + ' Companies', 'Enforced Limit', now],
-    ['Companies Discovered & Qualified', companiesCount, 'Discovery Complete', now],
-    ['Persona Leads Identified', leadsCount, 'Mapping Complete', now],
-    ['Gmail Outreach Drafts Created', draftsCount, 'Ready in Gmail Drafts', now],
+    ['Companies Discovered & Qualified', companiesCount, companiesCount > 0 ? 'Discovery Complete' : 'Pending Discovery', now],
+    ['Persona Leads Identified', leadsCount, leadsCount > 0 ? 'Mapping Complete' : 'Pending Mapping', now],
+    ['Gmail Outreach Drafts Created', draftsCount, draftsCount > 0 ? 'Ready in Gmail Drafts' : 'No Drafts Yet', now],
     ['Suppressed / Blocked Records', blockedCount, 'Suppression Active', now],
-    ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', 'Safe Mode', now],
-    ['Primary AI Model Configured', 'Gemini 3.8 Flash + Search Grounding', 'Connected', now]
+    ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', draftsCount, now],
+    ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now]
   ];
-
-  sheet.getRange(3, 1, 1, 4).setValues(kpiHeaders).setFontWeight('bold').setBackground('#202124').setFontColor('#ffffff');
   sheet.getRange(4, 1, kpiData.length, 4).setValues(kpiData);
 
-  // Campaign Summary Rollup Table
-  const tableStart = 4 + kpiData.length + 2;
-  sheet.getRange(tableStart, 1, 1, 7)
-    .setValues([['Campaign Performance Rollup', '', '', '', '', '', '']])
-    .setFontSize(12)
-    .setFontWeight('bold');
+  // Spacing (Rows 14 - 15)
+  sheet.getRange('A14:D15').clearContent();
 
-  const summaryHeaders = [['Campaign ID', 'Campaign Name', 'Department', 'Status', 'Companies Found', 'Gmail Drafts', 'Last Run']];
-  const summaryRow = [[
+  // Campaign Performance Rollup Section Header (Row 16)
+  sheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
+
+  // Rollup Table Headers (Row 17)
+  const rollupHeaders = [
+    'Campaign ID',
+    'Campaign Name',
+    'Department',
+    'Status',
+    'Companies Found',
+    'Gmail Drafts',
+    'Last Run'
+  ];
+  sheet.getRange(17, 1, 1, 7)
+    .setValues([rollupHeaders])
+    .setFontWeight('bold')
+    .setBackground('#dadce0')
+    .setFontColor('#202124');
+
+  // Rollup Data for Pilot (Row 18)
+  const pilotRollupRow = [
     config.CAMPAIGN_ID,
     config.CAMPAIGN_NAME,
     config.DEPARTMENT,
@@ -919,14 +949,15 @@ function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCoun
     companiesCount,
     draftsCount,
     now
-  ]];
+  ];
+  sheet.getRange(18, 1, 1, 7).setValues([pilotRollupRow]);
 
-  sheet.getRange(tableStart + 1, 1, 1, 7).setValues(summaryHeaders).setFontWeight('bold').setBackground('#dadce0').setFontColor('#202124');
-  sheet.getRange(tableStart + 2, 1, 1, 7).setValues(summaryRow);
-
-  sheet.autoResizeColumns(1, 7);
   sheet.setColumnWidth(1, 260);
-  sheet.setColumnWidth(2, 280);
+  sheet.setColumnWidth(2, 320);
+  sheet.setColumnWidth(3, 180);
+  sheet.setColumnWidth(4, 180);
+
+  SpreadsheetApp.flush();
 }
 
 function ensureSuppressionRulesInSettings(ss) {
@@ -991,7 +1022,8 @@ function buildRowFromHeaders(sheetHeaders, dataObject) {
 }
 
 /**
- * Purges pilot rows tagged with PILOT-CMP-001 from all operational tabs.
+ * Universal Pilot Purge: Scans every row across operational tabs (including Company Database Col J)
+ * and reliably deletes rows belonging to PILOT-CMP-001.
  */
 function purgeExistingPilotRows(ss, campaignId) {
   const tabsToClean = [
@@ -1011,9 +1043,10 @@ function purgeExistingPilotRows(ss, campaignId) {
     if (data.length <= 1) return;
 
     for (let r = data.length - 1; r >= 1; r--) {
-      const col0 = String(data[r][0] || '').trim();
-      const col1 = String(data[r][1] || '').trim();
-      if (col0 === campaignId || col0.startsWith('PILOT-') || col1 === campaignId) {
+      const rowValues = data[r].map(v => String(v || '').trim());
+      // Checks all columns in the row so Column J in Company Database is cleanly caught
+      const isPilot = rowValues.some(val => val === campaignId || val.startsWith('PILOT-'));
+      if (isPilot) {
         sheet.deleteRow(r + 1);
       }
     }
@@ -1021,34 +1054,69 @@ function purgeExistingPilotRows(ss, campaignId) {
 }
 
 /**
- * Clean up test data and reset Dashboard to a clean Standby State (Never left blank)
+ * Safe Cleanup: Resets Dashboard to Standby state without destroying Column A structure or labels.
  */
 function cleanupPilotDataFromRealSheets() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
   
   const dashSheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
   if (dashSheet) {
-    dashSheet.clear();
-    dashSheet.getRange(1, 1, 1, 4)
-      .setValues([['🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD', '', '', '']])
-      .setFontSize(14)
-      .setFontWeight('bold')
-      .setBackground('#5f6368')
-      .setFontColor('#ffffff');
+    const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
+    
+    // Top Green Banner (Row 1) & Campaign ID (Row 2)
+    dashSheet.getRange('A1').setValue('🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD');
+    dashSheet.getRange('B1').setValue('Campaign');
+    dashSheet.getRange('C1').setValue('No Active Campaign');
+    dashSheet.getRange('D1').setValue('Standby');
+    dashSheet.getRange('A1:D1').setBackground('#2d5945').setFontColor('#ffffff').setFontWeight('bold');
 
-    dashSheet.getRange(3, 1, 1, 4)
-      .setValues([['System Status', 'Active Campaign', 'Workspace State', 'Last Cleanup']])
+    dashSheet.getRange('B2').setValue('');
+
+    // Row 3 Header
+    dashSheet.getRange('A3:D3')
+      .setValues([['Metric KPI', 'Current Value', 'Operational Status', 'Last Updated']])
       .setFontWeight('bold')
       .setBackground('#202124')
       .setFontColor('#ffffff');
 
-    dashSheet.getRange(4, 1, 1, 4)
-      .setValues([['Standby', 'None (Test Data Purged)', 'Ready to Launch New Campaign', new Date().toLocaleString()]]);
+    // Reset Rows 4 to 13 values while permanently preserving Column A labels!
+    const standbyData = [
+      ['Active Campaign Name', 'None (Standby)', 'Standby', now],
+      ['Campaign ID', 'None', 'Standby', now],
+      ['Operating Department', 'None', 'Standby', now],
+      ['Company Discovery Limit', '0 Companies', 'Standby', now],
+      ['Companies Discovered & Qualified', 0, 'Standby', now],
+      ['Persona Leads Identified', 0, 'Standby', now],
+      ['Gmail Outreach Drafts Created', 0, 'Standby', now],
+      ['Suppressed / Blocked Records', 0, 'Standby', now],
+      ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', 0, now],
+      ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now]
+    ];
+    dashSheet.getRange(4, 1, standbyData.length, 4).setValues(standbyData);
 
-    dashSheet.autoResizeColumns(1, 4);
+    // Rollup Headers & clear old data rows
+    dashSheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
+    const rollupHeaders = [
+      'Campaign ID',
+      'Campaign Name',
+      'Department',
+      'Status',
+      'Companies Found',
+      'Gmail Drafts',
+      'Last Run'
+    ];
+    dashSheet.getRange(17, 1, 1, 7)
+      .setValues([rollupHeaders])
+      .setFontWeight('bold')
+      .setBackground('#dadce0')
+      .setFontColor('#202124');
+
+    if (dashSheet.getLastRow() >= 18) {
+      dashSheet.getRange(18, 1, dashSheet.getLastRow() - 17, 7).clearContent();
+    }
   }
   
-  ss.toast('Pilot test data purged. Dashboard reset to Standby state.', 'Cleaned', 6);
+  ss.toast('Pilot test data purged. Dashboard reset to Standby with all labels intact.', 'Cleaned', 6);
   Logger.log('Pilot test data purged cleanly.');
 }

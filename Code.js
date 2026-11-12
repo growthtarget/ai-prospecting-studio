@@ -109,6 +109,7 @@ function onOpen() {
 
   ui.createMenu('🎯 AI Prospecting Studio')
     .addItem('🚀 Open Campaign Control Panel', 'showPersonaMapperControlPanel')
+    .addItem('🔄 Filter Tabs to Active Campaign', 'filterSheetsForActiveCampaignMenu')
     .addSeparator()
     .addItem('🔍 1. Discover Target Companies', 'runCompanyDiscoveryForSelectedCampaign')
     .addItem('👤 2. Run Persona Mapper', 'runPersonaMapperForSelectedCampaign')
@@ -150,6 +151,10 @@ function onEdit(e) {
       // Cell C4: Status in table row 4 changed
       else if (row === 4 && col === 3 && val) {
         syncStatusFromDashboard_(val);
+      }
+      // Cell B2: Campaign ID changed directly
+      else if (row === 2 && col === 2 && val) {
+        selectAndActivateCampaign(val);
       }
     }
     // 2. EDITS ON CAMPAIGNS TAB (Column 4 is Status)
@@ -534,15 +539,50 @@ function getAvailableCampaignsList() {
 }
 
 /**
- * Activates a selected campaign: updates configuration and updates Dashboard.
+ * Activates a selected campaign: updates configuration, updates Dashboard,
+ * and applies native view filters across all operational tabs (including Company Database).
  */
 function selectAndActivateCampaign(cid) {
   if (!cid) return { success: false, message: 'No Campaign ID provided.' };
 
-  const data = getSidebarInitialData();
-  const config = data.configsMap[cid] || { id: cid, name: cid };
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return { success: false, message: 'Spreadsheet not accessible.' };
 
+  // 1. Fetch campaign attributes directly from Campaigns tab
+  let config = { id: cid, name: cid };
+  const campSheet = ss.getSheetByName('Campaigns');
+  if (campSheet && campSheet.getLastRow() > 1) {
+    const campData = campSheet.getDataRange().getValues();
+    const headers = campData[0].map(h => normalizeStudioKey(h));
+    const idCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
+    const nameCol = headers.indexOf('CAMPAIGNNAME') >= 0 ? headers.indexOf('CAMPAIGNNAME') : 1;
+    const deptCol = headers.indexOf('DEPARTMENT');
+    const statusCol = headers.indexOf('STATUS') >= 0 ? headers.indexOf('STATUS') : 3;
+    const jsonCol = headers.indexOf('CAMPAIGNCONFIGJSON');
+
+    for (let r = 1; r < campData.length; r++) {
+      if (String(campData[r][idCol] || '').trim() === cid) {
+        config.name = String(campData[r][nameCol] || cid).trim();
+        if (deptCol >= 0) config.department = String(campData[r][deptCol] || '').trim();
+        if (statusCol >= 0) config.status = String(campData[r][statusCol] || '').trim();
+        if (jsonCol >= 0 && campData[r][jsonCol]) {
+          try {
+            const parsed = JSON.parse(campData[r][jsonCol]);
+            if (parsed && typeof parsed === 'object') {
+              config = Object.assign(config, parsed);
+            }
+          } catch (e) {}
+        }
+        break;
+      }
+    }
+  }
+
+  // 2. Direct Save Pipeline: writes B2 on Dashboard and Row 2 in Campaign Configuration
   studioDirectSaveCampaignPipeline(config, true);
+
+  // 3. Apply native view filter across all operational tabs
+  filterOperationalSheetsByCampaign_(cid);
 
   return {
     success: true,
@@ -555,6 +595,7 @@ function selectAndActivateCampaign(cid) {
 /**
  * Direct Campaign Pipeline Saver (LOCKED 38 PARAMETERS SCHEMA):
  * Preserves the exact 38 parameter rows in Campaign Configuration without shifting rows.
+ * Automatically updates Dashboard and filters operational sheets.
  */
 function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (!payload || !payload.id) {
@@ -775,6 +816,9 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   // 4. UPDATE DASHBOARD TAB (Exact 4-Column Layout)
   const dashboardPayload = Object.assign({}, payload, { status: status });
   updateDashboardForActiveCampaign(dashboardPayload);
+
+  // 5. APPLY NATIVE VIEW FILTER ACROSS ALL OPERATIONAL TABS (INCLUDING COMPANY DATABASE)
+  filterOperationalSheetsByCampaign_(campId);
 
   return {
     success: true,
@@ -1023,6 +1067,184 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   }
 
   SpreadsheetApp.flush();
+}
+
+/**
+ * Ensures Column J in Company Database is set as "Campaign ID" and backfills
+ * unassigned pilot rows automatically without corrupting user data.
+ */
+function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
+  if (!sheet) return;
+  const lastCol = Math.max(sheet.getLastColumn(), 10);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  let campaignColIdx = -1;
+
+  for (let c = 0; c < headers.length; c++) {
+    const h = normalizeStudioKey(headers[c]);
+    if (h === 'CAMPAIGNID' || h === 'CAMPAIGN' || h === 'CAMPAIGNS') {
+      campaignColIdx = c + 1;
+      break;
+    }
+  }
+
+  // If missing, establish "Campaign ID" in Column J (Col 10)
+  if (campaignColIdx === -1) {
+    sheet.getRange(1, 10).setValue('Campaign ID')
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+    campaignColIdx = 10;
+
+    // Backfill existing pilot rows (rows 2 to lastRow) so they are recognized under PILOT-CMP-001
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= 2) {
+      const colJVals = sheet.getRange(2, 10, lastRow - 1, 1).getValues();
+      for (let r = 0; r < colJVals.length; r++) {
+        if (!colJVals[r][0]) {
+          sheet.getRange(r + 2, 10).setValue('PILOT-CMP-001');
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Applies Google Sheets native FilterCriteria to operational tabs so
+ * rows from other campaigns are hidden, displaying exclusively the active campaign.
+ * Uses existing filter safely without throwing "filter already exists" exceptions.
+ * Skips Lists & Settings to protect system dropdowns and suppression guards.
+ */
+function filterOperationalSheetsByCampaign_(activeCampaignId) {
+  if (!activeCampaignId) return;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
+
+  const targetSheetNames = [
+    'Prospect Review Queue',
+    'Persona Leads',
+    'Company Intelligence',
+    'Company Database',
+    'Research Evidence',
+    'Execution Logs'
+  ];
+
+  targetSheetNames.forEach(targetName => {
+    // 1. Adaptive Case-Insensitive Tab Lookup
+    let sheet = ss.getSheetByName(targetName);
+    if (!sheet) {
+      const normTarget = targetName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const allSheets = ss.getSheets();
+      for (let s = 0; s < allSheets.length; s++) {
+        if (allSheets[s].getName().toLowerCase().replace(/[^a-z0-9]/g, '') === normTarget) {
+          sheet = allSheets[s];
+          break;
+        }
+      }
+    }
+
+    if (!sheet || sheet.getLastRow() <= 1) return;
+
+    // 2. Guarantee Column J exists on Company Database
+    if (sheet.getName().toLowerCase().replace(/[^a-z0-9]/g, '') === 'companydatabase') {
+      ensureCompanyDatabaseCampaignIdColumn_(sheet);
+    }
+
+    // 3. Scan Row 1 (or Row 2) for Campaign ID column
+    let headerRow = 1;
+    let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    let campaignColIndex = -1;
+
+    for (let c = 0; c < headers.length; c++) {
+      const h = normalizeStudioKey(headers[c]);
+      if (h === 'CAMPAIGNID' || h === 'CAMPAIGN' || h === 'CAMPAIGNS' || (h.includes('CAMPAIGN') && !h.includes('NAME') && !h.includes('FOCUS'))) {
+        campaignColIndex = c + 1;
+        break;
+      }
+    }
+
+    // Secondary scan on Row 2 if Row 1 has a merged title banner
+    if (campaignColIndex === -1 && sheet.getLastRow() > 2) {
+      const row2Headers = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
+      for (let c = 0; c < row2Headers.length; c++) {
+        const h = normalizeStudioKey(row2Headers[c]);
+        if (h === 'CAMPAIGNID' || h === 'CAMPAIGN' || h === 'CAMPAIGNS' || (h.includes('CAMPAIGN') && !h.includes('NAME') && !h.includes('FOCUS'))) {
+          campaignColIndex = c + 1;
+          headerRow = 2;
+          break;
+        }
+      }
+    }
+
+    // Skip sheets without a Campaign ID column (e.g. Lists & Settings)
+    if (campaignColIndex === -1) return;
+
+    // 4. Safe filter handling: use existing filter or create new without throwing
+    let filter = sheet.getFilter();
+    const startRow = headerRow;
+    const numDataRows = sheet.getLastRow() - startRow;
+    if (numDataRows < 1) return;
+
+    if (!filter) {
+      const filterRange = sheet.getRange(startRow, 1, numDataRows + 1, sheet.getLastColumn());
+      filter = filterRange.createFilter();
+    }
+
+    const colValues = sheet.getRange(startRow + 1, campaignColIndex, numDataRows, 1).getValues();
+
+    // 5. Collect all unique campaign IDs that do NOT match the active campaign
+    const hiddenValues = [];
+    const seen = {};
+    for (let i = 0; i < colValues.length; i++) {
+      const val = String(colValues[i][0] || '').trim();
+      if (val && val !== activeCampaignId && !seen[val]) {
+        hiddenValues.push(val);
+        seen[val] = true;
+      }
+    }
+
+    // 6. Apply native Google Sheets filter criteria safely
+    if (hiddenValues.length > 0) {
+      const criteria = SpreadsheetApp.newFilterCriteria()
+        .setHiddenValues(hiddenValues)
+        .build();
+      filter.setColumnFilterCriteria(campaignColIndex, criteria);
+    } else {
+      // If nothing to hide, clear column criteria so all rows for active campaign show
+      filter.removeColumnFilterCriteria(campaignColIndex);
+    }
+  });
+
+  SpreadsheetApp.flush();
+}
+
+/**
+ * Menu action to trigger tab re-filtering manually.
+ * Also checks Dashboard cell B2 or prompt to guarantee correct active ID.
+ */
+function filterSheetsForActiveCampaignMenu() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  let activeId = getStudioActiveCampaignId_();
+  
+  // Also check Campaign Configuration directly
+  const cfg = ss.getSheetByName('Campaign Configuration');
+  if (cfg && cfg.getLastRow() > 1) {
+    const cfgId = String(cfg.getRange(2, 2).getValue() || '').trim();
+    if (cfgId && cfgId !== activeId) {
+      activeId = cfgId;
+    }
+  }
+
+  filterOperationalSheetsByCampaign_(activeId);
+  
+  let ui;
+  try {
+    ui = SpreadsheetApp.getUi();
+    ui.alert('Tabs Filtered', 'Operational tabs (including Company Database) filtered to active campaign: ' + activeId, ui.ButtonSet.OK);
+  } catch (e) {
+    Logger.log('Operational tabs filtered to active campaign: ' + activeId);
+  }
 }
 
 /**

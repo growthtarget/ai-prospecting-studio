@@ -10,10 +10,11 @@
  *    or OPENAI (GPT-4o) reading API keys from Script Properties or Agent Settings.
  * 2. Multi-Department Intelligence: Normalizes and reads DEPARTMENT, CUSTOM_BUSINESS_NEEDS,
  *    and targeting parameters reliably from "Campaign Configuration".
- * 3. Dual-Tab Population: Writes master entries to "Company Database" AND
- *    populates all 25 columns of "Company Intelligence".
- * 4. Grounding Evidence Logging: Stores audit citation URLs in "Research Evidence".
- * 5. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
+ * 3. Dual-Tab Population: Writes master entries to "Company Database" (stamped with Col J Campaign ID)
+ *    AND populates all 25 columns of "Company Intelligence".
+ * 4. Scenario B Deduplication: Isolates deduplication by Campaign ID.
+ * 5. Grounding Evidence Logging: Stores audit citation URLs in "Research Evidence".
+ * 6. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
  * ============================================================================
  */
 
@@ -268,7 +269,8 @@ function executeAiDiscoveryCall_(options) {
 }
 
 /**
- * Saves discovered companies into BOTH "Company Database" and "Company Intelligence"
+ * Saves discovered companies into BOTH "Company Database" and "Company Intelligence".
+ * Guarantees Column J is "Campaign ID" and enforces Scenario B deduplication.
  */
 function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config, providerLabel) {
   const dbSheet = spreadsheet.getSheetByName('Company Database');
@@ -277,6 +279,19 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
 
   if (!dbSheet) throw new Error('Sheet "Company Database" not found.');
   if (!intelSheet) throw new Error('Sheet "Company Intelligence" not found.');
+
+  // Guarantee Column J in Company Database is "Campaign ID"
+  const lastCol = Math.max(dbSheet.getLastColumn(), 10);
+  const currentDbHeaders = dbSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  let hasCampaignCol = currentDbHeaders.some(h => String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') === 'campaignid');
+
+  if (!hasCampaignCol) {
+    dbSheet.getRange(1, 10).setValue('Campaign ID')
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+  }
 
   // Ensure high-contrast headers on destination sheets
   [dbSheet, intelSheet].forEach(sh => {
@@ -304,10 +319,13 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     const website = String(item.website || '').trim();
     const domain = domainFromUrl_(website);
 
+    // Scenario B Deduplication: Deduplicates only within the CURRENT campaign run
     const isDuplicate = existingDbRecords.some(function(row) {
+      const rowCampaign = String(row['Campaign ID'] || '').trim();
       const rowDomain = domainFromUrl_(row['Domain'] || row['Website'] || '');
       const rowName = String(row['Company Name'] || row['Company name'] || '').trim().toLowerCase();
-      return (row['Campaign ID'] === campaignId) && (
+      
+      return (rowCampaign === campaignId) && (
         (domain && rowDomain && domain === rowDomain) ||
         (rowName && rowName === companyName.toLowerCase())
       );
@@ -319,7 +337,7 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     const score = Number(item.companyOpportunityScore || item.initialScore || 85);
     const status = score >= (config.minCompanyScore || 80) ? 'Qualified' : 'Disqualified';
 
-    // 1. Write to "Company Database"
+    // 1. Write to "Company Database" (Includes Column J: Campaign ID)
     const dbRecord = {
       'Company ID': companyId,
       'Campaign ID': campaignId,
@@ -335,7 +353,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     dbSheet.appendRow(buildRowFromHeaders_(dbHeaders, dbRecord));
 
     // 2. Write to "Company Intelligence" (All 25 Columns)
-    // Solution fit strictly aligned with dropdown options
     const fitLabel = score >= 85 ? 'High' : (score >= 70 ? 'Medium' : 'Low');
 
     const intelRecord = {
