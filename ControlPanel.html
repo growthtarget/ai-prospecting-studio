@@ -324,7 +324,7 @@
             <option value="ZeroBounce" selected>ZeroBounce (Pay-As-You-Go API)</option>
             <option value="MillionVerifier">MillionVerifier (Budget Pick)</option>
             <option value="NeverBounce">NeverBounce</option>
-            <option value="Custom">Custom HTTPS REST Endpoint</option>
+            <option value="Custom HTTPS">Custom HTTPS REST Endpoint</option>
             <option value="None">None (Skip Verification)</option>
           </select>
         </div>
@@ -594,7 +594,7 @@
         if (v === 'ZeroBounce') ep.placeholder = 'https://api.zerobounce.net/v2/validate';
         if (v === 'MillionVerifier') ep.placeholder = 'https://api.millionverifier.com/api/v3/';
         if (v === 'NeverBounce') ep.placeholder = 'https://api.neverbounce.com/v4/single/check';
-        if (v === 'Custom') ep.placeholder = 'https://your-custom-api.com/verify';
+        if (v === 'Custom HTTPS') ep.placeholder = 'https://your-custom-api.com/verify';
       }
 
       function onSenderChanged() {
