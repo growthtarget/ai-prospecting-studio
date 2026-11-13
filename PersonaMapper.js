@@ -12,7 +12,8 @@
  * 3. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
  *    opt-out emails, and role-based accounts before queuing.
  * 4. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 cols).
- * 5. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
+ * 5. Grounding Evidence Logging: Persists verified decision-maker signals into Tab 9 "Research Evidence" (9 cols).
+ * 6. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
  * ============================================================================
  */
 
@@ -27,7 +28,8 @@ const PERSONA_MAPPER_SHEETS_ = {
   companies: 'Company Intelligence', 
   personas: 'Persona Leads', 
   settings: 'Persona Mapper Settings', 
-  queue: 'Prospect Review Queue' 
+  queue: 'Prospect Review Queue',
+  evidence: 'Research Evidence'
 };
 
 /**
@@ -103,11 +105,18 @@ function syncActiveCampaignToPersonaMapperSettings() {
   const pSheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.settings);
   if (pSheet) spreadsheet.setActiveSheet(pSheet);
 
-  SpreadsheetApp.getUi().alert(
-    '🎯 Sync Complete',
-    '✅ Successfully populated Persona Mapper Settings (Row 2, 39 columns) and updated Campaign Configuration for ' + cid + '!\n\n' + res.message,
-    SpreadsheetApp.getUi().ButtonSet.OK
-  );
+  let ui = null;
+  try { ui = SpreadsheetApp.getUi(); } catch (e) {}
+
+  if (ui) {
+    ui.alert(
+      '🎯 Sync Complete',
+      '✅ Successfully populated Persona Mapper Settings (Row 2, 39 columns) and updated Campaign Configuration for ' + cid + '!\n\n' + res.message,
+      ui.ButtonSet.OK
+    );
+  } else {
+    Logger.log('Sync Complete: Saved settings for ' + cid);
+  }
 }
 
 /**
@@ -248,6 +257,11 @@ function runPersonaMapperFromSidebar(campaignId) {
       upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.companies), PERSONA_MAPPER_HEADERS_.companies, 'company', companyRecord);
       const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
 
+      // Extract search grounding citations across Gemini and OpenAI
+      const grounding = (typeof extractGroundingMetadata_ === 'function' && aiResponse)
+        ? extractGroundingMetadata_(aiResponse)
+        : { citationsByUrl: {}, searchQueries: [] };
+
       (Array.isArray(result.personas) ? result.personas : []).forEach(function(persona) {
         const confidence = titleCaseSignal_(persona.confidence);
         if (confidence === 'Low' || confidenceRank_(confidence) < confidenceRank_(settings['Minimum Persona Confidence'] || 'Medium')) return;
@@ -258,7 +272,19 @@ function runPersonaMapperFromSidebar(campaignId) {
         upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
         const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings, suppressionRules);
         upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
+
+        // Grounding Evidence Logging for Tab 9: Research Evidence (Entity Type = 'Persona')
+        recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, settings['Persona Titles']);
       });
+
+      // Grounding Evidence Logging for Company triggers detected during persona research
+      if (result.company && Array.isArray(result.company.evidence)) {
+        result.company.evidence.forEach(function(evItem) {
+          if (evItem && evItem.url) {
+            recordCompanyGroundingEvidence_(spreadsheet, campaignId, company, evItem, grounding, settings['Campaign Focus']);
+          }
+        });
+      }
 
       processed++;
       properties.setProperty(cursorKey, String(index + 1));
@@ -269,7 +295,7 @@ function runPersonaMapperFromSidebar(campaignId) {
       return { 
         success: true, 
         count: processed, 
-        message: 'Persona Mapper completed ' + processed + ' company record(s) using ' + providerLabel + '! Leads staged in Review Queue.' 
+        message: 'Persona Mapper completed ' + processed + ' company record(s) using ' + providerLabel + '! Leads staged in Review Queue & citations logged in Research Evidence.' 
       };
     } else {
       properties.setProperty(cursorKey, String(end));
@@ -288,20 +314,28 @@ function runPersonaMapperFromSidebar(campaignId) {
 }
 
 /**
- * Called from the Top Menu (Interactive dialog mode)
+ * Called from the Top Menu (Interactive dialog mode with headless safety)
  */
 function runPersonaMapperForSelectedCampaign() {
-  const ui = SpreadsheetApp.getUi();
+  let ui = null;
+  try { ui = SpreadsheetApp.getUi(); } catch (e) {}
+
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(5000)) { ui.alert('Persona Mapper is already running. Try again after it finishes.'); return; }
+  if (!lock.tryLock(5000)) { 
+    if (ui) ui.alert('Persona Mapper is already running. Try again after it finishes.'); 
+    else Logger.log('Persona Mapper is already running.');
+    return; 
+  }
+
   try {
     ensurePersonaMapperSheets_(spreadsheet);
     const campaignId = getPersonaMapperCampaignId_(spreadsheet, ui);
     if (!campaignId) return;
     const settings = getPersonaMapperSettings_(spreadsheet, campaignId);
     if (!toBoolean_(settings['Persona Mapper Enabled'])) { 
-      ui.alert('Persona Mapper is disabled for this campaign. Enable it in settings.'); 
+      if (ui) ui.alert('Persona Mapper is disabled for this campaign. Enable it in settings.'); 
+      else Logger.log('Persona Mapper is disabled for campaign ' + campaignId);
       return; 
     }
     
@@ -311,7 +345,8 @@ function runPersonaMapperForSelectedCampaign() {
 
     const companies = getPersonaMapperCompanies_(spreadsheet, campaignId, settings);
     if (!companies.length) { 
-      ui.alert('No qualified companies found under campaign ' + campaignId + ' in Company Database yet. Run Step 1 first.'); 
+      if (ui) ui.alert('No qualified companies found under campaign ' + campaignId + ' in Company Database yet. Run Step 1 first.'); 
+      else Logger.log('No qualified companies found for campaign ' + campaignId);
       return; 
     }
 
@@ -343,6 +378,10 @@ function runPersonaMapperForSelectedCampaign() {
         upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.companies), PERSONA_MAPPER_HEADERS_.companies, 'company', companyRecord);
         const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
         
+        const grounding = (typeof extractGroundingMetadata_ === 'function' && aiResponse)
+          ? extractGroundingMetadata_(aiResponse)
+          : { citationsByUrl: {}, searchQueries: [] };
+
         (Array.isArray(result.personas) ? result.personas : []).forEach(function(persona) {
           const confidence = titleCaseSignal_(persona.confidence);
           if (confidence === 'Low' || confidenceRank_(confidence) < confidenceRank_(settings['Minimum Persona Confidence'] || 'Medium')) return;
@@ -353,23 +392,36 @@ function runPersonaMapperForSelectedCampaign() {
           upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
           const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings, suppressionRules);
           upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
+
+          recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, settings['Persona Titles']);
         });
+
+        if (result.company && Array.isArray(result.company.evidence)) {
+          result.company.evidence.forEach(function(evItem) {
+            if (evItem && evItem.url) {
+              recordCompanyGroundingEvidence_(spreadsheet, campaignId, company, evItem, grounding, settings['Campaign Focus']);
+            }
+          });
+        }
+
         processed++;
         properties.setProperty(cursorKey, String(index + 1));
       } catch (error) {
         Logger.log('Persona Mapper paused on company: ' + error.message);
-        ui.alert('Persona Mapper paused: ' + error.message);
+        if (ui) ui.alert('Persona Mapper paused: ' + error.message);
         return;
       }
     }
     if (end >= companies.length) {
       properties.deleteProperty(cursorKey);
-      ui.alert('Persona Mapper completed ' + processed + ' company record(s) using ' + providerLabel + '. Leads staged in Prospect Review Queue.');
+      if (ui) ui.alert('Persona Mapper completed ' + processed + ' company record(s) using ' + providerLabel + '. Leads staged in Prospect Review Queue & Grounding Evidence recorded.');
     } else {
       properties.setProperty(cursorKey, String(end));
-      ui.alert('Persona Mapper processed ' + processed + ' company record(s). Run it again to continue next batch.');
+      if (ui) ui.alert('Persona Mapper processed ' + processed + ' company record(s). Run it again to continue next batch.');
     }
-  } finally { lock.releaseLock(); }
+  } finally { 
+    lock.releaseLock(); 
+  }
 }
 
 /**
@@ -700,7 +752,7 @@ function makeCompanyIntelligenceRecord_(source, enrichment, score, citations, se
     'Scope 3 Exposure': enrichment.scope3Exposure || 'N/A',
     'Sustainability Data Needs': enrichment.sustainabilityDataNeeds || 'Operational monitoring',
     'Digital Transformation Signals': enrichment.digitalTransformationSignals || 'Cloud architecture',
-    'ESG Governance': enrichment.esgGovernance || 'Department Leadership',
+    'ESG Governance': enrichment.esgGovernance || 'Director of Sustainability',
     'Business Triggers': enrichment.businessTriggers || settings['Custom Business Needs'] || '',
     'eValuater Solution Fit': enrichment.solutionFit || ('High - Matched for ' + (settings['Department'] || 'Enterprise')),
     'Company Opportunity Score': score.score,
@@ -1005,6 +1057,97 @@ function loadSuppressionRulesFromSettings_(spreadsheet) {
   return rules;
 }
 
+/**
+ * Logs verified persona decision-maker signals into Tab 9: Research Evidence (9 canonical columns)
+ */
+function recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, defaultQuery) {
+  const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
+  if (!evidenceSheet) return;
+
+  const evidenceUrl = String(persona.evidenceUrl || persona.linkedinUrl || persona.emailSourceUrl || '').trim();
+  if (!evidenceUrl) return;
+
+  const personaName = String(persona.name || '').trim();
+  const companyName = String(company['Company name'] || company['Company Name'] || '').trim();
+  const entityName = personaName ? (personaName + ' (' + companyName + ')') : companyName;
+
+  const normUrl = typeof normalizeSourceUrl_ === 'function' 
+    ? normalizeSourceUrl_(evidenceUrl) 
+    : evidenceUrl.replace(/\/+$/, '');
+  const isGrounded = Boolean(grounding.citationsByUrl && grounding.citationsByUrl[normUrl]);
+  const conf = titleCaseSignal_(persona.confidence);
+  const verificationScore = isGrounded ? 'High' : (conf === 'High' ? 'High' : (conf === 'Medium' ? 'Medium' : 'Unknown'));
+
+  const snippet = String(persona.signal || persona.personalizedHook || persona.buyingSignal || (persona.title + ' at ' + companyName)).trim();
+  const searchQueries = grounding.searchQueries || [];
+  const queryUsed = searchQueries.length > 0 
+    ? searchQueries.join('; ') 
+    : (defaultQuery || ('Persona search: ' + (persona.title || 'Leadership') + ' at ' + companyName));
+
+  const evidenceRow = [
+    'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(), // Col A: Evidence ID
+    campaignId,                                             // Col B: Campaign ID
+    entityName,                                             // Col C: Entity Name
+    'Persona',                                              // Col D: Entity Type
+    queryUsed,                                              // Col E: Search Query Used
+    evidenceUrl,                                            // Col F: Grounding Evidence URL
+    snippet,                                                // Col G: Extracted Snippet / Signal
+    verificationScore,                                      // Col H: Verification Score
+    new Date().toLocaleString()                             // Col I: Date Captured
+  ];
+
+  if (typeof savePreparedPersonaEvidenceRows_ === 'function') {
+    try {
+      savePreparedPersonaEvidenceRows_(campaignId, [evidenceRow]);
+      return;
+    } catch (e) {
+      Logger.log('savePreparedPersonaEvidenceRows_ notice: ' + e.message);
+    }
+  }
+
+  evidenceSheet.appendRow(evidenceRow);
+}
+
+/**
+ * Logs verified company triggers detected during persona deep-dive into Tab 9: Research Evidence
+ */
+function recordCompanyGroundingEvidence_(spreadsheet, campaignId, company, evItem, grounding, defaultQuery) {
+  const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
+  if (!evidenceSheet || !evItem || !evItem.url) return;
+
+  const evidenceUrl = String(evItem.url).trim();
+  const companyName = String(company['Company name'] || company['Company Name'] || '').trim();
+  const normUrl = typeof normalizeSourceUrl_ === 'function' ? normalizeSourceUrl_(evidenceUrl) : evidenceUrl.replace(/\/+$/, '');
+  const isGrounded = Boolean(grounding.citationsByUrl && grounding.citationsByUrl[normUrl]);
+  const verificationScore = isGrounded ? 'High' : 'Medium';
+  const snippet = String(evItem.claim || evItem.extracted_information || 'Account research trigger').trim();
+  const searchQueries = grounding.searchQueries || [];
+  const queryUsed = searchQueries.length > 0 ? searchQueries.join('; ') : (defaultQuery || 'Deep company persona research');
+
+  const evidenceRow = [
+    'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(), // Col A: Evidence ID
+    campaignId,                                             // Col B: Campaign ID
+    companyName,                                            // Col C: Entity Name
+    'Company',                                              // Col D: Entity Type
+    queryUsed,                                              // Col E: Search Query Used
+    evidenceUrl,                                            // Col F: Grounding Evidence URL
+    snippet,                                                // Col G: Extracted Snippet / Signal
+    verificationScore,                                      // Col H: Verification Score
+    new Date().toLocaleString()                             // Col I: Date Captured
+  ];
+
+  if (typeof savePreparedPersonaEvidenceRows_ === 'function') {
+    try {
+      savePreparedPersonaEvidenceRows_(campaignId, [evidenceRow]);
+      return;
+    } catch (e) {
+      Logger.log('savePreparedPersonaEvidenceRows_ notice: ' + e.message);
+    }
+  }
+
+  evidenceSheet.appendRow(evidenceRow);
+}
+
 function domainFromUrl_(url) {
   const match = String(url || '').toLowerCase().match(/^https?:\/\/(?:www\.)?([^/:?#]+)/);
   return match ? match[1].replace(/^www\./,'') : '';
@@ -1070,7 +1213,9 @@ function setQueueCell_(item, header, value) {
 
 function preparePersonaMapperSheets() {
   ensurePersonaMapperSheets_(SpreadsheetApp.getActiveSpreadsheet());
-  SpreadsheetApp.getUi().alert('Persona Mapper and Prospect Review Queue tabs are ready.');
+  let ui = null;
+  try { ui = SpreadsheetApp.getUi(); } catch (e) {}
+  if (ui) ui.alert('Persona Mapper and Prospect Review Queue tabs are ready.');
 }
 
 function getPersonaMapperCampaignId_(spreadsheet, ui) {
@@ -1085,9 +1230,13 @@ function getPersonaMapperCampaignId_(spreadsheet, ui) {
       if (record['Campaign ID']) return String(record['Campaign ID']).trim(); 
     }
   }
-  const response = ui.prompt('Persona Mapper', 'Enter the Campaign ID to enrich (e.g. CMP-001):', ui.ButtonSet.OK_CANCEL);
-  if (response.getSelectedButton() !== ui.Button.OK) return '';
-  return String(response.getResponseText() || '').trim();
+  if (ui && typeof ui.prompt === 'function') {
+    const response = ui.prompt('Persona Mapper', 'Enter the Campaign ID to enrich (e.g. CMP-001):', ui.ButtonSet.OK_CANCEL);
+    if (response.getSelectedButton() === ui.Button.OK) {
+      return String(response.getResponseText() || '').trim();
+    }
+  }
+  return '';
 }
 
 function getSheetRecords_(sheet) {
@@ -1135,6 +1284,17 @@ function ensurePersonaMapperSheets_(spreadsheet) {
       sh.getRange(1, col + 1, 1, missing.length).setValues([missing]);
     }
   });
+
+  // Ensure high-contrast styling on Tab 9: Research Evidence if present
+  const evSheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.evidence);
+  if (evSheet && evSheet.getLastColumn() > 0) {
+    evSheet.getRange(1, 1, 1, evSheet.getLastColumn())
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+    evSheet.setFrozenRows(1);
+  }
 }
 
 function upsertPreservingNonEmpty_(sheet, headers, keyType, record) {

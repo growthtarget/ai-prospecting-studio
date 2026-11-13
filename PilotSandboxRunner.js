@@ -7,14 +7,16 @@
  * 
  * CAPABILITIES:
  * 1. Generates & Synchronizes ALL 12 Tabs for the Pilot Run:
+ *    - Cold-start safe: Automatically seeds canonical headers across all 12 tabs.
  *    - Updates "Campaign Configuration" with canonical parameters & company limit.
  *    - Generates 39-column row in "Persona Mapper Settings" for PILOT-CMP-001.
  *    - Restores and populates "Dashboard" with the complete 10-row KPI table.
  *    - Populates "Campaigns" (28 master cols), "Company Database" (Col J Campaign ID), 
- *      "Company Intelligence", "Persona Leads", "Research Evidence", and "Prospect Review Queue".
+ *      "Company Intelligence" (25 cols), "Persona Leads" (29 cols),
+ *      "Research Evidence" (9 canonical cols for Company & Persona), and "Prospect Review Queue" (45 cols).
  * 2. Creates Safe Gmail Drafts for qualified leads in your personal Gmail.
  * 3. Enforces real-time suppression rules from "Lists & Settings".
- * 4. Safe Purge: Removes pilot records from ALL tabs without erasing Dashboard structure.
+ * 4. Safe Purge: Removes pilot records from ALL tabs including Execution Logs without erasing Dashboard structure.
  * ============================================================================
  */
 
@@ -56,10 +58,10 @@ function runPilotOnRealSheets() {
   Logger.log('===============================================================');
 
   try {
-    // Step 0: Ensure all 12 project tabs exist with high-contrast styling
+    // Step 0: Ensure all 12 project tabs exist with canonical headers and high-contrast styling
     validateRequiredTabs(ss);
 
-    // Step 1: Clean previous pilot test rows from all tabs (including Company Database Col J)
+    // Step 1: Clean previous pilot test rows from all tabs
     purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
     Logger.log('Step 1: Purged previous pilot records.');
 
@@ -90,12 +92,12 @@ function runPilotOnRealSheets() {
     writePilotCompanyIntelligence(ss, enrichedCompanies);
     Logger.log('Step 7: Enriched intelligence mapped to "Company Intelligence".');
 
-    // Step 8: Write Grounding Evidence to "Research Evidence"
+    // Step 8: Write Grounding Evidence (both Company and Persona) to "Research Evidence" (9 Canonical Columns)
     const researchEvidence = getPilotResearchEvidence(PILOT_CONFIG);
     writePilotResearchEvidence(ss, researchEvidence);
-    Logger.log('Step 8: Search grounding evidence logged in "Research Evidence".');
+    Logger.log('Step 8: Search grounding evidence logged in "Research Evidence" (Company & Persona citations).');
 
-    // Step 9: Write Persona Leads & Outreach Copy to "Persona Leads"
+    // Step 9: Write Persona Leads & Outreach Copy to "Persona Leads" (29 Columns)
     const pilotPersonas = getPilotPersonasData(PILOT_CONFIG);
     writePilotPersonaLeads(ss, pilotPersonas);
     Logger.log('Step 9: Persona leads written to "Persona Leads".');
@@ -132,14 +134,27 @@ function runPilotOnRealSheets() {
 }
 
 /**
- * Validates that all 12 project tabs exist and applies high-contrast styling
+ * Validates that all 12 project tabs exist, seeds canonical headers if empty,
+ * and applies uniform high-contrast styling (#174ea6 on #e8f0fe).
  */
 function validateRequiredTabs(ss) {
+  const definitions = (typeof APP_CONFIG !== 'undefined' && Array.isArray(APP_CONFIG.sheetDefinitions))
+    ? APP_CONFIG.sheetDefinitions
+    : [];
+
   Object.values(PILOT_CONFIG.TABS).forEach(name => {
     let sheet = ss.getSheetByName(name);
     if (!sheet) {
       sheet = ss.insertSheet(name);
     }
+
+    // Seed canonical headers from APP_CONFIG if sheet is brand new or empty
+    const def = definitions.find(d => d.name === name);
+    if (sheet.getLastRow() === 0 && def && Array.isArray(def.headers) && def.headers.length > 0) {
+      sheet.appendRow(def.headers);
+    }
+
+    // Apply high-contrast styling and freeze Row 1
     if (sheet.getLastColumn() > 0) {
       sheet.getRange(1, 1, 1, sheet.getLastColumn())
         .setFontWeight('bold')
@@ -369,34 +384,22 @@ function writePilotCampaign(ss, config) {
     nowStr
   ];
 
-  if (sheet.getLastColumn() >= 28) {
-    sheet.appendRow(master28Row);
-  } else {
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    const campaignMap = {
-      'Campaign ID': config.CAMPAIGN_ID,
-      'Campaign Name': config.CAMPAIGN_NAME,
-      'Campaign name': config.CAMPAIGN_NAME,
-      'Department': config.DEPARTMENT,
-      'Objective': config.CUSTOM_BUSINESS_NEEDS.split('\n')[0],
-      'Status': 'Pilot Active',
-      'Target Countries': 'United States & Canada',
-      'Target Industries': 'Freight & Logistics, Industrial Equipment',
-      'Company Size': '50 - 250 employees',
-      'Discovery Limit': config.COMPANY_LIMIT,
-      'Company limit': config.COMPANY_LIMIT,
-      'Research Depth': config.RESEARCH_DEPTH,
-      'Research depth': config.RESEARCH_DEPTH,
-      'AI Provider': 'GEMINI',
-      'AI Model': 'gemini-3.8-flash',
-      'Email Sender Provider': 'Workspace Gmail (Drafts Only)',
-      'Created date': dateStr,
-      'Last updated': nowStr,
-      'Last Modified': nowStr,
-      'Campaign Config JSON': JSON.stringify(campaignPayload)
-    };
-    sheet.appendRow(buildRowFromHeaders(headers, campaignMap));
+  // Guarantee 28 column headers if sheet is empty
+  const campDef = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.sheetDefinitions)
+    ? APP_CONFIG.sheetDefinitions.find(d => d.name === 'Campaigns')
+    : null;
+
+  if (sheet.getLastRow() === 0 && campDef) {
+    sheet.appendRow(campDef.headers);
+    sheet.getRange(1, 1, 1, 28)
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+    sheet.setFrozenRows(1);
   }
+
+  sheet.appendRow(master28Row);
 }
 
 /**
@@ -409,12 +412,10 @@ function getPilotCompanyDatabaseRecords(config) {
       'Company ID': 'CMP-001',
       'Campaign ID': config.CAMPAIGN_ID,
       'Company Name': 'Apex Global Operations',
-      'Company name': 'Apex Global Operations',
       'Domain': 'growthtarget.com',
       'Country': 'United States',
       'Industry': 'Freight & Logistics',
       'Employee Size': '180 employees',
-      'Company size': '180 employees',
       'Discovery Method': 'Search Grounding (' + config.DEPARTMENT + ')',
       'Discovery Date': dateStr,
       'Status': 'Enriched'
@@ -423,12 +424,10 @@ function getPilotCompanyDatabaseRecords(config) {
       'Company ID': 'CMP-002',
       'Campaign ID': config.CAMPAIGN_ID,
       'Company Name': 'Novus Systems Corp',
-      'Company name': 'Novus Systems Corp',
       'Domain': 'growthtarget.com',
       'Country': 'Canada',
       'Industry': 'Industrial Equipment',
       'Employee Size': '140 employees',
-      'Company size': '140 employees',
       'Discovery Method': 'Search Grounding (' + config.DEPARTMENT + ')',
       'Discovery Date': dateStr,
       'Status': 'Enriched'
@@ -437,12 +436,10 @@ function getPilotCompanyDatabaseRecords(config) {
       'Company ID': 'CMP-003',
       'Campaign ID': config.CAMPAIGN_ID,
       'Company Name': 'EcoTransit Competitor Systems',
-      'Company name': 'EcoTransit Competitor Systems',
       'Domain': 'competitor-esg.com',
       'Country': 'United States',
       'Industry': 'Direct Competitor',
       'Employee Size': '90 employees',
-      'Company size': '90 employees',
       'Discovery Method': 'Grounding Scan',
       'Discovery Date': dateStr,
       'Status': 'Disqualified (Competitor)'
@@ -570,14 +567,14 @@ function getPilotCompaniesData(config) {
 
 function writePilotCompanyIntelligence(ss, companies) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.COMPANY_INTELLIGENCE);
-  if (!sheet) return;
+  if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const rows = companies.map(c => buildRowFromHeaders(headers, c));
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
 /**
- * Step 8: Evidence citations
+ * Step 8: Evidence citations (Canonical 9 columns for both Company and Persona entities)
  */
 function getPilotResearchEvidence(config) {
   const nowStr = new Date().toLocaleString();
@@ -585,23 +582,45 @@ function getPilotResearchEvidence(config) {
     {
       'Evidence ID': 'EVD-001',
       'Campaign ID': config.CAMPAIGN_ID,
+      'Entity Name': 'Apex Global Operations',
+      'Entity Type': 'Company',
+      'Search Query Used': 'Apex Global Operations sustainability emissions disclosure',
+      'Grounding Evidence URL': 'https://example.com/apex-operations-audit',
+      'Extracted Snippet / Signal': 'Documented corporate disclosure indicating multi-tier fleet logistics and Scope 3 reporting obligations.',
+      'Verification Score': 'High',
+      'Date Captured': nowStr
+    },
+    {
+      'Evidence ID': 'EVD-002',
+      'Campaign ID': config.CAMPAIGN_ID,
       'Entity Name': 'Marcus Vance',
       'Entity Type': 'Persona',
       'Search Query Used': 'Marcus Vance Apex Operations keynote ' + config.DEPARTMENT,
       'Grounding Evidence URL': 'https://linkedin.com/in/marcus-vance-pilot',
       'Extracted Snippet / Signal': 'Discussed challenges balancing sprint cycles with audit requirements and manual verification overhead.',
-      'Verification Score': 0.95,
+      'Verification Score': 'High',
       'Date Captured': nowStr
     },
     {
-      'Evidence ID': 'EVD-002',
+      'Evidence ID': 'EVD-003',
+      'Campaign ID': config.CAMPAIGN_ID,
+      'Entity Name': 'Novus Systems Corp',
+      'Entity Type': 'Company',
+      'Search Query Used': 'Novus Systems supplier compliance reporting 2026',
+      'Grounding Evidence URL': 'https://example.com/novus-systems-report',
+      'Extracted Snippet / Signal': 'Tier-1 industrial equipment supplier report detailing supply chain audit deadlines.',
+      'Verification Score': 'High',
+      'Date Captured': nowStr
+    },
+    {
+      'Evidence ID': 'EVD-004',
       'Campaign ID': config.CAMPAIGN_ID,
       'Entity Name': 'Elena Rostova',
       'Entity Type': 'Persona',
       'Search Query Used': 'Elena Rostova Novus Systems audit compliance drag',
       'Grounding Evidence URL': 'https://linkedin.com/in/elena-rostova-pilot',
       'Extracted Snippet / Signal': 'Published article highlighting vendor audit fatigue and delayed procurement reviews.',
-      'Verification Score': 0.92,
+      'Verification Score': 'High',
       'Date Captured': nowStr
     }
   ];
@@ -609,7 +628,7 @@ function getPilotResearchEvidence(config) {
 
 function writePilotResearchEvidence(ss, list) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.RESEARCH_EVIDENCE);
-  if (!sheet) return;
+  if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const rows = list.map(item => buildRowFromHeaders(headers, item));
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
@@ -740,7 +759,7 @@ function getPilotPersonasData(config) {
 
 function writePilotPersonaLeads(ss, personas) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.PERSONAS);
-  if (!sheet) return;
+  if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const rows = personas.map(p => buildRowFromHeaders(headers, p));
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
@@ -858,7 +877,7 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
 
 function writePilotReviewQueue(ss, queueItems) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.REVIEW_QUEUE);
-  if (!sheet) return;
+  if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const rows = queueItems.map(item => buildRowFromHeaders(headers, item));
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
@@ -1022,8 +1041,8 @@ function buildRowFromHeaders(sheetHeaders, dataObject) {
 }
 
 /**
- * Universal Pilot Purge: Scans every row across operational tabs (including Company Database Col J)
- * and reliably deletes rows belonging to PILOT-CMP-001.
+ * Universal Pilot Purge: Scans every row across operational tabs (including Company Database Col J
+ * and Execution Logs) and reliably deletes rows belonging to PILOT-CMP-001.
  */
 function purgeExistingPilotRows(ss, campaignId) {
   const tabsToClean = [
@@ -1033,7 +1052,8 @@ function purgeExistingPilotRows(ss, campaignId) {
     PILOT_CONFIG.TABS.REVIEW_QUEUE,
     PILOT_CONFIG.TABS.COMPANY_DATABASE,
     PILOT_CONFIG.TABS.RESEARCH_EVIDENCE,
-    PILOT_CONFIG.TABS.PERSONA_SETTINGS
+    PILOT_CONFIG.TABS.PERSONA_SETTINGS,
+    PILOT_CONFIG.TABS.LOGS
   ];
 
   tabsToClean.forEach(tabName => {

@@ -13,7 +13,7 @@
  * 3. Dual-Tab Population: Writes master entries to "Company Database" (stamped with Col J Campaign ID)
  *    AND populates all 25 columns of "Company Intelligence".
  * 4. Scenario B Deduplication: Isolates deduplication by Campaign ID.
- * 5. Grounding Evidence Logging: Stores audit citation URLs in "Research Evidence".
+ * 5. Grounding Evidence Logging: Stores audit citation URLs in Tab 9 "Research Evidence" (9 canonical columns).
  * 6. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
  * ============================================================================
  */
@@ -63,13 +63,13 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
       };
     }
 
-    const addedCount = saveDiscoveredCompanies_(spreadsheet, config.id, discoveredCompanies, config, providerLabel);
+    const addedCount = saveDiscoveredCompanies_(spreadsheet, config.id, discoveredCompanies, config, providerLabel, aiResponse);
     updateCampaignDiscoveryCounts_(spreadsheet, config.id);
 
     return {
       success: true,
       count: addedCount,
-      message: 'Discovered ' + addedCount + ' qualified companies using ' + providerLabel + ' for ' + config.department + '! Populated in "Company Database" & "Company Intelligence".'
+      message: 'Discovered ' + addedCount + ' qualified companies using ' + providerLabel + ' for ' + config.department + '! Populated in "Company Database", "Company Intelligence", and "Research Evidence".'
     };
   } catch (error) {
     Logger.log('Discovery Error: ' + error.stack);
@@ -147,13 +147,13 @@ function runCompanyDiscoveryForSelectedCampaign() {
       return;
     }
 
-    const addedCount = saveDiscoveredCompanies_(spreadsheet, config.id, discoveredCompanies, config, providerLabel);
+    const addedCount = saveDiscoveredCompanies_(spreadsheet, config.id, discoveredCompanies, config, providerLabel, aiResponse);
     updateCampaignDiscoveryCounts_(spreadsheet, config.id);
 
     if (ui) {
       ui.alert(
         'Company Discovery Complete',
-        'Discovered and added ' + addedCount + ' qualified companies to "Company Database" and "Company Intelligence" using ' + providerLabel + '.\n\n' +
+        'Discovered and added ' + addedCount + ' qualified companies to "Company Database", "Company Intelligence", and "Research Evidence" using ' + providerLabel + '.\n\n' +
         'Next Step: Run "Agent 2: Persona Mapping" from the sidebar to find decision-makers and draft outreach.',
         ui.ButtonSet.OK
       );
@@ -269,10 +269,10 @@ function executeAiDiscoveryCall_(options) {
 }
 
 /**
- * Saves discovered companies into BOTH "Company Database" and "Company Intelligence".
+ * Saves discovered companies into "Company Database", "Company Intelligence", and "Research Evidence".
  * Guarantees Column J is "Campaign ID" and enforces Scenario B deduplication.
  */
-function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config, providerLabel) {
+function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config, providerLabel, aiResponse) {
   const dbSheet = spreadsheet.getSheetByName('Company Database');
   const intelSheet = spreadsheet.getSheetByName('Company Intelligence');
   const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
@@ -294,8 +294,8 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   }
 
   // Ensure high-contrast headers on destination sheets
-  [dbSheet, intelSheet].forEach(sh => {
-    if (sh.getLastColumn() > 0) {
+  [dbSheet, intelSheet, evidenceSheet].forEach(sh => {
+    if (sh && sh.getLastColumn() > 0) {
       sh.getRange(1, 1, 1, sh.getLastColumn())
         .setFontWeight('bold')
         .setFontColor('#174ea6')
@@ -308,6 +308,16 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   const existingDbRecords = getSheetRecords_(dbSheet);
   const intelHeaders = intelSheet.getRange(1, 1, 1, intelSheet.getLastColumn()).getValues()[0];
   const dbHeaders = dbSheet.getRange(1, 1, 1, dbSheet.getLastColumn()).getValues()[0];
+
+  // Extract live search grounding metadata from Gemini/OpenAI
+  const grounding = (typeof extractGroundingMetadata_ === 'function' && aiResponse)
+    ? extractGroundingMetadata_(aiResponse)
+    : { citationsByUrl: {}, searchQueries: [] };
+  
+  const searchQueries = grounding.searchQueries || [];
+  const defaultSearchQuery = searchQueries.length > 0 
+    ? searchQueries.join('; ') 
+    : (config.department + ' Target Discovery: ' + (config.industry || '') + ' ' + (config.country || ''));
 
   let addedCount = 0;
   const now = new Date();
@@ -384,18 +394,24 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     };
     intelSheet.appendRow(buildRowFromHeaders_(intelHeaders, intelRecord));
 
-    // 3. Write to "Research Evidence"
-    if (evidenceSheet && item.sourceUrl) {
+    // 3. Write to Tab 9 "Research Evidence" (Exact 9 Canonical Columns)
+    if (evidenceSheet && (item.sourceUrl || website)) {
+      const evidenceUrl = String(item.sourceUrl || website).trim();
+      const normUrl = typeof normalizeSourceUrl_ === 'function' ? normalizeSourceUrl_(evidenceUrl) : evidenceUrl.replace(/\/+$/, '');
+      const isGrounded = Boolean(grounding.citationsByUrl && grounding.citationsByUrl[normUrl]);
+      const verificationScore = isGrounded ? 'High' : (score >= 80 ? 'Medium' : 'Unknown');
+      const snippet = String(item.businessTriggers || item.solutionFit || item.businessSummary || companyName).trim();
+
       evidenceSheet.appendRow([
-        'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(),
-        campaignId,
-        companyName,
-        'Company Discovery',
-        'Discovery Query via ' + providerLabel,
-        item.sourceUrl,
-        item.businessSummary || companyName,
-        (score / 100).toFixed(2),
-        now.toLocaleString()
+        'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(), // Col A: Evidence ID
+        campaignId,                                             // Col B: Campaign ID
+        companyName,                                            // Col C: Entity Name
+        'Company',                                              // Col D: Entity Type
+        defaultSearchQuery,                                     // Col E: Search Query Used
+        evidenceUrl,                                            // Col F: Grounding Evidence URL
+        snippet,                                                // Col G: Extracted Snippet / Signal
+        verificationScore,                                      // Col H: Verification Score
+        now.toLocaleString()                                    // Col I: Date Captured
       ]);
     }
 

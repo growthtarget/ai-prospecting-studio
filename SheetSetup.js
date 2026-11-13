@@ -10,6 +10,7 @@
  * 2. Injects native Google Sheets dropdown menus dynamically by parameter key.
  * 3. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across tabs.
  * 4. Ensures 100% column schema consistency across the entire workbook.
+ * 5. Pre-populates "Agent Settings" and dynamically refreshes Script Properties status.
  * ============================================================================
  */
 
@@ -34,7 +35,7 @@ function setupAllSheetsAndDropdowns() {
   // 6. Setup Lists & Settings Tab with Dropdowns
   setupListsAndSettingsTabDropdowns(ss);
 
-  // 7. Setup Agent Settings Tab with Dropdowns
+  // 7. Setup Agent Settings Tab with Structured Rows & Dynamic Key Status
   setupAgentSettingsTabDropdowns(ss);
 
   SpreadsheetApp.flush();
@@ -44,6 +45,7 @@ function setupAllSheetsAndDropdowns() {
 
 /**
  * 1. Formats "Campaign Configuration" with 38 Parameters, Canonical Values, and Dynamic Dropdowns
+ * STRICT: Zero Schema Mutations (Locked 38 Parameters)
  */
 function setupCampaignConfigurationTab(ss) {
   const sheet = getOrCreateSheet(ss, 'Campaign Configuration');
@@ -132,7 +134,6 @@ function setupCampaignConfigurationTab(ss) {
     'AUTO_SEND_ENABLED': ['TRUE', 'FALSE']
   };
 
-  // Dynamically apply validation rules by scanning Column A parameter names
   const lastRow = sheet.getLastRow();
   const paramKeys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
 
@@ -149,41 +150,18 @@ function setupCampaignConfigurationTab(ss) {
 }
 
 /**
- * 2. Injects Dropdowns into "Campaigns" Tab
+ * 2. Injects Dropdowns into "Campaigns" Tab (Locked 28 Columns)
  */
 function setupCampaignsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Campaigns');
   styleHeaderRow(sheet);
   
-  // Column D: Status
-  applyDropdownToRange(sheet.getRange('D2:D500'), [
-    'Draft', 'Active', 'Paused', 'Completed', 'Pilot Active'
-  ]);
-
-  // Column H: Discovery Limit
-  applyDropdownToRange(sheet.getRange('H2:H500'), [
-    '3', '5', '10', '25', '50'
-  ]);
-
-  // Column I: Research Depth
-  applyDropdownToRange(sheet.getRange('I2:I500'), [
-    'Standard', 'Deep Persona', 'Comprehensive / Forensic'
-  ]);
-
-  // Column R: AI Provider
-  applyDropdownToRange(sheet.getRange('R2:R500'), [
-    'GEMINI', 'OPENAI'
-  ]);
-
-  // Column T: Email Verifier Provider
-  applyDropdownToRange(sheet.getRange('T2:T500'), [
-    'ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None'
-  ]);
-
-  // Column V: Email Sender Provider
-  applyDropdownToRange(sheet.getRange('V2:V500'), [
-    'Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'
-  ]);
+  applyDropdownToRange(sheet.getRange('D2:D500'), ['Draft', 'Active', 'Paused', 'Completed', 'Pilot Active']);
+  applyDropdownToRange(sheet.getRange('H2:H500'), ['3', '5', '10', '25', '50']);
+  applyDropdownToRange(sheet.getRange('I2:I500'), ['Standard', 'Deep Persona', 'Comprehensive / Forensic']);
+  applyDropdownToRange(sheet.getRange('R2:R500'), ['GEMINI', 'OPENAI']);
+  applyDropdownToRange(sheet.getRange('T2:T500'), ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None']);
+  applyDropdownToRange(sheet.getRange('V2:V500'), ['Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook']);
 }
 
 /**
@@ -193,31 +171,12 @@ function setupReviewQueueTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Prospect Review Queue');
   styleHeaderRow(sheet);
 
-  // Column M (Col 13): Priority Tier
   applyDropdownToRange(sheet.getRange('M2:M1000'), ['Tier 1', 'Tier 2', 'Tier 3']);
-
-  // Column R (Col 18): Review Status
   applyDropdownToRange(sheet.getRange('R2:R1000'), ['Needs Review', 'Approved', 'Rejected']);
-
-  // Column V (Col 22): Human Approval Status
-  applyDropdownToRange(sheet.getRange('V2:V1000'), [
-    'Approved', 'Approved (Auto-Pilot)', 'Needs Review', 'Pending Review', 'Rejected (Suppression Guard)', 'Rejected'
-  ]);
-
-  // Column Y (Col 25): Send Status
-  applyDropdownToRange(sheet.getRange('Y2:Y1000'), [
-    'Queued', 'Draft Created in Gmail', 'Draft Created', 'Sent', 'Suppressed - Not Sent', 'Draft Failed'
-  ]);
-
-  // Column AP (Col 42): Compliance Status
-  applyDropdownToRange(sheet.getRange('AP2:AP1000'), [
-    'Passed', 'Failed - Suppressed', 'Failed - Role Based', 'Failed - Invalid Syntax'
-  ]);
-
-  // Column AQ (Col 43): Suppression Check
-  applyDropdownToRange(sheet.getRange('AQ2:AQ1000'), [
-    'Clear', 'Blocked: Email in Lists & Settings', 'Blocked: Domain in Lists & Settings', 'Blocked: Role-Based Account', 'Blocked: Bad Email Syntax'
-  ]);
+  applyDropdownToRange(sheet.getRange('V2:V1000'), ['Approved', 'Approved (Auto-Pilot)', 'Needs Review', 'Pending Review', 'Rejected (Suppression Guard)', 'Rejected']);
+  applyDropdownToRange(sheet.getRange('Y2:Y1000'), ['Queued', 'Draft Created in Gmail', 'Draft Created', 'Sent', 'Suppressed - Not Sent', 'Draft Failed']);
+  applyDropdownToRange(sheet.getRange('AP2:AP1000'), ['Passed', 'Failed - Suppressed', 'Failed - Role Based', 'Failed - Invalid Syntax']);
+  applyDropdownToRange(sheet.getRange('AQ2:AQ1000'), ['Clear', 'Blocked: Email in Lists & Settings', 'Blocked: Domain in Lists & Settings', 'Blocked: Role-Based Account', 'Blocked: Bad Email Syntax']);
 }
 
 /**
@@ -227,25 +186,10 @@ function setupCompanyIntelligenceTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Company Intelligence');
   styleHeaderRow(sheet);
 
-  // Column J (Col 10): ESG Reporting Maturity
-  applyDropdownToRange(sheet.getRange('J2:J1000'), [
-    'Early Stage', 'Developing / Spreadsheet-reliant', 'Developing', 'Mature', 'Advanced', 'N/A'
-  ]);
-
-  // Column Q (Col 17): eValuater Solution Fit
-  applyDropdownToRange(sheet.getRange('Q2:Q1000'), [
-    'High', 'Medium', 'Low', 'Disqualified - Direct Competitor'
-  ]);
-
-  // Column V (Col 22): Verification Status
-  applyDropdownToRange(sheet.getRange('V2:V1000'), [
-    'Verified', 'Unverified', 'Disqualified', 'Needs review'
-  ]);
-
-  // Column W (Col 23): Human Review Status
-  applyDropdownToRange(sheet.getRange('W2:W1000'), [
-    'Accepted', 'Pending', 'Rejected'
-  ]);
+  applyDropdownToRange(sheet.getRange('J2:J1000'), ['Early Stage', 'Developing / Spreadsheet-reliant', 'Developing', 'Mature', 'Advanced', 'N/A']);
+  applyDropdownToRange(sheet.getRange('Q2:Q1000'), ['High', 'Medium', 'Low', 'Disqualified - Direct Competitor']);
+  applyDropdownToRange(sheet.getRange('V2:V1000'), ['Verified', 'Unverified', 'Disqualified', 'Needs review']);
+  applyDropdownToRange(sheet.getRange('W2:W1000'), ['Accepted', 'Pending', 'Rejected']);
 }
 
 /**
@@ -255,25 +199,10 @@ function setupPersonaLeadsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Persona Leads');
   styleHeaderRow(sheet);
 
-  // Column I (Col 9): Persona Type
-  applyDropdownToRange(sheet.getRange('I2:I1000'), [
-    'Economic Buyer', 'Technical Evaluator', 'Key Decision Maker', 'Influencer', 'Disqualified / Competitor'
-  ]);
-
-  // Column O (Col 15): Verification Status
-  applyDropdownToRange(sheet.getRange('O2:O1000'), [
-    'Verified', 'Unverified', 'Pending', 'Disqualified'
-  ]);
-
-  // Column S (Col 19): Review Status
-  applyDropdownToRange(sheet.getRange('S2:S1000'), [
-    'Ready for Outreach', 'Needs Review', 'Approved', 'Rejected'
-  ]);
-
-  // Column Y (Col 25): Email Verification Status
-  applyDropdownToRange(sheet.getRange('Y2:Y1000'), [
-    'valid', 'risky', 'invalid', 'catch-all', 'unverified'
-  ]);
+  applyDropdownToRange(sheet.getRange('I2:I1000'), ['Economic Buyer', 'Technical Evaluator', 'Key Decision Maker', 'Influencer', 'Disqualified / Competitor']);
+  applyDropdownToRange(sheet.getRange('O2:O1000'), ['Verified', 'Unverified', 'Pending', 'Disqualified']);
+  applyDropdownToRange(sheet.getRange('S2:S1000'), ['Ready for Outreach', 'Needs Review', 'Approved', 'Rejected']);
+  applyDropdownToRange(sheet.getRange('Y2:Y1000'), ['valid', 'risky', 'invalid', 'catch-all', 'unverified']);
 }
 
 /**
@@ -283,7 +212,6 @@ function setupListsAndSettingsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Lists & Settings');
   styleHeaderRow(sheet);
 
-  // Column A: List Name
   applyDropdownToRange(sheet.getRange('A2:A500'), [
     'Suppression - Domain',
     'Suppression - Email',
@@ -292,34 +220,109 @@ function setupListsAndSettingsTabDropdowns(ss) {
     'Suppression - Internal Exclusion',
     'Whitelist - Verified Domain'
   ]);
-
-  // Column C: Active Status
-  applyDropdownToRange(sheet.getRange('C2:C500'), [
-    'Active', 'Inactive'
-  ]);
+  applyDropdownToRange(sheet.getRange('C2:C500'), ['Active', 'Inactive']);
 }
 
 /**
- * 7. Injects Dropdowns into "Agent Settings" Tab
+ * 7. Formats, Populates & Dynamically Refreshes Tab 10: "Agent Settings"
+ * Layout: Category | Setting Key | Value | Status / Description
+ * Dynamically checks Script Properties and sets "Configured in Script Properties (Protected)"
  */
 function setupAgentSettingsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Agent Settings');
-  styleHeaderRow(sheet);
   
-  // Row 2 Col C (Primary AI Provider)
-  applyDropdownToRange(sheet.getRange('C2'), ['gemini', 'openai']);
+  const headers = ['Category', 'Setting Key', 'Value', 'Status / Description'];
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  styleHeaderRow(sheet);
 
-  // Row 3 Col C (Gemini Model)
+  // Check existing Script Properties securely with alias tolerance
+  const scriptProps = PropertiesService.getScriptProperties().getProperties();
+  
+  function checkPropertyConfigured(primaryKey, aliases) {
+    const searchKeys = [primaryKey].concat(aliases || []).map(function(k) {
+      return k.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+    for (let k in scriptProps) {
+      const cleanK = k.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (searchKeys.indexOf(cleanK) >= 0) {
+        const val = String(scriptProps[k] || '').trim();
+        if (val && !val.includes('PASTE_')) return true;
+      }
+    }
+    return false;
+  }
+
+  const hasGemini = checkPropertyConfigured('GEMINI_API_KEY');
+  const hasOpenAi = checkPropertyConfigured('OPENAI_API_KEY');
+  const hasSmartlead = checkPropertyConfigured('SMARTLEAD_API_KEY');
+  const hasInstantly = checkPropertyConfigured('INSTANTLY_API_KEY');
+  const hasVerifier = checkPropertyConfigured('VERIFIER_API_KEY', ['EMAIL_VERIFICATION_API_KEY']);
+
+  const protectedMsg = 'Configured in Script Properties (Protected)';
+
+  // 10 Canonical Operational Settings Rows
+  const agentRows = [
+    ['AI Routing', 'PRIMARY_AI_PROVIDER', 'GEMINI', 'Primary AI provider for discovery & persona mapping'],
+    ['AI Models', 'GEMINI_MODEL', 'gemini-3.8-flash', 'Default Google Gemini model version'],
+    ['AI Models', 'OPENAI_MODEL', 'gpt-4o', 'Default OpenAI model version'],
+    ['API Credentials', 'GEMINI_API_KEY', hasGemini ? protectedMsg : '', 'Google Gemini API key (kept encrypted in Project Settings)'],
+    ['API Credentials', 'OPENAI_API_KEY', hasOpenAi ? protectedMsg : '', 'OpenAI API key (kept encrypted in Project Settings)'],
+    ['Search Grounding', 'GOOGLE_SEARCH_GROUNDING', 'TRUE', 'Enable live web search grounding citations for Gemini'],
+    ['Email Verification', 'VERIFIER_PROVIDER', 'ZeroBounce', 'Default email verification vendor'],
+    ['API Credentials', 'VERIFIER_API_KEY', hasVerifier ? protectedMsg : '', 'Email verifier API key (kept encrypted in Project Settings)'],
+    ['Outreach Sequencers', 'SMARTLEAD_API_KEY', hasSmartlead ? protectedMsg : '', 'Smartlead sequencer API key (kept encrypted in Project Settings)'],
+    ['Outreach Sequencers', 'INSTANTLY_API_KEY', hasInstantly ? protectedMsg : '', 'Instantly sequencer API key (kept encrypted in Project Settings)']
+  ];
+
+  // If sheet is empty below header, write entire table
+  if (sheet.getLastRow() <= 1) {
+    sheet.getRange(2, 1, agentRows.length, 4).setValues(agentRows);
+  } else {
+    // If rows already exist, refresh Column C for API Key status while preserving model selections
+    const lastR = sheet.getLastRow();
+    const existingData = sheet.getRange(2, 1, lastR - 1, 4).getValues();
+
+    for (let i = 0; i < existingData.length; i++) {
+      const rowNum = i + 2;
+      const key = String(existingData[i][1] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+      if (key === 'GEMINIAPIKEY') {
+        sheet.getRange(rowNum, 3).setValue(hasGemini ? protectedMsg : '');
+      } else if (key === 'OPENAIAPIKEY') {
+        sheet.getRange(rowNum, 3).setValue(hasOpenAi ? protectedMsg : '');
+      } else if (key === 'VERIFIERAPIKEY' || key === 'EMAILVERIFICATIONAPIKEY') {
+        sheet.getRange(rowNum, 3).setValue(hasVerifier ? protectedMsg : '');
+      } else if (key === 'SMARTLEADAPIKEY') {
+        sheet.getRange(rowNum, 3).setValue(hasSmartlead ? protectedMsg : '');
+      } else if (key === 'INSTANTLYAPIKEY') {
+        sheet.getRange(rowNum, 3).setValue(hasInstantly ? protectedMsg : '');
+      }
+    }
+
+    // Append any missing rows if table was incomplete
+    const existingKeyList = existingData.map(function(r) {
+      return String(r[1] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+    agentRows.forEach(function(row) {
+      const cleanKey = row[1].toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (existingKeyList.indexOf(cleanKey) < 0) {
+        sheet.appendRow(row);
+      }
+    });
+  }
+
+  // Apply Dropdowns to Column C (Value)
+  applyDropdownToRange(sheet.getRange('C2'), ['GEMINI', 'OPENAI']);
   applyDropdownToRange(sheet.getRange('C3'), ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']);
-
-  // Row 4 Col C (OpenAI Model)
   applyDropdownToRange(sheet.getRange('C4'), ['gpt-4o', 'gpt-4o-mini', 'o1-mini']);
+  applyDropdownToRange(sheet.getRange('C7'), ['TRUE', 'FALSE']);
+  applyDropdownToRange(sheet.getRange('C8'), ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None']);
 
-  // Row 7 Col C (Verifier Provider)
-  applyDropdownToRange(sheet.getRange('C7'), ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None']);
-
-  // Row 9 Col C (Google Search Grounding)
-  applyDropdownToRange(sheet.getRange('C9'), ['TRUE', 'FALSE']);
+  // Column Widths
+  sheet.setColumnWidth(1, 180);
+  sheet.setColumnWidth(2, 260);
+  sheet.setColumnWidth(3, 300);
+  sheet.setColumnWidth(4, 420);
 }
 
 /**

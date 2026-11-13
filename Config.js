@@ -108,8 +108,8 @@ const APP_CONFIG = Object.freeze({
     {
       name: 'Company Database',
       headers: [
-        'Company ID', 'Campaign ID', 'Company Name', 'Domain', 'Country',
-        'Industry', 'Employee Size', 'Discovery Method', 'Discovery Date', 'Status'
+        'Company ID', 'Company Name', 'Domain', 'Country', 'Industry',
+        'Employee Size', 'Discovery Method', 'Discovery Date', 'Status', 'Campaign ID'
       ]
     },
     {
