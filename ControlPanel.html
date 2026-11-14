@@ -16,13 +16,14 @@
       .checkbox-item { display: flex; align-items: flex-start; font-size: 12px; color: #3c4043; cursor: pointer; }
       .checkbox-item input { margin-right: 6px; margin-top: 2px; }
       .section-toggle { font-size: 12px; font-weight: 700; color: #3c4043; padding: 8px 0; border-bottom: 1px solid #eee; margin-top: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; cursor: pointer; user-select: none; }
-      .btn { display: block; width: 100%; padding: 9px; font-size: 12px; font-weight: 600; text-align: center; border-radius: 4px; border: none; cursor: pointer; transition: background 0.2s; margin-top: 6px; }
+      .btn { display: block; width: 100%; padding: 9px; font-size: 12px; font-weight: 600; text-align: center; border-radius: 4px; border: none; cursor: pointer; transition: background 0.2s, opacity 0.2s; margin-top: 6px; }
+      .btn:disabled { opacity: 0.55; cursor: not-allowed; }
       .btn-primary { background: #1a73e8; color: #fff; }
-      .btn-primary:hover { background: #1557b0; }
+      .btn-primary:hover:not(:disabled) { background: #1557b0; }
       .btn-success { background: #1e8e3e; color: #fff; }
-      .btn-success:hover { background: #188038; }
+      .btn-success:hover:not(:disabled) { background: #188038; }
       .btn-secondary { background: #fff; color: #174ea6; border: 1px solid #dadce0; }
-      .btn-secondary:hover { background: #f1f3f4; }
+      .btn-secondary:hover:not(:disabled) { background: #f1f3f4; }
       .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; }
       .row { display: flex; gap: 8px; }
       .row .field { flex: 1; }
@@ -41,7 +42,7 @@
     <div class="card">
       <div class="header-title">
         <span>Campaign Control</span>
-        <button class="btn btn-secondary btn-icon" onclick="refreshCampaigns()" title="Reload campaigns list">🔄 Refresh</button>
+        <button id="btnRefreshCampaigns" class="btn btn-secondary btn-icon" onclick="refreshCampaigns()" title="Reload campaigns list">🔄 Refresh</button>
       </div>
       <div class="field">
         <label for="campaignSelect">Active Campaign</label>
@@ -119,7 +120,14 @@
           </div>
           <div class="field">
             <label for="companyLimit">Discovery Limit</label>
-            <input type="number" id="companyLimit" value="5" min="1" max="50">
+            <input type="number" id="companyLimit" list="limitPresets" value="5" min="1" max="50">
+            <datalist id="limitPresets">
+              <option value="3">
+              <option value="5">
+              <option value="10">
+              <option value="25">
+              <option value="50">
+            </datalist>
           </div>
         </div>
 
@@ -150,6 +158,7 @@
               <option value="75">75 (Balanced)</option>
               <option value="80" selected>80 (Strict ICP Qualification)</option>
               <option value="85">85 (Very High Fit Only)</option>
+              <option value="90">90 (Top Priority Only)</option>
             </select>
           </div>
           <div class="field">
@@ -159,6 +168,7 @@
               <option value="80">80 (Direct Title Match)</option>
               <option value="85" selected>85 (Auto-Approval Threshold)</option>
               <option value="90">90 (Executive Buyer Only)</option>
+              <option value="95">95 (C-Suite Only)</option>
             </select>
           </div>
         </div>
@@ -202,7 +212,7 @@
         <div class="custom-needs-container">
           <label for="customBusinessNeeds" style="color:#202124; font-weight:700;">Manual / Department Business Needs</label>
           <div class="hint" style="margin-bottom:6px;">Define specific pain points, software migrations, or triggers for your department:</div>
-          
+
           <div class="field" style="margin-bottom:6px;">
             <select id="presetNeedSelect" onchange="applyDepartmentPreset(this.value)">
               <option value="">-- Quick Load Department Preset (Optional) --</option>
@@ -304,7 +314,16 @@
         </div>
         <div class="field">
           <label for="aiModelInput">AI Model Name</label>
-          <input type="text" id="aiModelInput" value="gemini-3.8-flash">
+          <input type="text" id="aiModelInput" list="aiModelPresets" value="gemini-3.8-flash">
+          <datalist id="aiModelPresets">
+            <option value="gemini-3.8-flash">
+            <option value="gemini-3.5-flash-lite">
+            <option value="gemini-2.5-flash">
+            <option value="gpt-4o">
+            <option value="gpt-4o-mini">
+            <option value="o1-mini">
+          </datalist>
+          <div class="hint">Tip: If gemini-3.8-flash is congested (503) on a free/unpaid key, auto-fallback uses gemini-3.5-flash-lite / gemini-2.5-flash automatically.</div>
         </div>
       </div>
     </div>
@@ -316,7 +335,6 @@
         <span id="iconEmail">▼</span>
       </div>
       <div id="secEmail">
-        <!-- Part A: Email Verifier -->
         <div class="subheading">Email Verification Service</div>
         <div class="field">
           <label for="emailVerifierSelect">Email Verification Provider</label>
@@ -335,7 +353,6 @@
 
         <hr>
 
-        <!-- Part B: Email Sender Platform -->
         <div class="subheading">Email Dispatch Channel</div>
         <div class="field">
           <label for="senderProviderSelect" style="color:#174ea6; font-weight:700;">Email Sender Provider</label>
@@ -355,7 +372,6 @@
 
         <hr>
 
-        <!-- Part C: Email Sender Identity -->
         <div class="subheading">Email Sender Profile</div>
         <div class="row">
           <div class="field">
@@ -377,10 +393,10 @@
     <!-- Action Pipeline -->
     <div class="card">
       <div class="header-title">Pipeline Execution</div>
-      <button class="btn btn-secondary" onclick="saveConfiguration()">💾 Save Campaign Settings</button>
-      <button class="btn btn-primary" onclick="runDiscovery()">🔍 Step 1: Discover Companies</button>
-      <button class="btn btn-primary" onclick="runPersonaMapper()">👤 Step 2: Run Persona Mapper</button>
-      <button class="btn btn-success" onclick="openReviewQueue()">📋 Step 3: Open Review Queue</button>
+      <button id="btnSaveConfig" class="btn btn-secondary" onclick="saveConfiguration()">💾 Save Campaign Settings</button>
+      <button id="btnRunDiscovery" class="btn btn-primary" onclick="runDiscovery()">🔍 Step 1: Discover Companies</button>
+      <button id="btnRunPersonaMapper" class="btn btn-primary" onclick="runPersonaMapper()">👤 Step 2: Run Persona Mapper</button>
+      <button id="btnOpenQueue" class="btn btn-success" onclick="openReviewQueue()">📋 Step 3: Open Review Queue</button>
       <div id="statusBox" class="status"></div>
     </div>
 
@@ -388,6 +404,7 @@
       var serverCampaigns = <?!= (typeof initialCampaigns !== 'undefined' && initialCampaigns) ? JSON.stringify(initialCampaigns) : '[]' ?>;
       var serverConfigsMap = <?!= (typeof initialConfigsMap !== 'undefined' && initialConfigsMap) ? JSON.stringify(initialConfigsMap) : '{}' ?>;
       var currentActiveId = '<?= (typeof activeCampaignId !== 'undefined' && activeCampaignId) ? activeCampaignId : "" ?>';
+      var isPipelineBusy = false;
 
       window.onload = function() {
         renderCampaignOptions(serverCampaigns, currentActiveId);
@@ -402,6 +419,15 @@
           applyDepartmentPreset('procurement');
         }
       };
+
+      function setPipelineBusy_(busy) {
+        isPipelineBusy = Boolean(busy);
+        document.getElementById('btnSaveConfig').disabled = isPipelineBusy;
+        document.getElementById('btnRunDiscovery').disabled = isPipelineBusy;
+        document.getElementById('btnRunPersonaMapper').disabled = isPipelineBusy;
+        document.getElementById('btnRefreshCampaigns').disabled = isPipelineBusy;
+        document.getElementById('campaignSelect').disabled = isPipelineBusy;
+      }
 
       function renderCampaignOptions(campaigns, selectedId) {
         const select = document.getElementById('campaignSelect');
@@ -435,14 +461,14 @@
         box.className = 'status ' + (type || 'info');
       }
 
-      function refreshCampaigns(quiet) {
+      function refreshCampaigns(quiet, preferredId) {
         if (!quiet) showStatus('Refreshing campaigns list from spreadsheet...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
             if (res && res.campaigns) {
               serverCampaigns = res.campaigns;
               serverConfigsMap = res.configsMap || {};
-              const curId = document.getElementById('campaignSelect').value.trim() || res.activeCampaignId;
+              const curId = preferredId || document.getElementById('campaignSelect').value.trim() || res.activeCampaignId;
               renderCampaignOptions(serverCampaigns, curId);
               if (curId && serverConfigsMap[curId]) {
                 document.getElementById('campaignSelect').value = curId;
@@ -472,33 +498,53 @@
         }
       }
 
+      function formatWeightInput_(val, fallback) {
+        if (val === undefined || val === null || val === '') return fallback;
+        if (typeof val === 'number') {
+          return (val > 0 && val <= 1) ? (Math.round(val * 100) + '%') : (val + '%');
+        }
+        const s = String(val).trim();
+        if (!s) return fallback;
+        if (s.endsWith('%')) return s;
+        const n = Number(s);
+        if (isFinite(n)) {
+          return (n > 0 && n <= 1) ? (Math.round(n * 100) + '%') : (n + '%');
+        }
+        return s;
+      }
+
+      function normalizeSenderProviderOption_(val) {
+        const s = String(val || '').trim();
+        if (s === 'Google Workspace (Drafts Only)') return 'Workspace Gmail (Drafts Only)';
+        if (s === 'Google Workspace (Direct Send)') return 'Workspace Gmail (Direct Send)';
+        return s || 'Workspace Gmail (Drafts Only)';
+      }
+
       function populateFormWithData(data) {
         if (!data) return;
         const cid = data.id || '';
         document.getElementById('campaignIdInput').value = cid;
         document.getElementById('campaignNameInput').value = data.name || cid;
+        document.getElementById('presetNeedSelect').value = '';
 
-        // Set department with dynamic fallback
-        if (data.department) {
-          const deptSelect = document.getElementById('departmentOwner');
-          let matched = false;
-          for (let i = 0; i < deptSelect.options.length; i++) {
-            if (deptSelect.options[i].value.toLowerCase() === data.department.toLowerCase()) {
-              deptSelect.selectedIndex = i;
-              matched = true;
-              break;
-            }
-          }
-          if (!matched) {
-            const newOpt = document.createElement('option');
-            newOpt.value = data.department;
-            newOpt.textContent = data.department;
-            deptSelect.appendChild(newOpt);
-            deptSelect.value = data.department;
+        const targetDept = data.department || 'Procurement';
+        const deptSelect = document.getElementById('departmentOwner');
+        let matched = false;
+        for (let i = 0; i < deptSelect.options.length; i++) {
+          if (deptSelect.options[i].value.toLowerCase() === targetDept.toLowerCase()) {
+            deptSelect.selectedIndex = i;
+            matched = true;
+            break;
           }
         }
+        if (!matched) {
+          const newOpt = document.createElement('option');
+          newOpt.value = targetDept;
+          newOpt.textContent = targetDept;
+          deptSelect.appendChild(newOpt);
+          deptSelect.value = targetDept;
+        }
 
-        // Targeting Profile
         document.getElementById('targetCountries').value = data.country || '';
         document.getElementById('targetIndustries').value = data.industry || '';
         document.getElementById('companySize').value = data.size || '';
@@ -506,8 +552,16 @@
 
         document.getElementById('researchDepth').value = data.researchDepth || 'Deep Persona';
         document.getElementById('evidencePeriodMonths').value = String(data.evidencePeriodMonths || '12');
-        document.getElementById('minCompanyScore').value = String(data.minCompanyScore || '80');
-        document.getElementById('minPersonaScore').value = String(data.minPersonaScore || '85');
+
+        const compScoreSel = document.getElementById('minCompanyScore');
+        const compScoreVal = String(data.minCompanyScore || '80');
+        compScoreSel.value = compScoreVal;
+        if (!compScoreSel.value) compScoreSel.value = '80';
+
+        const persScoreSel = document.getElementById('minPersonaScore');
+        const persScoreVal = String(data.minPersonaScore || '85');
+        persScoreSel.value = persScoreVal;
+        if (!persScoreSel.value) persScoreSel.value = '85';
 
         document.getElementById('targetTitles').value = data.titles || '';
         document.getElementById('campaignFocus').value = data.campaignFocus || '';
@@ -524,17 +578,17 @@
         document.getElementById('incTriggers').checked = data.incTriggers !== false;
         document.getElementById('incEvaluater').checked = data.incEvaluater !== false;
 
-        document.getElementById('weightEsgReporting').value = data.weightEsgReporting || '20%';
-        document.getElementById('weightSupplyChain').value = data.weightSupplyChain || '15%';
-        document.getElementById('weightDataChallenges').value = data.weightDataChallenges || '15%';
-        document.getElementById('weightDigital').value = data.weightDigital || '15%';
-        document.getElementById('weightTriggers').value = data.weightTriggers || '20%';
-        document.getElementById('weightEvaluaterFit').value = data.weightEvaluaterFit || '15%';
+        document.getElementById('weightEsgReporting').value = formatWeightInput_(data.weightEsgReporting, '20%');
+        document.getElementById('weightSupplyChain').value = formatWeightInput_(data.weightSupplyChain, '15%');
+        document.getElementById('weightDataChallenges').value = formatWeightInput_(data.weightDataChallenges, '15%');
+        document.getElementById('weightDigital').value = formatWeightInput_(data.weightDigital, '15%');
+        document.getElementById('weightTriggers').value = formatWeightInput_(data.weightTriggers, '20%');
+        document.getElementById('weightEvaluaterFit').value = formatWeightInput_(data.weightEvaluaterFit, '15%');
 
         document.getElementById('minEmailPriorityScore').value = Number(data.minEmailPriorityScore) || 80;
-        document.getElementById('weightEmailCompanyScore').value = data.weightEmailCompanyScore || '40%';
-        document.getElementById('weightEmailPersonaFit').value = data.weightEmailPersonaFit || '35%';
-        document.getElementById('weightEmailBuyingSignal').value = data.weightEmailBuyingSignal || '25%';
+        document.getElementById('weightEmailCompanyScore').value = formatWeightInput_(data.weightEmailCompanyScore, '40%');
+        document.getElementById('weightEmailPersonaFit').value = formatWeightInput_(data.weightEmailPersonaFit, '35%');
+        document.getElementById('weightEmailBuyingSignal').value = formatWeightInput_(data.weightEmailBuyingSignal, '25%');
         document.getElementById('humanApprovalRequired').checked = data.humanApprovalRequired !== false;
         document.getElementById('autoSendEnabled').checked = data.autoSendEnabled === true;
 
@@ -544,7 +598,7 @@
 
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
-        document.getElementById('senderProviderSelect').value = data.emailSenderProvider || 'Workspace Gmail (Drafts Only)';
+        document.getElementById('senderProviderSelect').value = normalizeSenderProviderOption_(data.emailSenderProvider);
         document.getElementById('senderEndpointInput').value = data.emailSenderEndpoint || '';
 
         document.getElementById('senderName').value = data.senderName || '';
@@ -564,8 +618,10 @@
         showStatus('Loaded configuration for ' + cid, 'info');
 
         if (!skipSync) {
+          setPipelineBusy_(true);
           google.script.run
             .withSuccessHandler(function(res) {
+              setPipelineBusy_(false);
               if (res && res.success) {
                 if (res.config) {
                   serverConfigsMap[cid] = res.config;
@@ -575,6 +631,7 @@
               }
             })
             .withFailureHandler(function(err) {
+              setPipelineBusy_(false);
               showStatus('⚠️ Loaded locally, but sheet sync failed: ' + err.message, 'error');
             })
             .selectAndActivateCampaign(cid);
@@ -623,6 +680,7 @@
       }
 
       function saveConfiguration() {
+        if (isPipelineBusy) return;
         const cid = document.getElementById('campaignIdInput').value.trim();
         const cname = document.getElementById('campaignNameInput').value.trim();
         if (!cid) {
@@ -686,26 +744,32 @@
 
         serverConfigsMap[cid] = payload;
 
+        setPipelineBusy_(true);
         showStatus('Saving campaign settings across all tabs & updating Dashboard...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
+            setPipelineBusy_(false);
             showStatus('✅ ' + (res.message || 'Saved successfully!'), 'success');
-            refreshCampaigns(true);
+            refreshCampaigns(true, (res && res.campaignId) ? res.campaignId : cid);
           })
           .withFailureHandler(function(err) {
+            setPipelineBusy_(false);
             showStatus('Save error: ' + err.message, 'error');
           })
           .studioDirectSaveCampaignPipeline(payload);
       }
 
       function runDiscovery() {
+        if (isPipelineBusy) return;
         const cid = document.getElementById('campaignIdInput').value.trim();
         if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
-        
-        showStatus('🔍 AI is searching the web for target companies... Please wait.', 'info');
-        
+
+        setPipelineBusy_(true);
+        showStatus('🔍 Agent 1 is discovering target companies... Please wait (buttons locked until complete).', 'info');
+
         google.script.run
           .withSuccessHandler(function(res) {
+            setPipelineBusy_(false);
             if (res && res.success) {
               showStatus('✅ ' + res.message, 'success');
             } else {
@@ -713,19 +777,23 @@
             }
           })
           .withFailureHandler(function(err) {
+            setPipelineBusy_(false);
             showStatus('Discovery Error: ' + err.message, 'error');
           })
           .runCompanyDiscoveryFromSidebar(cid);
       }
 
       function runPersonaMapper() {
+        if (isPipelineBusy) return;
         const cid = document.getElementById('campaignIdInput').value.trim();
         if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
-        
-        showStatus('👤 Running Persona Mapper for decision-makers and emails... Please wait.', 'info');
-        
+
+        setPipelineBusy_(true);
+        showStatus('👤 Agent 2 is mapping decision-makers and emails... Please wait (buttons locked until complete).', 'info');
+
         google.script.run
           .withSuccessHandler(function(res) {
+            setPipelineBusy_(false);
             if (res && res.success) {
               showStatus('✅ ' + res.message, 'success');
             } else {
@@ -733,6 +801,7 @@
             }
           })
           .withFailureHandler(function(err) {
+            setPipelineBusy_(false);
             showStatus('Persona Mapper Error: ' + err.message, 'error');
           })
           .runPersonaMapperFromSidebar(cid);

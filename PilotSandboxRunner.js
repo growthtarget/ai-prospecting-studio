@@ -8,10 +8,10 @@
  * CAPABILITIES:
  * 1. Generates & Synchronizes ALL 13 Tabs for the Pilot Run:
  *    - Cold-start safe: Automatically seeds canonical headers across all 13 tabs.
- *    - Updates "Campaign Configuration" with canonical parameters & company limit.
+ *    - Updates "Campaign Configuration" strictly preserving the locked 38 parameters.
  *    - Generates 39-column row in "Persona Mapper Settings" for PILOT-CMP-001.
  *    - Restores and populates "Dashboard" with the complete 10-row KPI table.
- *    - Populates "Campaigns" (28 master cols), "Company Database" (Col J Campaign ID), 
+ *    - Populates "Campaigns" (28 master cols), "Company Database" (Col J Campaign ID),
  *      "Company Intelligence" (25 cols), "Persona Leads" (29 cols),
  *      "Research Evidence" (9 canonical cols), "Prospect Review Queue" (45 cols),
  *      and logs token/credit usage to "API_Usage_Log".
@@ -35,6 +35,7 @@ const PILOT_CONFIG = {
   CUSTOM_BUSINESS_NEEDS: 'Automated Scope 3 emissions reporting, supplier audit evidence collection, and CSRD compliance readiness',
   TABS: {
     DASHBOARD: 'Dashboard',
+    API_USAGE_LOG: 'API_Usage_Log',
     CAMPAIGNS: 'Campaigns',
     COMPANY_INTELLIGENCE: 'Company Intelligence',
     PERSONAS: 'Persona Leads',
@@ -45,8 +46,7 @@ const PILOT_CONFIG = {
     RESEARCH_EVIDENCE: 'Research Evidence',
     AGENT_SETTINGS: 'Agent Settings',
     LOGS: 'Execution Logs',
-    LISTS_SETTINGS: 'Lists & Settings',
-    API_USAGE_LOG: 'API_Usage_Log'
+    LISTS_SETTINGS: 'Lists & Settings'
   }
 };
 
@@ -72,7 +72,7 @@ function runPilotOnRealSheets() {
     const suppressionRules = loadSuppressionRulesFromSettings(ss);
     Logger.log('Step 2: Loaded suppression rules (' + suppressionRules.domains.length + ' domains, ' + suppressionRules.emails.length + ' emails).');
 
-    // Step 3: Update "Campaign Configuration" tab with standardized Pilot parameters
+    // Step 3: Update "Campaign Configuration" tab with standardized Pilot parameters (locked 38 rows)
     updateCampaignConfigurationTab(ss, PILOT_CONFIG);
     Logger.log('Step 3: "Campaign Configuration" updated with Company Limit: ' + PILOT_CONFIG.COMPANY_LIMIT);
 
@@ -105,11 +105,11 @@ function runPilotOnRealSheets() {
     Logger.log('Step 9: Persona leads written to "Persona Leads".');
 
     // Step 10: Security Audit, Auto-Approval & Gmail Draft Dispatch
-    const processedQueue = processSecurityApprovalAndDrafts(pilotPersonas, suppressionRules, PILOT_CONFIG);
+    const processedQueue = processSecurityApprovalAndDrafts(pilotPersonas, enrichedCompanies, suppressionRules, PILOT_CONFIG);
     writePilotReviewQueue(ss, processedQueue);
     Logger.log('Step 10: Staged and processed leads in "Prospect Review Queue".');
 
-    // Step 11: Log API Usage & Estimated Cost to "API_Usage_Log" (Testing our new tracker)
+    // Step 11: Log API Usage & Estimated Cost to "API_Usage_Log"
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: PILOT_CONFIG.CAMPAIGN_ID,
@@ -140,8 +140,8 @@ function runPilotOnRealSheets() {
     logPilotExecution(ss, processedQueue);
 
     // Step 13: Generate and Update Master Dashboard
-    const draftsCreated = processedQueue.filter(p => p['Send Status'] === 'Draft Created in Gmail').length;
-    const blockedCount = processedQueue.filter(p => p['Compliance Status'] !== 'Passed').length;
+    const draftsCreated = processedQueue.filter(function(p) { return p['Send Status'] === 'Draft Created in Gmail'; }).length;
+    const blockedCount = processedQueue.filter(function(p) { return p['Compliance Status'] !== 'Passed'; }).length;
     updatePilotDashboard(ss, PILOT_CONFIG, enrichedCompanies.length, pilotPersonas.length, draftsCreated, blockedCount);
     Logger.log('Step 13: Master Dashboard updated with live KPIs.');
 
@@ -154,7 +154,6 @@ function runPilotOnRealSheets() {
     Logger.log('===============================================================');
     Logger.log('>>> PILOT RUN COMPLETED: ALL 13 TABS & API TRACKER SYNCHRONIZED <<<');
     Logger.log('===============================================================');
-
   } catch (err) {
     Logger.log('❌ Pilot Execution Error: ' + err.stack);
     ss.toast('Pilot error: ' + err.message, 'Pilot Error', 10);
@@ -162,22 +161,32 @@ function runPilotOnRealSheets() {
 }
 
 /**
- * Validates that all 13 project tabs exist and applies high-contrast styling.
+ * Validates that all 13 project tabs exist in canonical layout and applies high-contrast styling.
  */
 function validateRequiredTabs(ss) {
   const definitions = (typeof APP_CONFIG !== 'undefined' && Array.isArray(APP_CONFIG.sheetDefinitions))
     ? APP_CONFIG.sheetDefinitions
     : [];
 
-  Object.values(PILOT_CONFIG.TABS).forEach(name => {
+  Object.values(PILOT_CONFIG.TABS).forEach(function(name) {
     let sheet = ss.getSheetByName(name);
     if (!sheet) {
       sheet = ss.insertSheet(name);
     }
 
-    const def = definitions.find(d => d.name === name);
-    if (sheet.getLastRow() === 0 && def && Array.isArray(def.headers) && def.headers.length > 0) {
-      sheet.appendRow(def.headers);
+    if (name === PILOT_CONFIG.TABS.DASHBOARD) {
+      return;
+    }
+
+    if (name === PILOT_CONFIG.TABS.AGENT_SETTINGS) {
+      if (sheet.getLastRow() === 0) {
+        sheet.appendRow(['Category', 'Setting Key', 'Value', 'Status / Description']);
+      }
+    } else {
+      const def = definitions.find(function(d) { return d.name === name; });
+      if (sheet.getLastRow() === 0 && def && Array.isArray(def.headers) && def.headers.length > 0) {
+        sheet.appendRow(def.headers);
+      }
     }
 
     if (sheet.getLastColumn() > 0) {
@@ -191,6 +200,9 @@ function validateRequiredTabs(ss) {
   });
 }
 
+/**
+ * Updates "Campaign Configuration" without adding extra rows (preserves locked 38 parameters).
+ */
 function updateCampaignConfigurationTab(ss, config) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGN_CONFIG);
   if (!sheet) return;
@@ -199,10 +211,6 @@ function updateCampaignConfigurationTab(ss, config) {
     'CAMPAIGN_ID': config.CAMPAIGN_ID,
     'CAMPAIGN_NAME': config.CAMPAIGN_NAME,
     'DEPARTMENT': config.DEPARTMENT,
-    'PRIMARY_AI_PROVIDER': 'GEMINI',
-    'AI_PROVIDER': 'GEMINI',
-    'AI_MODEL': 'gemini-3.8-flash',
-    'GEMINI_MODEL': 'gemini-3.8-flash',
     'TARGET_COUNTRIES': 'United States & Canada',
     'TARGET_INDUSTRIES': 'Freight & Logistics, Industrial Equipment',
     'COMPANY_SIZE_RANGE': '50 - 250 employees',
@@ -216,14 +224,17 @@ function updateCampaignConfigurationTab(ss, config) {
     'CAMPAIGN_FOCUS': 'Scope 3 vendor compliance and operational resilience',
     'SEARCH_KEYWORDS': 'Scope 3, CSRD, AWS Cloud, compliance automation, supplier audits',
     'CUSTOM_BUSINESS_NEEDS': config.CUSTOM_BUSINESS_NEEDS,
+    'AI_PROVIDER': 'GEMINI',
+    'PRIMARY_AI_PROVIDER': 'GEMINI',
+    'AI_MODEL': 'gemini-3.8-flash',
+    'EMAIL_VERIFICATION_PROVIDER': 'ZeroBounce',
+    'EMAIL_VERIFICATION_ENDPOINT': 'https://api.zerobounce.net/v2/validate',
+    'EMAIL_SENDER_PROVIDER': 'Workspace Gmail (Drafts Only)',
+    'DISPATCH_MODE': 'Workspace Gmail (Drafts Only)',
+    'EMAIL_SENDER_ENDPOINT': '',
     'SENDER_NAME': config.SENDER_NAME,
     'SENDER_TITLE': config.SENDER_TITLE,
     'SENDER_COMPANY': config.SENDER_COMPANY,
-    'EMAIL_SENDER_PROVIDER': 'Workspace Gmail (Drafts Only)',
-    'DISPATCH_MODE': 'Workspace Gmail (Drafts Only)',
-    'EMAIL_VERIFICATION_PROVIDER': 'ZeroBounce',
-    'EMAIL_VERIFICATION_ENDPOINT': 'https://api.zerobounce.net/v2/validate',
-    'EMAIL_SENDER_ENDPOINT': '',
     'INCLUDE_ESG_OBLIGATIONS': 'TRUE',
     'INCLUDE_ESG_MATURITY': 'TRUE',
     'INCLUDE_SUPPLY_CHAIN': 'TRUE',
@@ -234,37 +245,29 @@ function updateCampaignConfigurationTab(ss, config) {
     'INCLUDE_TRIGGERS': 'TRUE',
     'INCLUDE_EVALUATER': 'TRUE',
     'HUMAN_APPROVAL_REQUIRED': 'TRUE',
-    'AUTO_SEND_ENABLED': 'FALSE',
-    'STATUS': 'Pilot Active'
+    'AUTO_SEND_ENABLED': 'FALSE'
   };
 
   if (sheet.getLastRow() <= 1) {
-    sheet.clear();
-    sheet.appendRow(['Parameter', 'Configured Value', 'Description']);
+    const rows = [['Parameter', 'Configured Value', 'Description']];
+    Object.keys(updates).forEach(function(key) {
+      rows.push([key, updates[key], 'Pilot configured parameter']);
+    });
+    sheet.getRange(1, 1, rows.length, 3).setValues(rows);
     sheet.getRange(1, 1, 1, 3)
       .setFontWeight('bold')
       .setFontColor('#174ea6')
       .setBackground('#e8f0fe')
       .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
     sheet.setFrozenRows(1);
-    Object.keys(updates).forEach(key => {
-      sheet.appendRow([key, updates[key], 'Pilot configured parameter']);
-    });
   } else {
     const data = sheet.getDataRange().getValues();
-    const updatedKeys = [];
     for (let r = 1; r < data.length; r++) {
       const key = String(data[r][0] || '').trim().toUpperCase();
-      if (updates.hasOwnProperty(key)) {
+      if (Object.prototype.hasOwnProperty.call(updates, key)) {
         sheet.getRange(r + 1, 2).setValue(updates[key]);
-        updatedKeys.push(key);
       }
     }
-    Object.keys(updates).forEach(key => {
-      if (!updatedKeys.includes(key)) {
-        sheet.appendRow([key, updates[key], 'Pilot configured parameter']);
-      }
-    });
   }
 }
 
@@ -316,7 +319,7 @@ function generatePersonaMapperSettingsRow(ss, config) {
     'TRUE', 'TRUE', 'TRUE', 'TRUE', 'TRUE', 'TRUE', 'TRUE', 'TRUE', 'TRUE',
     '20%', '15%', '15%', '15%', '20%', '15%',
     config.MIN_COMPANY_SCORE,
-    'Medium',
+    config.MIN_PERSONA_SCORE,
     80,
     'TRUE',
     'FALSE',
@@ -336,8 +339,7 @@ function writePilotCampaign(ss, config) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGNS);
   if (!sheet) return;
 
-  const now = new Date();
-  const nowStr = now.toLocaleString();
+  const nowStr = new Date().toLocaleString();
 
   const campaignPayload = {
     id: config.CAMPAIGN_ID,
@@ -399,7 +401,7 @@ function writePilotCampaign(ss, config) {
   ];
 
   const campDef = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.sheetDefinitions)
-    ? APP_CONFIG.sheetDefinitions.find(d => d.name === 'Campaigns')
+    ? APP_CONFIG.sheetDefinitions.find(function(d) { return d.name === 'Campaigns'; })
     : null;
 
   if (sheet.getLastRow() === 0 && campDef) {
@@ -419,7 +421,7 @@ function getPilotCompanyDatabaseRecords(config) {
   const dateStr = new Date().toISOString().split('T')[0];
   return [
     {
-      'Company ID': 'CMP-001',
+      'Company ID': 'PILOT-CO-001',
       'Campaign ID': config.CAMPAIGN_ID,
       'Company Name': 'Apex Global Operations',
       'Domain': 'growthtarget.com',
@@ -431,10 +433,10 @@ function getPilotCompanyDatabaseRecords(config) {
       'Status': 'Enriched'
     },
     {
-      'Company ID': 'CMP-002',
+      'Company ID': 'PILOT-CO-002',
       'Campaign ID': config.CAMPAIGN_ID,
       'Company Name': 'Novus Systems Corp',
-      'Domain': 'growthtarget.com',
+      'Domain': 'novussystems.com',
       'Country': 'Canada',
       'Industry': 'Industrial Equipment',
       'Employee Size': '140 employees',
@@ -443,7 +445,7 @@ function getPilotCompanyDatabaseRecords(config) {
       'Status': 'Enriched'
     },
     {
-      'Company ID': 'CMP-003',
+      'Company ID': 'PILOT-CO-003',
       'Campaign ID': config.CAMPAIGN_ID,
       'Company Name': 'EcoTransit Competitor Systems',
       'Domain': 'competitor-esg.com',
@@ -463,7 +465,9 @@ function writePilotCompanyDatabase(ss, list) {
 
   const lastCol = Math.max(sheet.getLastColumn(), 10);
   const currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-  let hasCampaignCol = currentHeaders.some(h => String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') === 'campaignid');
+  const hasCampaignCol = currentHeaders.some(function(h) {
+    return String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') === 'campaignid';
+  });
 
   if (!hasCampaignCol) {
     sheet.getRange(1, 10).setValue('Campaign ID')
@@ -474,7 +478,7 @@ function writePilotCompanyDatabase(ss, list) {
   }
 
   const updatedHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 10)).getValues()[0];
-  const rows = list.map(item => buildRowFromHeaders(updatedHeaders, item));
+  const rows = list.map(function(item) { return buildRowFromHeaders(updatedHeaders, item); });
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, updatedHeaders.length).setValues(rows);
 }
 
@@ -487,7 +491,7 @@ function getPilotCompaniesData(config) {
     {
       'Campaign ID': config.CAMPAIGN_ID,
       'Campaign Name': config.CAMPAIGN_NAME,
-      'Company ID': 'CMP-001',
+      'Company ID': 'PILOT-CO-001',
       'Company Name': 'Apex Global Operations',
       'Country': 'United States',
       'Industry': 'Freight & Logistics',
@@ -514,7 +518,7 @@ function getPilotCompaniesData(config) {
     {
       'Campaign ID': config.CAMPAIGN_ID,
       'Campaign Name': config.CAMPAIGN_NAME,
-      'Company ID': 'CMP-002',
+      'Company ID': 'PILOT-CO-002',
       'Company Name': 'Novus Systems Corp',
       'Country': 'Canada',
       'Industry': 'Industrial Equipment',
@@ -541,7 +545,7 @@ function getPilotCompaniesData(config) {
     {
       'Campaign ID': config.CAMPAIGN_ID,
       'Campaign Name': config.CAMPAIGN_NAME,
-      'Company ID': 'CMP-003',
+      'Company ID': 'PILOT-CO-003',
       'Company Name': 'EcoTransit Competitor Systems',
       'Country': 'United States',
       'Industry': 'Direct Industry Competitor',
@@ -572,7 +576,7 @@ function writePilotCompanyIntelligence(ss, companies) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.COMPANY_INTELLIGENCE);
   if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const rows = companies.map(c => buildRowFromHeaders(headers, c));
+  const rows = companies.map(function(c) { return buildRowFromHeaders(headers, c); });
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
@@ -580,7 +584,7 @@ function getPilotResearchEvidence(config) {
   const nowStr = new Date().toLocaleString();
   return [
     {
-      'Evidence ID': 'EVD-001',
+      'Evidence ID': 'PILOT-EVD-001',
       'Campaign ID': config.CAMPAIGN_ID,
       'Entity Name': 'Apex Global Operations',
       'Entity Type': 'Company',
@@ -591,7 +595,7 @@ function getPilotResearchEvidence(config) {
       'Date Captured': nowStr
     },
     {
-      'Evidence ID': 'EVD-002',
+      'Evidence ID': 'PILOT-EVD-002',
       'Campaign ID': config.CAMPAIGN_ID,
       'Entity Name': 'Marcus Vance',
       'Entity Type': 'Persona',
@@ -602,7 +606,7 @@ function getPilotResearchEvidence(config) {
       'Date Captured': nowStr
     },
     {
-      'Evidence ID': 'EVD-003',
+      'Evidence ID': 'PILOT-EVD-003',
       'Campaign ID': config.CAMPAIGN_ID,
       'Entity Name': 'Novus Systems Corp',
       'Entity Type': 'Company',
@@ -613,7 +617,7 @@ function getPilotResearchEvidence(config) {
       'Date Captured': nowStr
     },
     {
-      'Evidence ID': 'EVD-004',
+      'Evidence ID': 'PILOT-EVD-004',
       'Campaign ID': config.CAMPAIGN_ID,
       'Entity Name': 'Elena Rostova',
       'Entity Type': 'Persona',
@@ -630,7 +634,7 @@ function writePilotResearchEvidence(ss, list) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.RESEARCH_EVIDENCE);
   if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const rows = list.map(item => buildRowFromHeaders(headers, item));
+  const rows = list.map(function(item) { return buildRowFromHeaders(headers, item); });
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
@@ -643,10 +647,10 @@ function getPilotPersonasData(config) {
     {
       'Campaign ID': config.CAMPAIGN_ID,
       'Campaign Name': config.CAMPAIGN_NAME,
-      'Company ID': 'CMP-001',
+      'Company ID': 'PILOT-CO-001',
       'Company Name': 'Apex Global Operations',
       'Industry': 'Freight & Logistics',
-      'Persona ID': 'PRSP-001',
+      'Persona ID': 'PILOT-PRSP-001',
       'Name': 'Marcus Vance',
       'Title': 'VP of Technology & Infrastructure',
       'Persona Type': 'Economic Buyer',
@@ -682,10 +686,10 @@ function getPilotPersonasData(config) {
     {
       'Campaign ID': config.CAMPAIGN_ID,
       'Campaign Name': config.CAMPAIGN_NAME,
-      'Company ID': 'CMP-002',
+      'Company ID': 'PILOT-CO-002',
       'Company Name': 'Novus Systems Corp',
       'Industry': 'Industrial Equipment',
-      'Persona ID': 'PRSP-002',
+      'Persona ID': 'PILOT-PRSP-002',
       'Name': 'Elena Rostova',
       'Title': 'Head of Engineering Operations',
       'Persona Type': 'Key Decision Maker',
@@ -721,10 +725,10 @@ function getPilotPersonasData(config) {
     {
       'Campaign ID': config.CAMPAIGN_ID,
       'Campaign Name': config.CAMPAIGN_NAME,
-      'Company ID': 'CMP-003',
+      'Company ID': 'PILOT-CO-003',
       'Company Name': 'EcoTransit Competitor Systems',
       'Industry': 'Direct Competitor',
-      'Persona ID': 'PRSP-003',
+      'Persona ID': 'PILOT-PRSP-003',
       'Name': 'Sarah Connor',
       'Title': 'VP of Product',
       'Persona Type': 'Disqualified / Competitor',
@@ -758,22 +762,28 @@ function writePilotPersonaLeads(ss, personas) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.PERSONAS);
   if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const rows = personas.map(p => buildRowFromHeaders(headers, p));
+  const rows = personas.map(function(p) { return buildRowFromHeaders(headers, p); });
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
-function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
+function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressionRules, config) {
   const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@'];
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
   const nowStr = now.toLocaleString();
 
-  return personas.map(p => {
+  const companyScoreMap = {};
+  (enrichedCompanies || []).forEach(function(c) {
+    companyScoreMap[c['Company ID']] = c['Company Opportunity Score'];
+  });
+
+  return personas.map(function(p) {
     const email = (p['Business Email'] || '').trim().toLowerCase();
     const domain = (p['Email Domain'] || '').trim().toLowerCase();
     const verificationStatus = String(p['Email Verification Status'] || '').trim().toLowerCase();
-    
+    const companyOppScore = companyScoreMap[p['Company ID']] || p['Persona Fit Score'];
+
     let suppressionCheck = 'Clear';
     let complianceStatus = 'Passed';
     let approvalStatus = 'Pending Review';
@@ -784,7 +794,7 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
     if (!email || !emailRegex.test(email)) {
       complianceStatus = 'Failed - Invalid Syntax';
       suppressionCheck = 'Blocked: Bad Email Syntax';
-    } else if (rolePrefixes.some(pre => email.startsWith(pre))) {
+    } else if (rolePrefixes.some(function(pre) { return email.startsWith(pre); })) {
       complianceStatus = 'Failed - Role Based';
       suppressionCheck = 'Blocked: Role-Based Account';
     } else if (suppressionRules.emails.includes(email)) {
@@ -796,8 +806,8 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
     }
 
     if (complianceStatus === 'Passed' && (p['Persona Fit Score'] || 0) >= config.MIN_PERSONA_SCORE) {
-      approvalStatus = verificationStatus === 'catch-all' || verificationStatus === 'risky' ? 'Needs Review' : 'Approved (Auto-Pilot)';
-      
+      approvalStatus = (verificationStatus === 'catch-all' || verificationStatus === 'risky') ? 'Needs Review' : 'Approved (Auto-Pilot)';
+
       if (approvalStatus === 'Approved (Auto-Pilot)' || verificationStatus === 'catch-all') {
         try {
           const draft = GmailApp.createDraft(
@@ -807,7 +817,7 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
             { name: config.SENDER_NAME }
           );
           draftId = draft.getId();
-          sendStatus = 'Draft Created in Gmail'; 
+          sendStatus = 'Draft Created in Gmail';
           Logger.log('SUCCESS: Gmail Draft created for ' + p['Name'] + ' | ID: ' + draftId);
         } catch (err) {
           sendStatus = 'Draft Failed';
@@ -832,7 +842,7 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
       'Name': p['Name'],
       'Title': p['Title'],
       'Business Email': p['Business Email'],
-      'Company Opportunity Score': p['Persona Fit Score'],
+      'Company Opportunity Score': companyOppScore,
       'Persona Fit Score': p['Persona Fit Score'],
       'Buying Signal': p['Buying Signal'],
       'Priority Score': p['Persona Fit Score'],
@@ -849,7 +859,7 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
       'Approved By': approvalStatus.startsWith('Approved') ? 'Pilot Sandbox' : '',
       'Approved At': approvalStatus.startsWith('Approved') ? nowStr : '',
       'Send Status': sendStatus,
-      'Sent At': draftId ? nowStr : '',
+      'Sent At': '',
       'Send Error': sendError,
       'Country': 'United States',
       'Industry': p['Industry'],
@@ -877,7 +887,7 @@ function writePilotReviewQueue(ss, queueItems) {
   const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.REVIEW_QUEUE);
   if (!sheet || sheet.getLastColumn() < 1) return;
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const rows = queueItems.map(item => buildRowFromHeaders(headers, item));
+  const rows = queueItems.map(function(item) { return buildRowFromHeaders(headers, item); });
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
@@ -886,14 +896,16 @@ function logPilotExecution(ss, processedQueue) {
   if (!sheet) return;
 
   const timestamp = new Date().toLocaleString();
-  const logs = processedQueue.map(item => [
-    timestamp,
-    PILOT_CONFIG.CAMPAIGN_ID,
-    'Multi-Department Pilot Run',
-    item['Name'] + ' (' + item['Business Email'] + ')',
-    item['Compliance Status'] === 'Passed' ? 'SUCCESS' : 'SUPPRESSED',
-    item['Send Status'] + (item['Send Error'] ? ' - ' + item['Send Error'] : '')
-  ]);
+  const logs = processedQueue.map(function(item) {
+    return [
+      timestamp,
+      PILOT_CONFIG.CAMPAIGN_ID,
+      'Multi-Department Pilot Run',
+      item['Name'] + ' (' + item['Business Email'] + ')',
+      item['Compliance Status'] === 'Passed' ? 'SUCCESS' : 'SUPPRESSED',
+      item['Send Status'] + (item['Send Error'] ? ' - ' + item['Send Error'] : '')
+    ];
+  });
 
   sheet.getRange(sheet.getLastRow() + 1, 1, logs.length, logs[0].length).setValues(logs);
 }
@@ -909,6 +921,7 @@ function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCoun
   sheet.getRange('C1').setValue(config.CAMPAIGN_NAME);
   sheet.getRange('D1').setValue('Pilot Active');
   sheet.getRange('A1:D1').setBackground('#2d5945').setFontColor('#ffffff').setFontWeight('bold');
+  sheet.getRange('E1:G1').clearContent();
 
   sheet.getRange('B2').setValue(config.CAMPAIGN_ID).setFontWeight('bold');
 
@@ -973,7 +986,12 @@ function ensureSuppressionRulesInSettings(ss) {
   if (sheet.getLastRow() <= 1) {
     sheet.clear();
     sheet.appendRow(['List name', 'Value', 'Active status']);
-    sheet.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#202124').setFontColor('#ffffff');
+    sheet.getRange(1, 1, 1, 3)
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+    sheet.setFrozenRows(1);
   }
 
   const data = sheet.getDataRange().getValues();
@@ -1005,9 +1023,9 @@ function loadSuppressionRulesFromSettings(ss) {
     const status = String(data[i][2] || '').trim().toLowerCase();
 
     const isActive = (status === 'active' || status === 'true' || status === '');
-    const isSuppression = listName.includes('suppression') || 
-                          listName.includes('blacklist') || 
-                          listName.includes('opt-out') || 
+    const isSuppression = listName.includes('suppression') ||
+                          listName.includes('blacklist') ||
+                          listName.includes('opt-out') ||
                           listName.includes('competitor');
 
     if (isActive && isSuppression && value) {
@@ -1022,15 +1040,15 @@ function loadSuppressionRulesFromSettings(ss) {
 }
 
 function buildRowFromHeaders(sheetHeaders, dataObject) {
-  return sheetHeaders.map(header => {
+  return sheetHeaders.map(function(header) {
     const cleanHeader = String(header).trim();
-    return dataObject.hasOwnProperty(cleanHeader) ? dataObject[cleanHeader] : '';
+    return Object.prototype.hasOwnProperty.call(dataObject, cleanHeader) ? dataObject[cleanHeader] : '';
   });
 }
 
 /**
- * Universal Pilot Purge: Scans every row across operational tabs (including API_Usage_Log, Company Database Col J
- * and Execution Logs) and reliably deletes rows belonging to PILOT-CMP-001.
+ * Universal Pilot Purge: Scans every row across operational tabs (including API_Usage_Log,
+ * Company Database Col J, and Execution Logs) and deletes rows belonging to PILOT-CMP-001.
  */
 function purgeExistingPilotRows(ss, campaignId) {
   const tabsToClean = [
@@ -1045,15 +1063,15 @@ function purgeExistingPilotRows(ss, campaignId) {
     PILOT_CONFIG.TABS.API_USAGE_LOG
   ];
 
-  tabsToClean.forEach(tabName => {
+  tabsToClean.forEach(function(tabName) {
     const sheet = ss.getSheetByName(tabName);
     if (!sheet) return;
     const data = sheet.getDataRange().getValues();
     if (data.length <= 1) return;
 
     for (let r = data.length - 1; r >= 1; r--) {
-      const rowValues = data[r].map(v => String(v || '').trim());
-      const isPilot = rowValues.some(val => val === campaignId || val.startsWith('PILOT-'));
+      const rowValues = data[r].map(function(v) { return String(v || '').trim(); });
+      const isPilot = rowValues.some(function(val) { return val === campaignId || val.startsWith('PILOT-'); });
       if (isPilot) {
         sheet.deleteRow(r + 1);
       }
@@ -1064,60 +1082,101 @@ function purgeExistingPilotRows(ss, campaignId) {
 function cleanupPilotDataFromRealSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
-  
-  const dashSheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
-  if (dashSheet) {
-    const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
-    
-    dashSheet.getRange('A1').setValue('🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD');
-    dashSheet.getRange('B1').setValue('Campaign');
-    dashSheet.getRange('C1').setValue('No Active Campaign');
-    dashSheet.getRange('D1').setValue('Standby');
-    dashSheet.getRange('A1:D1').setBackground('#2d5945').setFontColor('#ffffff').setFontWeight('bold');
 
-    dashSheet.getRange('B2').setValue('');
+  try {
+    PropertiesService.getDocumentProperties().deleteProperty('PERSONA_MAPPER_CURSOR_' + PILOT_CONFIG.CAMPAIGN_ID);
+  } catch (e) {}
 
-    dashSheet.getRange('A3:D3')
-      .setValues([['Metric KPI', 'Current Value', 'Operational Status', 'Last Updated']])
-      .setFontWeight('bold')
-      .setBackground('#202124')
-      .setFontColor('#ffffff');
+  // Remove any legacy stray GEMINI_MODEL/STATUS rows from Campaign Configuration & restore active state
+  const cfgSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGN_CONFIG);
+  let restoredRealCampaign = false;
 
-    const standbyData = [
-      ['Active Campaign Name', 'None (Standby)', 'Standby', now],
-      ['Campaign ID', 'None', 'Standby', now],
-      ['Operating Department', 'None', 'Standby', now],
-      ['Company Discovery Limit', '0 Companies', 'Standby', now],
-      ['Companies Discovered & Qualified', 0, 'Standby', now],
-      ['Persona Leads Identified', 0, 'Standby', now],
-      ['Gmail Outreach Drafts Created', 0, 'Standby', now],
-      ['Suppressed / Blocked Records', 0, 'Standby', now],
-      ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', 0, now],
-      ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now]
-    ];
-    dashSheet.getRange(4, 1, standbyData.length, 4).setValues(standbyData);
+  if (cfgSheet && cfgSheet.getLastRow() > 1) {
+    const cfgData = cfgSheet.getDataRange().getValues();
+    for (let r = cfgData.length - 1; r >= 1; r--) {
+      const param = String(cfgData[r][0] || '').trim().toUpperCase();
+      if (cfgData.length > 39 && (param === 'GEMINI_MODEL' || param === 'STATUS')) {
+        cfgSheet.deleteRow(r + 1);
+      }
+    }
 
-    dashSheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
-    const rollupHeaders = [
-      'Campaign ID',
-      'Campaign Name',
-      'Department',
-      'Status',
-      'Companies Found',
-      'Gmail Drafts',
-      'Last Run'
-    ];
-    dashSheet.getRange(17, 1, 1, 7)
-      .setValues([rollupHeaders])
-      .setFontWeight('bold')
-      .setBackground('#dadce0')
-      .setFontColor('#202124');
-
-    if (dashSheet.getLastRow() >= 18) {
-      dashSheet.getRange(18, 1, dashSheet.getLastRow() - 17, 7).clearContent();
+    const activeCfgId = String(cfgSheet.getRange(2, 2).getValue() || '').trim();
+    if (activeCfgId === PILOT_CONFIG.CAMPAIGN_ID || activeCfgId.startsWith('PILOT-')) {
+      const campSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGNS);
+      if (campSheet && campSheet.getLastRow() > 1) {
+        const campRows = campSheet.getDataRange().getValues();
+        for (let r = 1; r < campRows.length; r++) {
+          const cid = String(campRows[r][0] || '').trim();
+          if (cid && !cid.startsWith('PILOT-') && typeof selectAndActivateCampaign === 'function') {
+            selectAndActivateCampaign(cid);
+            restoredRealCampaign = true;
+            break;
+          }
+        }
+      }
+      if (!restoredRealCampaign) {
+        cfgSheet.getRange(2, 2).setValue('');
+        if (cfgSheet.getLastRow() >= 3) cfgSheet.getRange(3, 2).setValue('');
+      }
     }
   }
-  
-  ss.toast('Pilot test data purged. Dashboard reset to Standby with all labels intact.', 'Cleaned', 6);
+
+  if (!restoredRealCampaign) {
+    const dashSheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
+    if (dashSheet) {
+      const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
+
+      dashSheet.getRange('A1').setValue('🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD');
+      dashSheet.getRange('B1').setValue('Campaign');
+      dashSheet.getRange('C1').setValue('No Active Campaign');
+      dashSheet.getRange('D1').setValue('Standby');
+      dashSheet.getRange('A1:D1').setBackground('#2d5945').setFontColor('#ffffff').setFontWeight('bold');
+      dashSheet.getRange('E1:G1').clearContent();
+
+      dashSheet.getRange('B2').setValue('');
+
+      dashSheet.getRange('A3:D3')
+        .setValues([['Metric KPI', 'Current Value', 'Operational Status', 'Last Updated']])
+        .setFontWeight('bold')
+        .setBackground('#202124')
+        .setFontColor('#ffffff');
+
+      const standbyData = [
+        ['Active Campaign Name', 'None (Standby)', 'Standby', now],
+        ['Campaign ID', 'None', 'Standby', now],
+        ['Operating Department', 'None', 'Standby', now],
+        ['Company Discovery Limit', '0 Companies', 'Standby', now],
+        ['Companies Discovered & Qualified', 0, 'Standby', now],
+        ['Persona Leads Identified', 0, 'Standby', now],
+        ['Gmail Outreach Drafts Created', 0, 'Standby', now],
+        ['Suppressed / Blocked Records', 0, 'Standby', now],
+        ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', 0, now],
+        ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now]
+      ];
+      dashSheet.getRange(4, 1, standbyData.length, 4).setValues(standbyData);
+
+      dashSheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
+      const rollupHeaders = [
+        'Campaign ID',
+        'Campaign Name',
+        'Department',
+        'Status',
+        'Companies Found',
+        'Gmail Drafts',
+        'Last Run'
+      ];
+      dashSheet.getRange(17, 1, 1, 7)
+        .setValues([rollupHeaders])
+        .setFontWeight('bold')
+        .setBackground('#dadce0')
+        .setFontColor('#202124');
+
+      if (dashSheet.getLastRow() >= 18) {
+        dashSheet.getRange(18, 1, dashSheet.getLastRow() - 17, 7).clearContent();
+      }
+    }
+  }
+
+  ss.toast('Pilot test data purged cleanly.', 'Cleaned', 6);
   Logger.log('Pilot test data purged cleanly.');
 }

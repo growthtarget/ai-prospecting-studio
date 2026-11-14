@@ -7,7 +7,7 @@
  * 
  * Transforms structured AI responses and live search grounding metadata from
  * Google Gemini (gemini-3.8-flash) and OpenAI (gpt-4o) into canonical rows
- * matching Tab 8 (Company Database - 10 cols) and Tab 9 (Research Evidence - 9 cols).
+ * matching Tab 9 (Company Database - 10 cols) and Tab 10 (Research Evidence - 9 cols).
  * ============================================================================
  */
 
@@ -15,7 +15,7 @@
  * Prepares discovered company firmographics and grounding evidence into canonical spreadsheet rows.
  * 
  * @param {string} campaignId Active Campaign ID
- * @param {Object|string} response Raw API response from Gemini or OpenAI
+ * @param {Object|string} response Raw API response (or wrapped callAI response) from Gemini or OpenAI
  * @param {Object} [options] Optional configuration (defaultSearchQuery, discoveryMethod)
  * @return {Object} Object containing canonical companyRow (10 cols) and evidenceRows (9 cols each)
  */
@@ -30,7 +30,7 @@ function prepareCompanyResearchRows_(campaignId, response, options) {
   const opts = options || {};
   const outputText = extractResponseOutputText_(response);
   const cleanedText = cleanJsonString_(outputText);
-  
+
   let research;
   try {
     research = JSON.parse(cleanedText);
@@ -45,8 +45,8 @@ function prepareCompanyResearchRows_(campaignId, response, options) {
   const company = research.company;
   const companyId = Utilities.getUuid();
   const collectedAt = new Date().toISOString();
-  
-  // Extract live search grounding citations and queries (supports Gemini & OpenAI)
+
+  // Extract live search grounding citations and queries (supports wrapped & raw Gemini/OpenAI payloads)
   const grounding = extractGroundingMetadata_(response);
   const citationsByUrl = grounding.citationsByUrl;
   const citationCount = Object.keys(citationsByUrl).length;
@@ -54,7 +54,7 @@ function prepareCompanyResearchRows_(campaignId, response, options) {
   const defaultQuery = opts.defaultSearchQuery || (searchQueries.length > 0 ? searchQueries.join('; ') : 'AI Grounded Search');
   const discoveryMethod = opts.discoveryMethod || 'AI Grounded Discovery';
 
-  // Build Tab 9: Research Evidence rows (Exact 9 canonical columns)
+  // Build Tab 10: Research Evidence rows (Exact 9 canonical columns)
   const evidenceRows = (research.evidence || []).map(function(item) {
     const sourceUrl = String(item.source_url || '').trim();
     const citation = sourceUrl ? citationsByUrl[normalizeSourceUrl_(sourceUrl)] : null;
@@ -80,10 +80,10 @@ function prepareCompanyResearchRows_(campaignId, response, options) {
     ];
   });
 
-  // Extract clean domain for Tab 8: Company Database
+  // Extract clean domain for Tab 9: Company Database
   const domain = extractDomainFromUrl_(company.website);
 
-  // Build Tab 8: Company Database row (Exact 10 canonical columns, Col J = Campaign ID)
+  // Build Tab 9: Company Database row (Exact 10 canonical columns, Col J = Campaign ID)
   const companyRow = [
     companyId,                                          // Col A: Company ID
     String(company.name || '').trim(),                  // Col B: Company Name
@@ -107,10 +107,10 @@ function prepareCompanyResearchRows_(campaignId, response, options) {
 }
 
 /**
- * Prepares persona research and buying signals into Tab 9: Research Evidence rows.
+ * Prepares persona research and buying signals into Tab 10: Research Evidence rows.
  * 
  * @param {string} campaignId Active Campaign ID
- * @param {Object|string} response Raw API response from Gemini or OpenAI
+ * @param {Object|string} response Raw or wrapped API response from Gemini or OpenAI
  * @param {string} targetCompanyName Target account name
  * @param {Object} [options] Optional configuration
  * @return {Object} Object containing persona evidenceRows (9 cols each)
@@ -122,7 +122,7 @@ function preparePersonaResearchRows_(campaignId, response, targetCompanyName, op
   const opts = options || {};
   const outputText = extractResponseOutputText_(response);
   const cleanedText = cleanJsonString_(outputText);
-  
+
   let research;
   try {
     research = JSON.parse(cleanedText);
@@ -172,19 +172,25 @@ function preparePersonaResearchRows_(campaignId, response, targetCompanyName, op
 }
 
 /**
- * Universal extractor for raw text payload across Gemini, OpenAI, and raw strings.
+ * Universal extractor for raw text payload across Gemini, OpenAI, wrapped callAI responses, and strings.
  * 
- * @param {Object|string} response Raw API response
+ * @param {Object|string} response Raw or wrapped API response
  * @return {string} Plain text JSON content
  */
 function extractResponseOutputText_(response) {
   if (typeof response === 'string') {
     return response;
   }
+  if (!response || typeof response !== 'object') {
+    throw new Error('The AI response did not contain structured text or valid message parts.');
+  }
 
-  // Google Gemini structure: candidates[0].content.parts[0].text
-  if (response.candidates && Array.isArray(response.candidates) && response.candidates.length > 0) {
-    const candidate = response.candidates[0];
+  // Unwrap callAI / callGemini_ wrapper if present
+  const payload = (response.raw && typeof response.raw === 'object') ? response.raw : response;
+
+  // Google Gemini structure: candidates[0].content.parts[].text
+  if (payload.candidates && Array.isArray(payload.candidates) && payload.candidates.length > 0) {
+    const candidate = payload.candidates[0];
     if (candidate.content && Array.isArray(candidate.content.parts)) {
       const parts = candidate.content.parts
         .map(function(part) { return part.text || ''; })
@@ -194,20 +200,20 @@ function extractResponseOutputText_(response) {
   }
 
   // OpenAI Chat Completions structure: choices[0].message.content
-  if (response.choices && Array.isArray(response.choices) && response.choices.length > 0) {
-    const choice = response.choices[0];
+  if (payload.choices && Array.isArray(payload.choices) && payload.choices.length > 0) {
+    const choice = payload.choices[0];
     if (choice.message && typeof choice.message.content === 'string') {
       return choice.message.content;
     }
   }
 
-  // OpenAI Assistants / Responses API structure: output[].content[].text
-  if (Array.isArray(response.output)) {
+  // OpenAI Responses API structure: output[].content[].text
+  if (Array.isArray(payload.output)) {
     const textParts = [];
-    response.output.forEach(function(outputItem) {
-      if (outputItem.type !== 'message' || !Array.isArray(outputItem.content)) return;
+    payload.output.forEach(function(outputItem) {
+      if (!outputItem || outputItem.type !== 'message' || !Array.isArray(outputItem.content)) return;
       outputItem.content.forEach(function(contentItem) {
-        if (contentItem.type === 'output_text' && typeof contentItem.text === 'string') {
+        if (contentItem && (contentItem.type === 'output_text' || contentItem.type === 'text') && typeof contentItem.text === 'string') {
           textParts.push(contentItem.text);
         }
       });
@@ -215,18 +221,28 @@ function extractResponseOutputText_(response) {
     if (textParts.length > 0) return textParts.join('\n');
   }
 
-  // Top-level text fallback
-  if (typeof response.text === 'string') {
+  // OpenAI SDK helper or wrapped text fallback
+  if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
+    return payload.output_text;
+  }
+  if (typeof response.text === 'string' && response.text.trim()) {
     return response.text;
+  }
+  if (typeof payload.text === 'string' && payload.text.trim()) {
+    return payload.text;
+  }
+  if (response.json && typeof response.json === 'object') {
+    return JSON.stringify(response.json);
   }
 
   throw new Error('The AI response did not contain structured text or valid message parts.');
 }
 
 /**
- * Universal grounding metadata extractor across Gemini Search Grounding and OpenAI annotations.
+ * Universal grounding metadata extractor across Gemini Search Grounding,
+ * OpenAI Responses annotations, and wrapped callAI citation arrays.
  * 
- * @param {Object} response Raw API response
+ * @param {Object} response Raw or wrapped API response
  * @return {Object} Object with citationsByUrl and searchQueries
  */
 function extractGroundingMetadata_(response) {
@@ -237,17 +253,18 @@ function extractGroundingMetadata_(response) {
     return { citationsByUrl: citationsByUrl, searchQueries: searchQueries };
   }
 
+  // Unwrap callAI / callGemini_ wrapper if present
+  const payload = (response.raw && typeof response.raw === 'object') ? response.raw : response;
+
   // 1. Google Gemini Grounding Metadata (gemini-3.8-flash)
-  if (response.candidates && Array.isArray(response.candidates) && response.candidates.length > 0) {
-    const grounding = response.candidates[0].groundingMetadata;
+  if (payload.candidates && Array.isArray(payload.candidates) && payload.candidates.length > 0) {
+    const grounding = payload.candidates[0].groundingMetadata;
     if (grounding) {
-      // Extract search queries used
       if (Array.isArray(grounding.webSearchQueries)) {
         grounding.webSearchQueries.forEach(function(query) {
           if (query && typeof query === 'string') searchQueries.push(query.trim());
         });
       }
-      // Extract grounding chunks
       if (Array.isArray(grounding.groundingChunks)) {
         grounding.groundingChunks.forEach(function(chunk) {
           if (chunk.web && chunk.web.uri) {
@@ -262,13 +279,17 @@ function extractGroundingMetadata_(response) {
     }
   }
 
-  // 2. OpenAI Assistants / Responses API url_citations
-  if (Array.isArray(response.output)) {
-    response.output.forEach(function(outputItem) {
+  // 2. OpenAI Responses API web_search_call queries & url_citation annotations
+  if (Array.isArray(payload.output)) {
+    payload.output.forEach(function(outputItem) {
+      if (!outputItem) return;
+      if (outputItem.type === 'web_search_call' && outputItem.action && outputItem.action.query) {
+        searchQueries.push(String(outputItem.action.query).trim());
+      }
       if (!Array.isArray(outputItem.content)) return;
       outputItem.content.forEach(function(contentItem) {
         (contentItem.annotations || []).forEach(function(annotation) {
-          if (annotation.type !== 'url_citation') return;
+          if (!annotation || annotation.type !== 'url_citation') return;
           const citation = annotation.url_citation || annotation;
           if (!citation.url) return;
           citationsByUrl[normalizeSourceUrl_(citation.url)] = {
@@ -280,9 +301,26 @@ function extractGroundingMetadata_(response) {
     });
   }
 
+  // 3. Fallback to wrapped citations array if raw metadata had no URLs
+  const fallbackCitations = Array.isArray(response.citations)
+    ? response.citations
+    : (Array.isArray(payload.citations) ? payload.citations : []);
+
+  if (Object.keys(citationsByUrl).length === 0 && fallbackCitations.length > 0) {
+    fallbackCitations.forEach(function(item) {
+      const url = typeof item === 'string' ? item : (item && (item.url || item.uri) ? (item.url || item.uri) : '');
+      if (url && /^https?:\/\//i.test(url)) {
+        citationsByUrl[normalizeSourceUrl_(url)] = {
+          url: url,
+          title: (item && item.title) ? item.title : ''
+        };
+      }
+    });
+  }
+
   return {
     citationsByUrl: citationsByUrl,
-    searchQueries: searchQueries
+    searchQueries: Array.from(new Set(searchQueries.filter(Boolean)))
   };
 }
 
@@ -295,15 +333,13 @@ function extractGroundingMetadata_(response) {
 function cleanJsonString_(text) {
   if (!text || typeof text !== 'string') return '';
   let cleaned = text.trim();
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.substring(7);
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.substring(3);
+
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch && fenceMatch[1]) {
+    cleaned = fenceMatch[1].trim();
   }
-  if (cleaned.endsWith('```')) {
-    cleaned = cleaned.substring(0, cleaned.length - 3);
-  }
-  return cleaned.trim();
+
+  return cleaned;
 }
 
 /**

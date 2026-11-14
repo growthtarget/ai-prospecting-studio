@@ -5,7 +5,7 @@
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
  * MASTER CONTROLLER & UNIFIED TOP MENU
  * ============================================================================
- * File: Code.js / code.gs
+ * File: Code.js / Code.gs
  * ============================================================================
  */
 
@@ -97,7 +97,45 @@ function normalizeStudioKey(str) {
 }
 
 /**
+ * Helper to verify a string is a real secret/key and not a sheet status placeholder.
+ */
+function isStudioValidSecretValue_(val) {
+  const s = String(val || '').trim();
+  if (!s) return false;
+  const upper = s.toUpperCase();
+  if (upper.indexOf('PASTE_') >= 0) return false;
+  if (upper.indexOf('CONFIGURED IN SCRIPT PROPERTIES') >= 0) return false;
+  if (upper.indexOf('PROTECTED') >= 0 && s.length < 35) return false;
+  return true;
+}
+
+/**
+ * Safely resolves reviewer email without throwing if userinfo.email scope is restricted.
+ */
+function getSafeReviewerEmail_() {
+  try {
+    const active = Session.getActiveUser().getEmail();
+    if (active) return active;
+  } catch (e) {}
+  try {
+    const effective = Session.getEffectiveUser().getEmail();
+    if (effective) return effective;
+  } catch (e) {}
+  return 'Admin Reviewer';
+}
+
+/**
+ * Safely parses numeric fields read from Sheets while ignoring accidental Date cells (e.g. 3/20/1900).
+ */
+function parseSafeCampaignNumeric_(val) {
+  if (val === null || val === undefined || val === '' || val instanceof Date) return 0;
+  const n = Number(val);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
  * Master onOpen Trigger: Clean menu with isolated audit function.
+ * Note: Outreach functions live in EmailSender.js to avoid global namespace collisions.
  */
 function onOpen() {
   let ui;
@@ -131,7 +169,7 @@ function onOpen() {
 
 /**
  * Native onEdit Trigger: Listens for in-cell updates on Dashboard (D1 for Status,
- * C4 for Status) and on Campaigns sheet Column 4 (Status).
+ * C4 for Status, B2 for Campaign ID) and on Campaigns sheet Column 4 (Status).
  */
 function onEdit(e) {
   if (!e || !e.range) return;
@@ -142,20 +180,15 @@ function onEdit(e) {
     const col = e.range.getColumn();
     const val = String(e.value || e.range.getValue() || '').trim();
 
-    // 1. EDITS ON DASHBOARD TAB
     if (sheetName === 'Dashboard') {
       if (row === 1 && col === 4 && val) {
         syncStatusFromDashboard_(val);
-      }
-      else if (row === 4 && col === 3 && val) {
+      } else if (row === 4 && col === 3 && val) {
         syncStatusFromDashboard_(val);
-      }
-      else if (row === 2 && col === 2 && val) {
+      } else if (row === 2 && col === 2 && val) {
         selectAndActivateCampaign(val);
       }
-    }
-    // 2. EDITS ON CAMPAIGNS TAB (Column 4 is Status)
-    else if (sheetName === 'Campaigns' && row > 1 && col === 4) {
+    } else if (sheetName === 'Campaigns' && row > 1 && col === 4) {
       const editedCampId = String(sheet.getRange(row, 1).getValue()).trim();
       const activeCampId = getStudioActiveCampaignId_();
       if (editedCampId && editedCampId === activeCampId) {
@@ -231,7 +264,8 @@ function getStudioActiveCampaignId_() {
   }
   const configSheet = ss.getSheetByName('Campaign Configuration');
   if (configSheet && configSheet.getLastRow() > 1) {
-    return String(configSheet.getRange(2, 2).getValue() || '').trim();
+    const cId = String(configSheet.getRange(2, 2).getValue() || '').trim();
+    if (cId) return cId;
   }
   return 'CMP-005';
 }
@@ -244,7 +278,7 @@ function fixAllTabHeaderContrast() {
   if (!ss) return;
   const sheets = ss.getSheets();
 
-  sheets.forEach(sh => {
+  sheets.forEach(function(sh) {
     if (sh.getName() === 'Dashboard') return;
     if (sh.getLastColumn() > 0) {
       const headerRange = sh.getRange(1, 1, 1, sh.getLastColumn());
@@ -266,7 +300,7 @@ function fixAllTabHeaderContrast() {
 function findPersonaMapperSettingsSheet(ss) {
   if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return null;
-  
+
   const candidateNames = [
     'Persona Mapper Settings',
     'Persona Mapper Setting',
@@ -293,7 +327,8 @@ function findPersonaMapperSettingsSheet(ss) {
 }
 
 /**
- * Universal API Key resolver that checks Script Properties & Agent Settings
+ * Universal API Key resolver checking Script Properties, User Properties, & Agent Settings
+ * while safely rejecting sheet protected status indicators and PASTE_ placeholders.
  */
 function getStudioApiKey(provider) {
   const norm = String(provider || '').toUpperCase();
@@ -303,20 +338,20 @@ function getStudioApiKey(provider) {
   for (let k in scriptProps) {
     const uk = k.toUpperCase();
     if ((norm.includes('OPENAI') || norm.includes('GPT')) && uk.includes('OPENAI')) {
-      if (scriptProps[k] && !scriptProps[k].includes('PASTE_')) return scriptProps[k];
+      if (isStudioValidSecretValue_(scriptProps[k])) return String(scriptProps[k]).trim();
     }
     if (norm.includes('GEMINI') && uk.includes('GEMINI')) {
-      if (scriptProps[k] && !scriptProps[k].includes('PASTE_')) return scriptProps[k];
+      if (isStudioValidSecretValue_(scriptProps[k])) return String(scriptProps[k]).trim();
     }
   }
 
   for (let k in userProps) {
     const uk = k.toUpperCase();
     if ((norm.includes('OPENAI') || norm.includes('GPT')) && uk.includes('OPENAI')) {
-      if (userProps[k] && !userProps[k].includes('PASTE_')) return userProps[k];
+      if (isStudioValidSecretValue_(userProps[k])) return String(userProps[k]).trim();
     }
     if (norm.includes('GEMINI') && uk.includes('GEMINI')) {
-      if (userProps[k] && !userProps[k].includes('PASTE_')) return userProps[k];
+      if (isStudioValidSecretValue_(userProps[k])) return String(userProps[k]).trim();
     }
   }
 
@@ -329,12 +364,12 @@ function getStudioApiKey(provider) {
         for (let c = 0; c < data[r].length; c++) {
           const cell = String(data[r][c] || '').trim().toUpperCase();
           if ((norm.includes('OPENAI') || norm.includes('GPT')) && cell === 'OPENAI_API_KEY') {
-            const val = String(data[r][c + 1] || data[r][2] || '').trim();
-            if (val && !val.includes('PASTE_')) return val;
+            const val = String(data[r][c + 1] !== undefined ? data[r][c + 1] : (data[r][2] || '')).trim();
+            if (isStudioValidSecretValue_(val)) return val;
           }
           if (norm.includes('GEMINI') && cell === 'GEMINI_API_KEY') {
-            const val = String(data[r][c + 1] || data[r][2] || '').trim();
-            if (val && !val.includes('PASTE_')) return val;
+            const val = String(data[r][c + 1] !== undefined ? data[r][c + 1] : (data[r][2] || '')).trim();
+            if (isStudioValidSecretValue_(val)) return val;
           }
         }
       }
@@ -393,7 +428,7 @@ function getSidebarInitialData() {
   const campSheet = ss ? ss.getSheetByName('Campaigns') : null;
   if (campSheet && campSheet.getLastRow() > 1) {
     const campData = campSheet.getDataRange().getValues();
-    const headers = campData[0].map(h => normalizeStudioKey(h));
+    const headers = campData[0].map(function(h) { return normalizeStudioKey(h); });
 
     const idIdx = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
     const nameIdx = headers.indexOf('CAMPAIGNNAME') >= 0 ? headers.indexOf('CAMPAIGNNAME') : 1;
@@ -446,12 +481,24 @@ function getSidebarInitialData() {
       if (countryIdx >= 0 && campData[i][countryIdx]) campaignObj.country = String(campData[i][countryIdx]).trim();
       if (indIdx >= 0 && campData[i][indIdx]) campaignObj.industry = String(campData[i][indIdx]).trim();
       if (sizeIdx >= 0 && campData[i][sizeIdx]) campaignObj.size = String(campData[i][sizeIdx]).trim();
-      if (limitIdx >= 0 && campData[i][limitIdx]) campaignObj.limit = Number(campData[i][limitIdx]) || campaignObj.limit || 5;
+
+      const parsedLimit = limitIdx >= 0 ? parseSafeCampaignNumeric_(campData[i][limitIdx]) : 0;
+      if (parsedLimit > 0) campaignObj.limit = parsedLimit;
+
       if (depthIdx >= 0 && campData[i][depthIdx]) campaignObj.researchDepth = String(campData[i][depthIdx]).trim();
-      if (evIdx >= 0 && campData[i][evIdx]) campaignObj.evidencePeriodMonths = Number(campData[i][evIdx]) || campaignObj.evidencePeriodMonths || 12;
-      if (minCompIdx >= 0 && campData[i][minCompIdx]) campaignObj.minCompanyScore = Number(campData[i][minCompIdx]) || campaignObj.minCompanyScore || 80;
-      if (minPersIdx >= 0 && campData[i][minPersIdx]) campaignObj.minPersonaScore = Number(campData[i][minPersIdx]) || campaignObj.minPersonaScore || 85;
-      if (minEmailIdx >= 0 && campData[i][minEmailIdx]) campaignObj.minEmailPriorityScore = Number(campData[i][minEmailIdx]) || campaignObj.minEmailPriorityScore || 80;
+
+      const parsedEv = evIdx >= 0 ? parseSafeCampaignNumeric_(campData[i][evIdx]) : 0;
+      if (parsedEv > 0) campaignObj.evidencePeriodMonths = parsedEv;
+
+      const parsedMinComp = minCompIdx >= 0 ? parseSafeCampaignNumeric_(campData[i][minCompIdx]) : 0;
+      if (parsedMinComp > 0) campaignObj.minCompanyScore = parsedMinComp;
+
+      const parsedMinPers = minPersIdx >= 0 ? parseSafeCampaignNumeric_(campData[i][minPersIdx]) : 0;
+      if (parsedMinPers > 0) campaignObj.minPersonaScore = parsedMinPers;
+
+      const parsedMinEmail = minEmailIdx >= 0 ? parseSafeCampaignNumeric_(campData[i][minEmailIdx]) : 0;
+      if (parsedMinEmail > 0) campaignObj.minEmailPriorityScore = parsedMinEmail;
+
       if (titlesIdx >= 0 && campData[i][titlesIdx]) campaignObj.titles = String(campData[i][titlesIdx]).trim();
       if (focusIdx >= 0 && campData[i][focusIdx]) campaignObj.campaignFocus = String(campData[i][focusIdx]).trim();
       if (keywordsIdx >= 0 && campData[i][keywordsIdx]) campaignObj.searchKeywords = String(campData[i][keywordsIdx]).trim();
@@ -459,9 +506,9 @@ function getSidebarInitialData() {
       if (aiProvIdx >= 0 && campData[i][aiProvIdx]) campaignObj.aiProvider = String(campData[i][aiProvIdx]).trim();
       if (aiModIdx >= 0 && campData[i][aiModIdx]) campaignObj.aiModel = String(campData[i][aiModIdx]).trim();
       if (verifProvIdx >= 0 && campData[i][verifProvIdx]) campaignObj.emailVerifier = String(campData[i][verifProvIdx]).trim();
-      if (verifEndIdx >= 0 && campData[i][verifEndIdx]) campaignObj.emailEndpoint = String(campData[i][verifEndIdx]).trim();
+      if (verifEndIdx >= 0 && campData[i][verifEndIdx] !== '') campaignObj.emailEndpoint = String(campData[i][verifEndIdx]).trim();
       if (senderProvIdx >= 0 && campData[i][senderProvIdx]) campaignObj.emailSenderProvider = String(campData[i][senderProvIdx]).trim();
-      if (senderEndIdx >= 0 && campData[i][senderEndIdx]) campaignObj.emailSenderEndpoint = String(campData[i][senderEndIdx]).trim();
+      if (senderEndIdx >= 0 && campData[i][senderEndIdx] !== '') campaignObj.emailSenderEndpoint = String(campData[i][senderEndIdx]).trim();
       if (senderNameIdx >= 0 && campData[i][senderNameIdx]) campaignObj.senderName = String(campData[i][senderNameIdx]).trim();
       if (senderTitleIdx >= 0 && campData[i][senderTitleIdx]) campaignObj.senderTitle = String(campData[i][senderTitleIdx]).trim();
       if (senderCoIdx >= 0 && campData[i][senderCoIdx]) campaignObj.senderCompany = String(campData[i][senderCoIdx]).trim();
@@ -485,20 +532,42 @@ function getSidebarInitialData() {
 
       c.id = cid;
       if (!c.name || c.name === cid) c.name = name;
-      c.aiProvider = String(pData[i][3] || c.aiProvider || 'GEMINI');
-      c.aiModel = String(pData[i][4] || c.aiModel || 'gemini-3.8-flash');
+      c.aiProvider = String(c.aiProvider || pData[i][3] || 'GEMINI');
+      c.aiModel = String(c.aiModel || pData[i][4] || 'gemini-3.8-flash');
       if (pData[i][5] && !c.titles) c.titles = String(pData[i][5]);
       if (pData[i][6] && !c.searchKeywords) c.searchKeywords = String(pData[i][6]);
       if (pData[i][7] && !c.campaignFocus) c.campaignFocus = String(pData[i][7]);
-      c.evidencePeriodMonths = Number(pData[i][8]) || c.evidencePeriodMonths || 12;
-      c.researchDepth = String(pData[i][9] || c.researchDepth || 'Deep Persona');
-      c.minCompanyScore = Number(pData[i][25]) || c.minCompanyScore || 80;
-      c.minPersonaScore = Number(pData[i][26]) || c.minPersonaScore || 85;
-      c.minEmailPriorityScore = Number(pData[i][27]) || c.minEmailPriorityScore || 80;
+      c.evidencePeriodMonths = Number(c.evidencePeriodMonths || parseSafeCampaignNumeric_(pData[i][8])) || 12;
+      c.researchDepth = String(c.researchDepth || pData[i][9] || 'Deep Persona');
+      if (c.incEsgObligations === undefined && pData[i][10] !== '') c.incEsgObligations = String(pData[i][10]).toUpperCase() !== 'FALSE';
+      if (c.incEsgMaturity === undefined && pData[i][11] !== '') c.incEsgMaturity = String(pData[i][11]).toUpperCase() !== 'FALSE';
+      if (c.incSupplyChain === undefined && pData[i][12] !== '') c.incSupplyChain = String(pData[i][12]).toUpperCase() !== 'FALSE';
+      if (c.incScope3 === undefined && pData[i][13] !== '') c.incScope3 = String(pData[i][13]).toUpperCase() !== 'FALSE';
+      if (c.incDataChallenges === undefined && pData[i][14] !== '') c.incDataChallenges = String(pData[i][14]).toUpperCase() !== 'FALSE';
+      if (c.incDigital === undefined && pData[i][15] !== '') c.incDigital = String(pData[i][15]).toUpperCase() !== 'FALSE';
+      if (c.incEsgGovernance === undefined && pData[i][16] !== '') c.incEsgGovernance = String(pData[i][16]).toUpperCase() !== 'FALSE';
+      if (c.incTriggers === undefined && pData[i][17] !== '') c.incTriggers = String(pData[i][17]).toUpperCase() !== 'FALSE';
+      if (c.incEvaluater === undefined && pData[i][18] !== '') c.incEvaluater = String(pData[i][18]).toUpperCase() !== 'FALSE';
+      if (!c.weightEsgReporting && pData[i][19]) c.weightEsgReporting = String(pData[i][19]);
+      if (!c.weightSupplyChain && pData[i][20]) c.weightSupplyChain = String(pData[i][20]);
+      if (!c.weightDataChallenges && pData[i][21]) c.weightDataChallenges = String(pData[i][21]);
+      if (!c.weightDigital && pData[i][22]) c.weightDigital = String(pData[i][22]);
+      if (!c.weightTriggers && pData[i][23]) c.weightTriggers = String(pData[i][23]);
+      if (!c.weightEvaluaterFit && pData[i][24]) c.weightEvaluaterFit = String(pData[i][24]);
+      c.minCompanyScore = Number(c.minCompanyScore || parseSafeCampaignNumeric_(pData[i][25])) || 80;
+      c.minPersonaScore = Number(c.minPersonaScore || parseSafeCampaignNumeric_(pData[i][26])) || 85;
+      c.minEmailPriorityScore = Number(c.minEmailPriorityScore || parseSafeCampaignNumeric_(pData[i][27])) || 80;
+      if (c.humanApprovalRequired === undefined && pData[i][28] !== '') c.humanApprovalRequired = String(pData[i][28]).toUpperCase() !== 'FALSE';
+      if (c.autoSendEnabled === undefined && pData[i][29] !== '') c.autoSendEnabled = String(pData[i][29]).toUpperCase() === 'TRUE';
+      if (!c.weightEmailCompanyScore && pData[i][30]) c.weightEmailCompanyScore = String(pData[i][30]);
+      if (!c.weightEmailPersonaFit && pData[i][31]) c.weightEmailPersonaFit = String(pData[i][31]);
+      if (!c.weightEmailBuyingSignal && pData[i][32]) c.weightEmailBuyingSignal = String(pData[i][32]);
       if (pData[i][33] && !c.customBusinessNeeds) c.customBusinessNeeds = String(pData[i][33]);
-      c.limit = Number(pData[i][34]) || c.limit || 5;
-      c.emailVerifier = String(pData[i][35] || c.emailVerifier || 'ZeroBounce');
-      c.emailSenderProvider = String(pData[i][37] || c.emailSenderProvider || 'Workspace Gmail (Drafts Only)');
+      c.limit = Number(c.limit || parseSafeCampaignNumeric_(pData[i][34])) || 5;
+      c.emailVerifier = String(c.emailVerifier || pData[i][35] || 'ZeroBounce');
+      if (pData[i][36] && !c.emailEndpoint) c.emailEndpoint = String(pData[i][36]);
+      c.emailSenderProvider = String(c.emailSenderProvider || pData[i][37] || 'Workspace Gmail (Drafts Only)');
+      if (pData[i][38] && !c.emailSenderEndpoint) c.emailSenderEndpoint = String(pData[i][38]);
     }
   }
 
@@ -526,8 +595,9 @@ function getAvailableCampaignsList() {
 }
 
 /**
- * Activates a selected campaign: updates configuration, updates Dashboard,
- * and applies native view filters across all operational tabs (including Company Database).
+ * Activates a selected campaign: reads full configuration from all 28 Campaigns
+ * columns + Persona Mapper Settings, updates Campaign Configuration + Dashboard
+ * WITHOUT overwriting existing Campaigns/Persona Mapper Settings rows, and applies filters.
  */
 function selectAndActivateCampaign(cid) {
   if (!cid) return { success: false, message: 'No Campaign ID provided.' };
@@ -535,34 +605,10 @@ function selectAndActivateCampaign(cid) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return { success: false, message: 'Spreadsheet not accessible.' };
 
-  let config = { id: cid, name: cid };
-  const campSheet = ss.getSheetByName('Campaigns');
-  if (campSheet && campSheet.getLastRow() > 1) {
-    const campData = campSheet.getDataRange().getValues();
-    const headers = campData[0].map(h => normalizeStudioKey(h));
-    const idCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
-    const nameCol = headers.indexOf('CAMPAIGNNAME') >= 0 ? headers.indexOf('CAMPAIGNNAME') : 1;
-    const deptCol = headers.indexOf('DEPARTMENT');
-    const statusCol = headers.indexOf('STATUS') >= 0 ? headers.indexOf('STATUS') : 3;
-    const jsonCol = headers.indexOf('CAMPAIGNCONFIGJSON');
-
-    for (let r = 1; r < campData.length; r++) {
-      if (String(campData[r][idCol] || '').trim() === cid) {
-        config.name = String(campData[r][nameCol] || cid).trim();
-        if (deptCol >= 0) config.department = String(campData[r][deptCol] || '').trim();
-        if (statusCol >= 0) config.status = String(campData[r][statusCol] || '').trim();
-        if (jsonCol >= 0 && campData[r][jsonCol]) {
-          try {
-            const parsed = JSON.parse(campData[r][jsonCol]);
-            if (parsed && typeof parsed === 'object') {
-              config = Object.assign(config, parsed);
-            }
-          } catch (e) {}
-        }
-        break;
-      }
-    }
-  }
+  const sidebarData = getSidebarInitialData();
+  const config = (sidebarData.configsMap && sidebarData.configsMap[cid])
+    ? Object.assign({}, sidebarData.configsMap[cid])
+    : { id: cid, name: cid };
 
   studioDirectSaveCampaignPipeline(config, true);
   filterOperationalSheetsByCampaign_(cid);
@@ -577,8 +623,9 @@ function selectAndActivateCampaign(cid) {
 
 /**
  * Direct Campaign Pipeline Saver (LOCKED 38 PARAMETERS SCHEMA):
- * Preserves the exact 38 parameter rows in Campaign Configuration without shifting rows.
- * Automatically updates Dashboard and filters operational sheets.
+ * Preserves the exact 38 parameter rows in Campaign Configuration without erasing validations.
+ * Honors isActivationOnly so switching campaigns never overwrites saved rows in
+ * Campaigns or Persona Mapper Settings.
  */
 function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (!payload || !payload.id) {
@@ -648,7 +695,10 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     ['AUTO_SEND_ENABLED', payload.autoSendEnabled === true ? 'TRUE' : 'FALSE', 'Auto-send emails immediately upon approval']
   ];
 
-  configSheet.clear();
+  const currentConfigRows = configSheet.getLastRow();
+  if (currentConfigRows > 0) {
+    configSheet.getRange(1, 1, Math.max(currentConfigRows, configRows.length), 3).clearContent();
+  }
   configSheet.getRange(1, 1, configRows.length, 3).setValues(configRows);
   configSheet.getRange(1, 1, 1, 3)
     .setFontWeight('bold')
@@ -685,39 +735,44 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     if (!cFound) cTargetRow = cLast + 1;
   }
 
-  const campMasterRow = [
-    campId,
-    campName,
-    payload.department || 'ESG Advisory',
-    status,
-    payload.country || '',
-    payload.industry || '',
-    payload.size || '',
-    Number(payload.limit) || 5,
-    payload.researchDepth || 'Deep Persona',
-    Number(payload.evidencePeriodMonths) || 12,
-    Number(payload.minCompanyScore) || 80,
-    Number(payload.minPersonaScore) || 85,
-    Number(payload.minEmailPriorityScore) || 80,
-    payload.titles || '',
-    payload.campaignFocus || '',
-    payload.searchKeywords || '',
-    payload.customBusinessNeeds || '',
-    payload.aiProvider || 'GEMINI',
-    payload.aiModel || 'gemini-3.8-flash',
-    payload.emailVerifier || 'ZeroBounce',
-    payload.emailEndpoint || '',
-    payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)',
-    payload.emailSenderEndpoint || '',
-    payload.senderName || '',
-    payload.senderTitle || '',
-    payload.senderCompany || '',
-    JSON.stringify(payload),
-    new Date().toLocaleString()
-  ];
+  if (!isActivationOnly || !cFound) {
+    const campMasterRow = [
+      campId,
+      campName,
+      payload.department || 'ESG Advisory',
+      status,
+      payload.country || '',
+      payload.industry || '',
+      payload.size || '',
+      Number(payload.limit) || 5,
+      payload.researchDepth || 'Deep Persona',
+      Number(payload.evidencePeriodMonths) || 12,
+      Number(payload.minCompanyScore) || 80,
+      Number(payload.minPersonaScore) || 85,
+      Number(payload.minEmailPriorityScore) || 80,
+      payload.titles || '',
+      payload.campaignFocus || '',
+      payload.searchKeywords || '',
+      payload.customBusinessNeeds || '',
+      payload.aiProvider || 'GEMINI',
+      payload.aiModel || 'gemini-3.8-flash',
+      payload.emailVerifier || 'ZeroBounce',
+      payload.emailEndpoint || '',
+      payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)',
+      payload.emailSenderEndpoint || '',
+      payload.senderName || '',
+      payload.senderTitle || '',
+      payload.senderCompany || '',
+      JSON.stringify(payload),
+      new Date().toLocaleString()
+    ];
 
-  campSheet.getRange(cTargetRow, 1, 1, campMasterRow.length).setValues([campMasterRow]);
-  SpreadsheetApp.flush();
+    // Enforce plain integer format on Limit/Period/Score columns so Sheets doesn't treat 80/85 as 1900 dates
+    campSheet.getRange(cTargetRow, 8).setNumberFormat('0');
+    campSheet.getRange(cTargetRow, 10, 1, 4).setNumberFormat('0');
+    campSheet.getRange(cTargetRow, 1, 1, campMasterRow.length).setValues([campMasterRow]);
+    SpreadsheetApp.flush();
+  }
 
   let pSheet = findPersonaMapperSettingsSheet(ss);
   if (!pSheet) pSheet = ss.insertSheet('Persona Mapper Settings');
@@ -730,48 +785,6 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
       .setBackground('#e8f0fe');
     pSheet.setFrozenRows(1);
   }
-
-  const pRow = [
-    campId,
-    campName,
-    'TRUE',
-    payload.aiProvider || 'GEMINI',
-    payload.aiModel || 'gemini-3.8-flash',
-    payload.titles || '',
-    payload.searchKeywords || '',
-    payload.campaignFocus || '',
-    Number(payload.evidencePeriodMonths) || 12,
-    payload.researchDepth || 'Deep Persona',
-    payload.incEsgObligations !== false ? 'TRUE' : 'FALSE',
-    payload.incEsgMaturity !== false ? 'TRUE' : 'FALSE',
-    payload.incSupplyChain !== false ? 'TRUE' : 'FALSE',
-    payload.incScope3 !== false ? 'TRUE' : 'FALSE',
-    payload.incDataChallenges !== false ? 'TRUE' : 'FALSE',
-    payload.incDigital !== false ? 'TRUE' : 'FALSE',
-    payload.incEsgGovernance !== false ? 'TRUE' : 'FALSE',
-    payload.incTriggers !== false ? 'TRUE' : 'FALSE',
-    payload.incEvaluater !== false ? 'TRUE' : 'FALSE',
-    payload.weightEsgReporting || '20%',
-    payload.weightSupplyChain || '15%',
-    payload.weightDataChallenges || '15%',
-    payload.weightDigital || '15%',
-    payload.weightTriggers || '20%',
-    payload.weightEvaluaterFit || '15%',
-    Number(payload.minCompanyScore) || 80,
-    Number(payload.minPersonaScore) || 85,
-    Number(payload.minEmailPriorityScore) || 80,
-    payload.humanApprovalRequired !== false ? 'TRUE' : 'FALSE',
-    payload.autoSendEnabled === true ? 'TRUE' : 'FALSE',
-    payload.weightEmailCompanyScore || '40%',
-    payload.weightEmailPersonaFit || '35%',
-    payload.weightEmailBuyingSignal || '25%',
-    payload.customBusinessNeeds || '',
-    Number(payload.limit) || 5,
-    payload.emailVerifier || 'ZeroBounce',
-    payload.emailEndpoint || '',
-    payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)',
-    payload.emailSenderEndpoint || ''
-  ];
 
   let pTargetRow = 2;
   const pLast = pSheet.getLastRow();
@@ -789,8 +802,54 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     if (!pFound) pTargetRow = pLast + 1;
   }
 
-  pSheet.getRange(pTargetRow, 1, 1, 39).setValues([pRow]);
-  SpreadsheetApp.flush();
+  if (!isActivationOnly || !pFound) {
+    const pRow = [
+      campId,
+      campName,
+      'TRUE',
+      payload.aiProvider || 'GEMINI',
+      payload.aiModel || 'gemini-3.8-flash',
+      payload.titles || '',
+      payload.searchKeywords || '',
+      payload.campaignFocus || '',
+      Number(payload.evidencePeriodMonths) || 12,
+      payload.researchDepth || 'Deep Persona',
+      payload.incEsgObligations !== false ? 'TRUE' : 'FALSE',
+      payload.incEsgMaturity !== false ? 'TRUE' : 'FALSE',
+      payload.incSupplyChain !== false ? 'TRUE' : 'FALSE',
+      payload.incScope3 !== false ? 'TRUE' : 'FALSE',
+      payload.incDataChallenges !== false ? 'TRUE' : 'FALSE',
+      payload.incDigital !== false ? 'TRUE' : 'FALSE',
+      payload.incEsgGovernance !== false ? 'TRUE' : 'FALSE',
+      payload.incTriggers !== false ? 'TRUE' : 'FALSE',
+      payload.incEvaluater !== false ? 'TRUE' : 'FALSE',
+      payload.weightEsgReporting || '20%',
+      payload.weightSupplyChain || '15%',
+      payload.weightDataChallenges || '15%',
+      payload.weightDigital || '15%',
+      payload.weightTriggers || '20%',
+      payload.weightEvaluaterFit || '15%',
+      Number(payload.minCompanyScore) || 80,
+      Number(payload.minPersonaScore) || 85,
+      Number(payload.minEmailPriorityScore) || 80,
+      payload.humanApprovalRequired !== false ? 'TRUE' : 'FALSE',
+      payload.autoSendEnabled === true ? 'TRUE' : 'FALSE',
+      payload.weightEmailCompanyScore || '40%',
+      payload.weightEmailPersonaFit || '35%',
+      payload.weightEmailBuyingSignal || '25%',
+      payload.customBusinessNeeds || '',
+      Number(payload.limit) || 5,
+      payload.emailVerifier || 'ZeroBounce',
+      payload.emailEndpoint || '',
+      payload.emailSenderProvider || 'Workspace Gmail (Drafts Only)',
+      payload.emailSenderEndpoint || ''
+    ];
+
+    pSheet.getRange(pTargetRow, 26, 1, 3).setNumberFormat('0');
+    pSheet.getRange(pTargetRow, 35).setNumberFormat('0');
+    pSheet.getRange(pTargetRow, 1, 1, 39).setValues([pRow]);
+    SpreadsheetApp.flush();
+  }
 
   const dashboardPayload = Object.assign({}, payload, { status: status });
   updateDashboardForActiveCampaign(dashboardPayload);
@@ -882,7 +941,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   const compSheet = ss.getSheetByName('Company Intelligence');
   if (compSheet && compSheet.getLastRow() > 1) {
     const data = compSheet.getDataRange().getValues();
-    const headers = data[0].map(h => normalizeStudioKey(h));
+    const headers = data[0].map(function(h) { return normalizeStudioKey(h); });
     const campIdCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][campIdCol] || '').trim() === cid) discoveredCount++;
@@ -893,7 +952,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   const persSheet = ss.getSheetByName('Persona Leads');
   if (persSheet && persSheet.getLastRow() > 1) {
     const data = persSheet.getDataRange().getValues();
-    const headers = data[0].map(h => normalizeStudioKey(h));
+    const headers = data[0].map(function(h) { return normalizeStudioKey(h); });
     const campIdCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][campIdCol] || '').trim() === cid) personasCount++;
@@ -905,7 +964,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   const qSheet = ss.getSheetByName('Prospect Review Queue');
   if (qSheet && qSheet.getLastRow() > 1) {
     const data = qSheet.getDataRange().getValues();
-    const headers = data[0].map(h => normalizeStudioKey(h));
+    const headers = data[0].map(function(h) { return normalizeStudioKey(h); });
     const campIdCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
     const sendCol = headers.indexOf('SENDSTATUS') >= 0 ? headers.indexOf('SENDSTATUS') : 24;
     const compCol = headers.indexOf('COMPLIANCESTATUS') >= 0 ? headers.indexOf('COMPLIANCESTATUS') : 41;
@@ -914,7 +973,13 @@ function updateDashboardForActiveCampaign(payloadOrId) {
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][campIdCol] || '').trim() === cid) {
         const sendStatus = String(data[i][sendCol] || '').trim().toLowerCase();
-        if (sendStatus.includes('draft') || sendStatus.includes('sent') || sendStatus.includes('created')) {
+        const isValidOutreach = (
+          sendStatus === 'draft created' ||
+          sendStatus === 'draft created in gmail' ||
+          sendStatus === 'sent' ||
+          sendStatus === 'pushed to sequencer'
+        );
+        if (isValidOutreach) {
           draftsCount++;
         }
         const compStatus = String(data[i][compCol] || '').trim().toLowerCase();
@@ -929,11 +994,10 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   dashSheet.getRange('C1').setValue(campName);
   dashSheet.getRange('D1').setValue(status);
   dashSheet.getRange('B2').setValue(cid);
-  dashSheet.getRange('D3').setValue(nowTimestamp);
 
-  const lastRow = Math.min(dashSheet.getLastRow(), 20);
-  if (lastRow >= 4) {
-    const labels = dashSheet.getRange(4, 1, lastRow - 3, 1).getValues();
+  const kpiMaxRow = Math.min(dashSheet.getLastRow(), 15);
+  if (kpiMaxRow >= 4) {
+    const labels = dashSheet.getRange(4, 1, kpiMaxRow - 3, 1).getValues();
 
     for (let r = 0; r < labels.length; r++) {
       const rowNum = r + 4;
@@ -943,48 +1007,39 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         dashSheet.getRange(rowNum, 2).setValue(campName);
         dashSheet.getRange(rowNum, 3).setValue(status);
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label === 'CAMPAIGNID' || label === 'ACTIVECAMPAIGNID') {
+      } else if (label === 'CAMPAIGNID' || label === 'ACTIVECAMPAIGNID') {
         dashSheet.getRange(rowNum, 2).setValue(cid);
         dashSheet.getRange(rowNum, 3).setValue(cid.includes('PILOT') ? 'Pilot Mode' : 'Production Mode');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('OPERATINGDEPARTMENT') || label.includes('DEPARTMENT')) {
+      } else if (label.includes('OPERATINGDEPARTMENT') || label.includes('DEPARTMENT')) {
         dashSheet.getRange(rowNum, 2).setValue(dept);
         dashSheet.getRange(rowNum, 3).setValue('Active Owner');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('COMPANYDISCOVERYLIMIT') || label.includes('DISCOVERYLIMIT')) {
+      } else if (label.includes('COMPANYDISCOVERYLIMIT') || label.includes('DISCOVERYLIMIT')) {
         dashSheet.getRange(rowNum, 2).setValue(limitDisplay);
         dashSheet.getRange(rowNum, 3).setValue('Enforced Limit');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('DISCOVERED') && (label.includes('COMPAN') || label.includes('QUALIF'))) {
+      } else if (label.includes('DISCOVERED') && (label.includes('COMPAN') || label.includes('QUALIF'))) {
         dashSheet.getRange(rowNum, 2).setValue(discoveredCount);
         dashSheet.getRange(rowNum, 3).setValue(discoveredCount > 0 ? 'Discovery Complete' : 'Pending Discovery');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('PERSONALEADS') || label.includes('IDENTIFIEDLEAD')) {
+      } else if (label.includes('PERSONALEADS') || label.includes('IDENTIFIEDLEAD')) {
         dashSheet.getRange(rowNum, 2).setValue(personasCount);
         dashSheet.getRange(rowNum, 3).setValue(personasCount > 0 ? 'Mapping Complete' : 'Pending Mapping');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('GMAILOUTREACH') || label.includes('DRAFTSCREATED')) {
+      } else if (label.includes('GMAILOUTREACH') || label.includes('DRAFTSCREATED')) {
         dashSheet.getRange(rowNum, 2).setValue(draftsCount);
         dashSheet.getRange(rowNum, 3).setValue(draftsCount > 0 ? 'Ready in Gmail Drafts' : 'No Drafts Yet');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('SUPPRESSED') || label.includes('BLOCKED')) {
+      } else if (label.includes('SUPPRESSED') || label.includes('BLOCKED')) {
         dashSheet.getRange(rowNum, 2).setValue(suppressedCount);
         dashSheet.getRange(rowNum, 3).setValue('Suppression Active');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('EMAILDISPATCH') || label.includes('DISPATCHCHANNEL')) {
+      } else if (label.includes('EMAILDISPATCH') || label.includes('DISPATCHCHANNEL')) {
         dashSheet.getRange(rowNum, 2).setValue(dispatchChannel);
         dashSheet.getRange(rowNum, 3).setValue(draftsCount);
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      }
-      else if (label.includes('PRIMARYAIMODEL') || label.includes('AIMODELCONFIGURED')) {
+      } else if (label.includes('PRIMARYAIMODEL') || label.includes('AIMODELCONFIGURED')) {
         dashSheet.getRange(rowNum, 2).setValue(aiLabel);
         dashSheet.getRange(rowNum, 3).setValue(keyStatus);
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
@@ -992,7 +1047,10 @@ function updateDashboardForActiveCampaign(payloadOrId) {
     }
   }
 
-  if (dashSheet.getLastRow() >= 16) {
+  if (dashSheet.getLastRow() >= 13) {
+    if (!dashSheet.getRange('A16').getValue()) {
+      dashSheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
+    }
     const rollupHeaders = [
       'Campaign ID',
       'Campaign Name',
@@ -1063,7 +1121,6 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
       .setFontColor('#174ea6')
       .setBackground('#e8f0fe')
       .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
-    campaignColIdx = 10;
 
     const lastRow = sheet.getLastRow();
     if (lastRow >= 2) {
@@ -1080,6 +1137,7 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
 /**
  * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log) so
  * rows from other campaigns are hidden, displaying exclusively the active campaign.
+ * Automatically recreates filter ranges when new rows are added below prior filter boundaries.
  */
 function filterOperationalSheetsByCampaign_(activeCampaignId) {
   if (!activeCampaignId) return;
@@ -1097,7 +1155,7 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
     'API_Usage_Log'
   ];
 
-  targetSheetNames.forEach(targetName => {
+  targetSheetNames.forEach(function(targetName) {
     let sheet = ss.getSheetByName(targetName);
     if (!sheet) {
       const normTarget = targetName.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1142,13 +1200,23 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
 
     if (campaignColIndex === -1) return;
 
-    let filter = sheet.getFilter();
     const startRow = headerRow;
-    const numDataRows = sheet.getLastRow() - startRow;
+    const expectedLastRow = sheet.getLastRow();
+    const expectedLastCol = sheet.getLastColumn();
+    const numDataRows = expectedLastRow - startRow;
     if (numDataRows < 1) return;
 
+    let filter = sheet.getFilter();
+    if (filter) {
+      const fRange = filter.getRange();
+      if (fRange.getRow() !== startRow || fRange.getLastRow() < expectedLastRow || fRange.getLastColumn() < expectedLastCol) {
+        filter.remove();
+        filter = null;
+      }
+    }
+
     if (!filter) {
-      const filterRange = sheet.getRange(startRow, 1, numDataRows + 1, sheet.getLastColumn());
+      const filterRange = sheet.getRange(startRow, 1, numDataRows + 1, expectedLastCol);
       filter = filterRange.createFilter();
     }
 
@@ -1183,7 +1251,7 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
 function filterSheetsForActiveCampaignMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   let activeId = getStudioActiveCampaignId_();
-  
+
   const cfg = ss.getSheetByName('Campaign Configuration');
   if (cfg && cfg.getLastRow() > 1) {
     const cfgId = String(cfg.getRange(2, 2).getValue() || '').trim();
@@ -1193,7 +1261,7 @@ function filterSheetsForActiveCampaignMenu() {
   }
 
   filterOperationalSheetsByCampaign_(activeId);
-  
+
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
@@ -1237,19 +1305,19 @@ function executeMasterPersonaMapperSync() {
     campaignFocus: String(dict['CAMPAIGNFOCUS'] || ''),
     searchKeywords: String(dict['SEARCHKEYWORDS'] || ''),
     customBusinessNeeds: String(dict['CUSTOMBUSINESSNEEDS'] || ''),
-    aiProvider: String(dict['AIPROVIDER'] || 'GEMINI'),
+    aiProvider: String(dict['AIPROVIDER'] || dict['PRIMARYAIPROVIDER'] || 'GEMINI'),
     aiModel: String(dict['AIMODEL'] || 'gemini-3.8-flash'),
     emailVerifier: String(dict['EMAILVERIFICATIONPROVIDER'] || 'ZeroBounce'),
     emailEndpoint: String(dict['EMAILVERIFICATIONENDPOINT'] || ''),
-    emailSenderProvider: String(dict['EMAILSENDERPROVIDER'] || 'Workspace Gmail (Drafts Only)'),
-    emailSenderEndpoint: String(dict['EMAILVERIFICATIONENDPOINT'] || ''),
+    emailSenderProvider: String(dict['EMAILSENDERPROVIDER'] || dict['DISPATCHMODE'] || 'Workspace Gmail (Drafts Only)'),
+    emailSenderEndpoint: String(dict['EMAILSENDERENDPOINT'] || ''),
     senderName: String(dict['SENDERNAME'] || ''),
     senderTitle: String(dict['SENDERTITLE'] || ''),
     senderCompany: String(dict['SENDERCOMPANY'] || '')
   };
 
   const res = studioDirectSaveCampaignPipeline(payload);
-  
+
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
@@ -1288,6 +1356,7 @@ function runStudioSpreadsheetAudit() {
 
   const requiredTabs = [
     'Dashboard',
+    'API_Usage_Log',
     'Campaigns',
     'Company Intelligence',
     'Persona Leads',
@@ -1298,14 +1367,13 @@ function runStudioSpreadsheetAudit() {
     'Research Evidence',
     'Agent Settings',
     'Execution Logs',
-    'Lists & Settings',
-    'API_Usage_Log'
+    'Lists & Settings'
   ];
 
   const present = [];
   const missing = [];
 
-  requiredTabs.forEach(name => {
+  requiredTabs.forEach(function(name) {
     if (name === 'Persona Mapper Settings') {
       if (findPersonaMapperSettingsSheet(ss)) present.push('Persona Mapper Settings');
       else missing.push('Persona Mapper Settings');
@@ -1321,20 +1389,20 @@ function runStudioSpreadsheetAudit() {
 
   for (let k in scriptProps) {
     const uk = k.toUpperCase();
-    if (uk.includes('OPENAI') && scriptProps[k] && !scriptProps[k].includes('PASTE_')) {
+    if (uk.includes('OPENAI') && isStudioValidSecretValue_(scriptProps[k])) {
       detectedKeys.push('OpenAI (Project Settings)');
     }
-    if (uk.includes('GEMINI') && scriptProps[k] && !scriptProps[k].includes('PASTE_')) {
+    if (uk.includes('GEMINI') && isStudioValidSecretValue_(scriptProps[k])) {
       detectedKeys.push('Gemini (Project Settings)');
     }
   }
 
   for (let k in userProps) {
     const uk = k.toUpperCase();
-    if (uk.includes('OPENAI') && userProps[k] && !userProps[k].includes('PASTE_')) {
+    if (uk.includes('OPENAI') && isStudioValidSecretValue_(userProps[k])) {
       detectedKeys.push('OpenAI (User Properties)');
     }
-    if (uk.includes('GEMINI') && userProps[k] && !userProps[k].includes('PASTE_')) {
+    if (uk.includes('GEMINI') && isStudioValidSecretValue_(userProps[k])) {
       detectedKeys.push('Gemini (User Properties)');
     }
   }
@@ -1346,21 +1414,34 @@ function runStudioSpreadsheetAudit() {
       for (let j = 0; j < data[i].length; j++) {
         const val = String(data[i][j] || '').trim().toUpperCase();
         if (val === 'OPENAI_API_KEY') {
-          const keyVal = String(data[i][j + 1] || data[i][2] || '').trim();
-          if (keyVal && !keyVal.includes('PASTE_')) detectedKeys.push('OpenAI (Agent Settings)');
+          const keyVal = String(data[i][j + 1] !== undefined ? data[i][j + 1] : (data[i][2] || '')).trim();
+          if (isStudioValidSecretValue_(keyVal)) detectedKeys.push('OpenAI (Agent Settings)');
         }
         if (val === 'GEMINI_API_KEY') {
-          const keyVal = String(data[i][j + 1] || data[i][2] || '').trim();
-          if (keyVal && !keyVal.includes('PASTE_')) detectedKeys.push('Gemini (Agent Settings)');
+          const keyVal = String(data[i][j + 1] !== undefined ? data[i][j + 1] : (data[i][2] || '')).trim();
+          if (isStudioValidSecretValue_(keyVal)) detectedKeys.push('Gemini (Agent Settings)');
         }
       }
     }
   }
 
+  let dispatchChannel = 'Workspace Gmail (Drafts Only)';
+  const cfgSheet = ss.getSheetByName('Campaign Configuration');
+  if (cfgSheet && cfgSheet.getLastRow() > 1) {
+    const cfgData = cfgSheet.getDataRange().getValues();
+    for (let r = 1; r < cfgData.length; r++) {
+      const k = normalizeStudioKey(cfgData[r][0]);
+      if ((k === 'EMAILSENDERPROVIDER' || k === 'DISPATCHMODE') && cfgData[r][1]) {
+        dispatchChannel = String(cfgData[r][1]).trim();
+        break;
+      }
+    }
+  }
+
   const activeId = getStudioActiveCampaignId_();
-  let apiKeyInfo = 'Not Configured (Add key in Project Settings or Agent Settings)';
+  let apiKeyInfo = 'Not Configured (Add key in Project Settings > Script Properties)';
   if (detectedKeys.length > 0) {
-    apiKeyInfo = 'Connected: ' + detectedKeys.join(', ');
+    apiKeyInfo = 'Connected: ' + Array.from(new Set(detectedKeys)).join(', ');
   }
 
   let message = '📊 SPREADSHEET SYSTEM HEALTH CHECK:\n\n';
@@ -1373,7 +1454,7 @@ function runStudioSpreadsheetAudit() {
   }
 
   message += '• AI Engine Status: ' + apiKeyInfo + '\n';
-  message += '• Email Dispatch Channel: Workspace Gmail (Drafts Only)\n';
+  message += '• Email Dispatch Channel: ' + dispatchChannel + '\n';
   message += '• Suppression Engine: Active (checking Lists & Settings)\n';
   message += '• Human Review Queue: Operational\n\n';
   message += 'Your workspace is healthy and ready to run!';
@@ -1428,120 +1509,34 @@ function updateSelectedProspectStatus(statusText) {
     return;
   }
 
-  const user = Session.getActiveUser().getEmail() || 'Admin Reviewer';
+  const user = getSafeReviewerEmail_();
   const now = new Date().toLocaleString();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
 
-  sheet.getRange(row, 18).setValue(statusText);
-  sheet.getRange(row, 19).setValue(user);
-  sheet.getRange(row, 21).setValue(now);
-  sheet.getRange(row, 22).setValue(statusText);
+  function setCol(headerName, fallbackCol, val) {
+    const idx = headers.indexOf(headerName);
+    const col = idx >= 0 ? idx + 1 : fallbackCol;
+    sheet.getRange(row, col).setValue(val);
+  }
+
+  setCol('Review Status', 18, statusText);
+  setCol('Reviewer', 19, user);
+  setCol('Reviewed At', 21, now);
+  setCol('Human Approval Status', 22, statusText);
 
   if (statusText === 'Approved') {
-    sheet.getRange(row, 23).setValue(user);
-    sheet.getRange(row, 24).setValue(now);
+    setCol('Approved By', 23, user);
+    setCol('Approved At', 24, now);
+  } else if (statusText === 'Rejected') {
+    setCol('Queue Status', 41, 'Rejected');
+  } else if (statusText === 'Needs Review') {
+    setCol('Queue Status', 41, 'Ready for Review');
   }
 
+  SpreadsheetApp.flush();
   ss.toast('Row ' + row + ' updated to: ' + statusText, 'Status Updated', 3);
-}
-
-function createGmailDraftsForApprovedProspects() {
-  if (typeof triggerApprovedGmailDrafts === 'function') {
-    triggerApprovedGmailDrafts();
-  } else {
-    const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
-    if (!ss) return;
-    const queueSheet = ss.getSheetByName('Prospect Review Queue');
-    if (!queueSheet) {
-      let ui;
-      try {
-        ui = SpreadsheetApp.getUi();
-        ui.alert('Prospect Review Queue sheet not found.');
-      } catch (e) {
-        Logger.log('Prospect Review Queue sheet not found.');
-      }
-      return;
-    }
-
-    const data = queueSheet.getDataRange().getValues();
-    let draftCount = 0;
-
-    for (let i = 1; i < data.length; i++) {
-      const email = String(data[i][7] || '').trim();
-      const approval = String(data[i][21] || '').trim();
-      const sendStatus = String(data[i][24] || '').trim();
-      const subject = String(data[i][14] || '').trim();
-      const body = String(data[i][15] || '').trim();
-
-      if (approval.startsWith('Approved') && sendStatus !== 'Draft Created' && sendStatus !== 'Draft Created in Gmail' && sendStatus !== 'Sent' && email && subject && body) {
-        try {
-          GmailApp.createDraft(email, subject, body);
-          queueSheet.getRange(i + 1, 25).setValue('Draft Created in Gmail');
-          queueSheet.getRange(i + 1, 26).setValue(new Date().toLocaleString());
-          draftCount++;
-        } catch (err) {
-          queueSheet.getRange(i + 1, 27).setValue(err.message);
-        }
-      }
-    }
-
-    let ui;
-    try {
-      ui = SpreadsheetApp.getUi();
-      ui.alert('Drafts Created', 'Successfully generated ' + draftCount + ' draft(s) in Gmail Drafts.', ui.ButtonSet.OK);
-    } catch (e) {
-      Logger.log('Successfully generated ' + draftCount + ' draft(s) in Gmail Drafts.');
-    }
-  }
-}
-
-function sendApprovedOutreachEmails() {
-  let ui;
-  try {
-    ui = SpreadsheetApp.getUi();
-    const confirmation = ui.alert(
-      'Send Outreach Emails?',
-      'This will send real emails for all leads marked "Approved" in the Prospect Review Queue.\n\nAre you sure you want to proceed?',
-      ui.ButtonSet.YES_NO
-    );
-    if (confirmation !== ui.Button.YES) return;
-  } catch (e) {
-    Logger.log('Running outside UI context, proceeding with send pipeline.');
-  }
-
-  if (typeof sendApprovedEmailsPipeline === 'function') {
-    sendApprovedEmailsPipeline();
-  } else {
-    const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
-    if (!ss) return;
-    const queueSheet = ss.getSheetByName('Prospect Review Queue');
-    if (!queueSheet) {
-      if (ui) ui.alert('Prospect Review Queue sheet not found.');
-      return;
-    }
-
-    const data = queueSheet.getDataRange().getValues();
-    let sentCount = 0;
-
-    for (let i = 1; i < data.length; i++) {
-      const email = String(data[i][7] || '').trim();
-      const approval = String(data[i][21] || '').trim();
-      const sendStatus = String(data[i][24] || '').trim();
-      const subject = String(data[i][14] || '').trim();
-      const body = String(data[i][15] || '').trim();
-
-      if (approval.startsWith('Approved') && sendStatus !== 'Sent' && email && subject && body) {
-        try {
-          GmailApp.sendEmail(email, subject, body);
-          queueSheet.getRange(i + 1, 25).setValue('Sent');
-          queueSheet.getRange(i + 1, 26).setValue(new Date().toLocaleString());
-          sentCount++;
-        } catch (err) {
-          queueSheet.getRange(i + 1, 27).setValue(err.message);
-        }
-      }
-    }
-    if (ui) ui.alert('Outreach Complete', 'Successfully dispatched ' + sentCount + ' live emails.', ui.ButtonSet.OK);
-  }
 }
 
 function triggerPilotRun() {

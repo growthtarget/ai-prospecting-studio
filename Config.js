@@ -6,8 +6,8 @@
  * File: Config.gs / Config.js
  * 
  * Provides frozen master settings, API property keys, model designations,
- * pricing rates, budget guardrails, and canonical header schemas across 
- * all project tabs.
+ * pricing rates, budget guardrails, and canonical header schemas across
+ * all 13 project tabs.
  * ============================================================================
  */
 
@@ -42,12 +42,19 @@ const APP_CONFIG = Object.freeze({
       'NeverBounce':      { costPerUnit: 0.008 }
     }
   },
-  
-  // Confirmed Tab Schemas (12 Operational + 1 Usage Log = 13 Total Tabs)
+
+  // Confirmed Tab Schemas (Exact 13-Tab Order)
   sheetDefinitions: [
     {
       name: 'Dashboard',
-      headers: ['Campaign ID', 'Campaign Name', 'Run Status', 'Companies Found', 'Qualified', 'Need Review', 'Last Run']
+      headers: ['Campaign ID', 'Campaign Name', 'Department', 'Status', 'Companies Found', 'Gmail Drafts', 'Last Run']
+    },
+    {
+      name: 'API_Usage_Log',
+      headers: [
+        'Timestamp', 'Campaign ID', 'Service Name', 'Operation', 'HTTP Status',
+        'Input Tokens / Units', 'Output Tokens', 'Est. Cost ($)', 'Status', 'Details / Error'
+      ]
     },
     {
       name: 'Campaigns',
@@ -142,7 +149,7 @@ const APP_CONFIG = Object.freeze({
     },
     {
       name: 'Agent Settings',
-      headers: ['Setting name', 'Value', 'Description']
+      headers: ['Category', 'Setting Key', 'Value', 'Status / Description']
     },
     {
       name: 'Execution Logs',
@@ -151,13 +158,6 @@ const APP_CONFIG = Object.freeze({
     {
       name: 'Lists & Settings',
       headers: ['List name', 'Value', 'Active status']
-    },
-    {
-      name: 'API_Usage_Log',
-      headers: [
-        'Timestamp', 'Campaign ID', 'Service Name', 'Operation', 'HTTP Status',
-        'Input Tokens / Units', 'Output Tokens', 'Est. Cost ($)', 'Status', 'Details / Error'
-      ]
     }
   ]
 });

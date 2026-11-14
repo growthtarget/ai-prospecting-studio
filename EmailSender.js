@@ -10,7 +10,7 @@
  * 2. Campaign Isolation: Resolves sender profile and provider dynamically per prospect Campaign ID.
  * 3. Sender Identity Stamping: Attaches configured Sender Display Name to Gmail drafts and emails.
  * 4. Multi-Source Credential Resolution: Reads API keys from Script Properties, User Properties,
- *    or Tab 10 (Agent Settings: Category | Setting Key | Value | Status / Description).
+ *    or Agent Settings while rejecting protected placeholder labels.
  * 5. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
  * ============================================================================
  */
@@ -39,9 +39,7 @@ function processOutreachQueue_(forceDrafts) {
   let ui = null;
   try {
     ui = SpreadsheetApp.getUi();
-  } catch (e) {
-    // Running in headless or background context
-  }
+  } catch (e) {}
 
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!spreadsheet) {
@@ -86,26 +84,33 @@ function processOutreachQueue_(forceDrafts) {
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
     const email = String(row[emailCol] || '').trim();
+    const body = String(row[bodyCol] || '').trim();
     const humanAppr = String(row[humanApprCol] || '').trim().toLowerCase();
     const reviewStatus = String(row[reviewStatusCol] || '').trim().toLowerCase();
     const sendStatus = String(row[sendStatusCol] || '').trim().toLowerCase();
     const campaignId = String(row[campIdCol] || '').trim();
 
-    const isApproved = (humanAppr.startsWith('approved') || reviewStatus === 'approved for outreach');
+    const isRejected = (humanAppr.startsWith('rejected') || reviewStatus === 'rejected');
+    const isApproved = !isRejected && (
+      humanAppr.startsWith('approved') ||
+      reviewStatus === 'approved' ||
+      reviewStatus === 'approved for outreach'
+    );
     const isAlreadySent = (
-      sendStatus === 'sent' || 
-      sendStatus === 'draft created' || 
-      sendStatus === 'draft created in gmail' || 
-      sendStatus === 'pushed to sequencer'
+      sendStatus === 'sent' ||
+      sendStatus === 'draft created' ||
+      sendStatus === 'draft created in gmail' ||
+      sendStatus === 'pushed to sequencer' ||
+      sendStatus === 'suppressed - not sent'
     );
 
-    if (email && isApproved && !isAlreadySent) {
+    if (email && body && isApproved && !isAlreadySent) {
       queueToProcess.push({
         rowIndex: i + 2,
         campaignId: campaignId,
         email: email,
         subject: String(row[subjectCol] || 'Introduction'),
-        body: String(row[bodyCol] || ''),
+        body: body,
         leadName: String(row[leadNameCol] || ''),
         companyName: String(row[companyCol] || '')
       });
@@ -115,15 +120,14 @@ function processOutreachQueue_(forceDrafts) {
   if (queueToProcess.length === 0) {
     const msg = 'No approved prospects are pending outreach.\n\n' +
       'To approve a prospect:\n' +
-      '1. Set Human Approval Status to "Approved"\n' +
-      '2. Ensure Send Status is empty (not "Sent" or "Draft Created")\n' +
+      '1. Set Human Approval Status or Review Status to "Approved"\n' +
+      '2. Ensure Send Status is not already "Sent", "Draft Created in Gmail", or "Suppressed - Not Sent"\n' +
       '3. Ensure Business Email, Draft Subject, and Draft Email are filled.';
     if (ui) ui.alert('No Prospects Ready', msg, ui.ButtonSet.OK);
     else Logger.log(msg);
     return;
   }
 
-  // Pre-fetch unique campaign IDs in the batch
   const uniqueCampaigns = Array.from(new Set(queueToProcess.map(function(item) {
     return item.campaignId || 'DEFAULT';
   })));
@@ -141,12 +145,10 @@ function processOutreachQueue_(forceDrafts) {
     if (confirm !== ui.Button.YES) return;
   }
 
-  // In-memory cache to resolve campaign settings once per campaign ID
   const campaignSettingsCache = {};
   let successCount = 0;
   let failCount = 0;
-  const now = new Date();
-  const nowStr = now.toLocaleString();
+  const nowStr = new Date().toLocaleString();
 
   queueToProcess.forEach(function(item) {
     const cId = item.campaignId || 'DEFAULT';
@@ -155,15 +157,13 @@ function processOutreachQueue_(forceDrafts) {
     }
     const campaignConfig = campaignSettingsCache[cId];
 
-    // Determine provider for this specific prospect row
     const rawProvider = forceDrafts
       ? 'Workspace Gmail (Drafts Only)'
-      : String(campaignConfig.emailSenderProvider || 'Workspace Gmail (Direct Send)').trim();
+      : String(campaignConfig.emailSenderProvider || 'Workspace Gmail (Drafts Only)').trim();
 
     try {
-      const dispatchResult = dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet);
+      dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet);
 
-      // Write updated status matching SheetSetup.js canonical validation values
       let finalStatus = 'Sent';
       if (rawProvider.toLowerCase().indexOf('draft') >= 0) {
         finalStatus = 'Draft Created in Gmail';
@@ -176,8 +176,10 @@ function processOutreachQueue_(forceDrafts) {
         finalStatus = 'Pushed to Sequencer';
       }
 
-      sheet.getRange(item.rowIndex, sendStatusCol + 1).setValue(finalStatus);
-      if (sentAtCol >= 0) sheet.getRange(item.rowIndex, sentAtCol + 1).setValue(nowStr);
+      if (sendStatusCol >= 0) sheet.getRange(item.rowIndex, sendStatusCol + 1).setValue(finalStatus);
+      if (sentAtCol >= 0 && (finalStatus === 'Sent' || finalStatus === 'Pushed to Sequencer')) {
+        sheet.getRange(item.rowIndex, sentAtCol + 1).setValue(nowStr);
+      }
       if (sendErrorCol >= 0) sheet.getRange(item.rowIndex, sendErrorCol + 1).setValue('');
       successCount++;
     } catch (err) {
@@ -189,6 +191,14 @@ function processOutreachQueue_(forceDrafts) {
   });
 
   SpreadsheetApp.flush();
+
+  if (typeof updateDashboardForActiveCampaign === 'function' && typeof getStudioActiveCampaignId_ === 'function') {
+    try {
+      updateDashboardForActiveCampaign(getStudioActiveCampaignId_());
+    } catch (dashErr) {
+      Logger.log('Dashboard refresh notice: ' + dashErr.message);
+    }
+  }
 
   const completionMsg = 'Outreach Execution Completed!\n\n' +
     '• Successfully Processed: ' + successCount + '\n' +
@@ -231,10 +241,10 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
   if (p.indexOf('smartlead') >= 0) {
     const apiKey = getSenderApiKey_('SMARTLEAD_API_KEY', spreadsheet);
     const campaignId = String(config.emailSenderEndpoint || config['Smartlead Campaign ID'] || '').trim();
-    if (!apiKey) throw new Error('SMARTLEAD_API_KEY not found in Project Settings or Agent Settings.');
+    if (!apiKey) throw new Error('SMARTLEAD_API_KEY not found in Project Settings > Script Properties.');
     if (!campaignId) throw new Error('Smartlead Campaign ID is missing in Email Sender Endpoint.');
 
-    const url = 'https://server.smartlead.ai/api/v1/campaigns/' + encodeURIComponent(campaignId) + '/leads?api_key=' + apiKey;
+    const url = 'https://server.smartlead.ai/api/v1/campaigns/' + encodeURIComponent(campaignId) + '/leads?api_key=' + encodeURIComponent(apiKey);
     const nameParts = (item.leadName || '').trim().split(' ');
     const firstName = nameParts[0] || '';
     const lastName = nameParts.slice(1).join(' ') || '';
@@ -270,7 +280,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
   if (p.indexOf('instantly') >= 0) {
     const apiKey = getSenderApiKey_('INSTANTLY_API_KEY', spreadsheet);
     const campaignId = String(config.emailSenderEndpoint || config['Instantly Campaign ID'] || '').trim();
-    if (!apiKey) throw new Error('INSTANTLY_API_KEY not found in Project Settings or Agent Settings.');
+    if (!apiKey) throw new Error('INSTANTLY_API_KEY not found in Project Settings > Script Properties.');
     if (!campaignId) throw new Error('Instantly Campaign ID is missing in Email Sender Endpoint.');
 
     const url = 'https://api.instantly.ai/api/v1/lead/add';
@@ -352,16 +362,19 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
 function getCampaignSenderSettings_(spreadsheet, campaignId) {
   const settings = {
     campaignId: campaignId,
-    emailSenderProvider: 'Workspace Gmail (Drafts Only)',
+    emailSenderProvider: '',
     emailSenderEndpoint: '',
     senderName: '',
     senderTitle: '',
     senderCompany: ''
   };
 
-  if (!spreadsheet || !campaignId) return settings;
+  if (!spreadsheet || !campaignId) {
+    settings.emailSenderProvider = 'Workspace Gmail (Drafts Only)';
+    return settings;
+  }
 
-  // 1. Try reading from Campaigns tab (Locked 28 columns)
+  // 1. Read from Campaigns tab (Locked 28 columns)
   const campSheet = spreadsheet.getSheetByName('Campaigns');
   if (campSheet && campSheet.getLastRow() > 1) {
     const campData = campSheet.getDataRange().getValues();
@@ -379,7 +392,6 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
 
     for (let r = 1; r < campData.length; r++) {
       if (String(campData[r][idIdx] || '').trim().toLowerCase() === campaignId.toLowerCase()) {
-        // Read JSON backup if present
         if (jsonIdx >= 0 && campData[r][jsonIdx]) {
           try {
             const parsed = JSON.parse(campData[r][jsonIdx]);
@@ -392,31 +404,30 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
             }
           } catch (e) {}
         }
-        // Direct column overrides
         if (provIdx >= 0 && campData[r][provIdx]) settings.emailSenderProvider = String(campData[r][provIdx]).trim();
         if (endIdx >= 0 && campData[r][endIdx]) settings.emailSenderEndpoint = String(campData[r][endIdx]).trim();
         if (nameIdx >= 0 && campData[r][nameIdx]) settings.senderName = String(campData[r][nameIdx]).trim();
         if (titleIdx >= 0 && campData[r][titleIdx]) settings.senderTitle = String(campData[r][titleIdx]).trim();
         if (compIdx >= 0 && campData[r][compIdx]) settings.senderCompany = String(campData[r][compIdx]).trim();
-        return settings;
-      }
-    }
-  }
-
-  // 2. Try reading from Persona Mapper Settings (Locked 39 columns)
-  const pSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
-  if (pSheet && pSheet.getLastRow() > 1) {
-    const pData = pSheet.getDataRange().getValues();
-    for (let r = 1; r < pData.length; r++) {
-      if (String(pData[r][0] || '').trim().toLowerCase() === campaignId.toLowerCase()) {
-        if (pData[r][37]) settings.emailSenderProvider = String(pData[r][37]).trim(); // Col 38
-        if (pData[r][38]) settings.emailSenderEndpoint = String(pData[r][38]).trim(); // Col 39
         break;
       }
     }
   }
 
-  // 3. Fallback to Campaign Configuration if matching
+  // 2. Fill missing fields from Persona Mapper Settings (Locked 39 columns)
+  const pSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
+  if (pSheet && pSheet.getLastRow() > 1) {
+    const pData = pSheet.getDataRange().getValues();
+    for (let r = 1; r < pData.length; r++) {
+      if (String(pData[r][0] || '').trim().toLowerCase() === campaignId.toLowerCase()) {
+        if (!settings.emailSenderProvider && pData[r][37]) settings.emailSenderProvider = String(pData[r][37]).trim();
+        if (!settings.emailSenderEndpoint && pData[r][38]) settings.emailSenderEndpoint = String(pData[r][38]).trim();
+        break;
+      }
+    }
+  }
+
+  // 3. Fill remaining blanks from Campaign Configuration if matching
   const configSheet = spreadsheet.getSheetByName('Campaign Configuration');
   if (configSheet && configSheet.getLastRow() > 1) {
     const cfgData = configSheet.getDataRange().getValues();
@@ -427,60 +438,66 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
     }
     const currentActiveId = String(cfgDict['CAMPAIGNID'] || '').trim();
     if (currentActiveId && currentActiveId.toLowerCase() === campaignId.toLowerCase()) {
-      if (cfgDict['EMAILSENDERPROVIDER']) settings.emailSenderProvider = String(cfgDict['EMAILSENDERPROVIDER']).trim();
-      if (cfgDict['EMAILSENDERENDPOINT']) settings.emailSenderEndpoint = String(cfgDict['EMAILSENDERENDPOINT']).trim();
-      if (cfgDict['SENDERNAME']) settings.senderName = String(cfgDict['SENDERNAME']).trim();
-      if (cfgDict['SENDERTITLE']) settings.senderTitle = String(cfgDict['SENDERTITLE']).trim();
-      if (cfgDict['SENDERCOMPANY']) settings.senderCompany = String(cfgDict['SENDERCOMPANY']).trim();
+      if (!settings.emailSenderProvider && (cfgDict['EMAILSENDERPROVIDER'] || cfgDict['DISPATCHMODE'])) {
+        settings.emailSenderProvider = String(cfgDict['EMAILSENDERPROVIDER'] || cfgDict['DISPATCHMODE']).trim();
+      }
+      if (!settings.emailSenderEndpoint && cfgDict['EMAILSENDERENDPOINT']) settings.emailSenderEndpoint = String(cfgDict['EMAILSENDERENDPOINT']).trim();
+      if (!settings.senderName && cfgDict['SENDERNAME']) settings.senderName = String(cfgDict['SENDERNAME']).trim();
+      if (!settings.senderTitle && cfgDict['SENDERTITLE']) settings.senderTitle = String(cfgDict['SENDERTITLE']).trim();
+      if (!settings.senderCompany && cfgDict['SENDERCOMPANY']) settings.senderCompany = String(cfgDict['SENDERCOMPANY']).trim();
     }
   }
 
+  if (!settings.emailSenderProvider) {
+    settings.emailSenderProvider = 'Workspace Gmail (Drafts Only)';
+  }
+
   return settings;
+}
+
+function isValidSenderSecretValue_(val) {
+  const s = String(val || '').trim();
+  if (!s) return false;
+  const upper = s.toUpperCase();
+  if (upper.indexOf('PASTE_') >= 0) return false;
+  if (upper.indexOf('CONFIGURED IN SCRIPT PROPERTIES') >= 0) return false;
+  if (upper.indexOf('PROTECTED') >= 0 && s.length < 35) return false;
+  return true;
 }
 
 /**
  * Universal API Key resolver that checks:
  * 1. Script Properties
  * 2. User Properties
- * 3. Tab 10 (Agent Settings: Category | Setting Key | Value | Status / Description)
- * 
- * @param {string} keyName The key identifier (e.g., 'SMARTLEAD_API_KEY', 'INSTANTLY_API_KEY')
- * @param {Spreadsheet} spreadsheet Active spreadsheet instance
- * @return {string} Configured API key string or empty string
+ * 3. Agent Settings (rejecting Protected placeholder labels)
  */
 function getSenderApiKey_(keyName, spreadsheet) {
   const targetKey = String(keyName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-  // 1. Check Script Properties
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
   for (let k in scriptProps) {
     if (k.toUpperCase().replace(/[^A-Z0-9]/g, '') === targetKey) {
-      const val = String(scriptProps[k] || '').trim();
-      if (val && !val.includes('PASTE_')) return val;
+      if (isValidSenderSecretValue_(scriptProps[k])) return String(scriptProps[k]).trim();
     }
   }
 
-  // 2. Check User Properties
   const userProps = PropertiesService.getUserProperties().getProperties();
   for (let k in userProps) {
     if (k.toUpperCase().replace(/[^A-Z0-9]/g, '') === targetKey) {
-      const val = String(userProps[k] || '').trim();
-      if (val && !val.includes('PASTE_')) return val;
+      if (isValidSenderSecretValue_(userProps[k])) return String(userProps[k]).trim();
     }
   }
 
-  // 3. Check Tab 10: Agent Settings (Category | Setting Key | Value | Status / Description)
   const ss = spreadsheet || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (ss) {
     const agentSheet = ss.getSheetByName('Agent Settings');
     if (agentSheet && agentSheet.getLastRow() > 1) {
       const data = agentSheet.getDataRange().getValues();
       for (let r = 1; r < data.length; r++) {
-        // Col B (index 1) is 'Setting Key', Col A (index 0) is 'Category', Col C (index 2) is 'Value'
         const settingKey = String(data[r][1] || data[r][0] || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (settingKey === targetKey || settingKey.includes(targetKey)) {
           const val = String(data[r][2] || '').trim();
-          if (val && !val.includes('PASTE_')) return val;
+          if (isValidSenderSecretValue_(val)) return val;
         }
       }
     }
