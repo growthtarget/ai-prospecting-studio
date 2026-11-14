@@ -1,16 +1,22 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * GOOGLE GEMINI AI PROVIDER (WITH GOOGLE SEARCH GROUNDING)
+ * GOOGLE GEMINI AI PROVIDER (WITH GOOGLE SEARCH GROUNDING & USAGE TRACKING)
  * ============================================================================
  * File: GeminiProvider.gs / GeminiProvider.js
  * 
  * Connects directly to Google Generative Language API (v1beta)
- * with real-time Google Search Grounding and structured JSON validation.
+ * with real-time Google Search Grounding, structured JSON validation,
+ * and automated API usage and cost tracking.
  * ============================================================================
  */
 
 function callGemini_(options) {
+  // 0. Pre-Flight Budget Hard Cap Check
+  if (typeof checkApiBudgetGuardrails_ === 'function') {
+    checkApiBudgetGuardrails_(options.campaignId);
+  }
+
   // Multi-Tier API Key Resolution
   let apiKey = PropertiesService.getScriptProperties().getProperty(
     (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.geminiApiKeyProperty) || 'GEMINI_API_KEY'
@@ -35,7 +41,6 @@ function callGemini_(options) {
   
   let model = options.model || defaultModel;
   
-  // Auto-upgrade legacy model names if passed from older campaign records
   if (model === 'gemini-2.5-flash' || model === 'gemini-1.5-flash' || model === 'gemini-2.0-flash') {
     model = 'gemini-3.8-flash';
   }
@@ -64,22 +69,73 @@ function callGemini_(options) {
     payload.generationConfig.responseMimeType = 'application/json';
   }
 
-  // 4. Send Server-Side Request via UrlFetchApp
-  const response = UrlFetchApp.fetch(url, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  });
-
-  const statusCode = response.getResponseCode();
-  const rawText = response.getContentText();
+  // 4. Send Server-Side Request via UrlFetchApp with Usage Logging & Error Catching
+  let response, statusCode, rawText;
+  try {
+    response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    statusCode = response.getResponseCode();
+    rawText = response.getContentText();
+  } catch (netErr) {
+    if (typeof logApiUsage_ === 'function') {
+      logApiUsage_({
+        campaignId: options.campaignId,
+        serviceName: 'GEMINI',
+        operation: options.operation || 'CompanyDiscovery',
+        httpStatus: 500,
+        inputUnits: 0,
+        outputUnits: 0,
+        status: 'ERROR',
+        details: netErr.toString(),
+        modelName: model
+      });
+    }
+    throw new Error('Gemini Network Error: ' + netErr.toString());
+  }
 
   if (statusCode < 200 || statusCode >= 300) {
+    if (typeof logApiUsage_ === 'function') {
+      logApiUsage_({
+        campaignId: options.campaignId,
+        serviceName: 'GEMINI',
+        operation: options.operation || 'CompanyDiscovery',
+        httpStatus: statusCode,
+        inputUnits: 0,
+        outputUnits: 0,
+        status: 'ERROR',
+        details: rawText.slice(0, 300),
+        modelName: model
+      });
+    }
     throw new Error('Gemini API Error (' + statusCode + '): ' + rawText);
   }
 
   const body = JSON.parse(rawText);
+
+  // Extract Token Usage Metadata
+  const usage = body.usageMetadata || {};
+  const promptTokens = usage.promptTokenCount || 0;
+  const candidateTokens = usage.candidatesTokenCount || 0;
+
+  // Log Successful API Call
+  if (typeof logApiUsage_ === 'function') {
+    logApiUsage_({
+      campaignId: options.campaignId,
+      serviceName: 'GEMINI',
+      operation: options.operation || 'CompanyDiscovery',
+      httpStatus: statusCode,
+      inputUnits: promptTokens,
+      outputUnits: candidateTokens,
+      status: 'SUCCESS',
+      details: 'Prompt tokens: ' + promptTokens + ', Candidate tokens: ' + candidateTokens,
+      modelName: model
+    });
+  }
+
   const candidate = body.candidates && body.candidates[0];
   
   if (!candidate || !candidate.content || !candidate.content.parts) {
@@ -88,12 +144,10 @@ function callGemini_(options) {
 
   let textOutput = candidate.content.parts.map(function(p) { return p.text || ''; }).join('').trim();
   
-  // Clean markdown code blocks if model wrapped JSON in ```json ... ```
   if (textOutput.indexOf('```') >= 0) {
     textOutput = textOutput.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
   }
 
-  // 5. Extract Live Google Search Citations
   const citations = [];
   if (candidate.groundingMetadata) {
     const chunks = candidate.groundingMetadata.groundingChunks || [];
@@ -108,13 +162,11 @@ function callGemini_(options) {
     }
   }
 
-  // Parse JSON safely if requested
   let parsedJson = null;
   if (options.json) {
     try {
       parsedJson = JSON.parse(textOutput);
     } catch (e) {
-      // Regex recovery if text wrapped JSON
       const jsonMatch = textOutput.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {

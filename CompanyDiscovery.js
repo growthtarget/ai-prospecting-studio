@@ -14,12 +14,13 @@
  *    AND populates all 25 columns of "Company Intelligence".
  * 4. Scenario B Deduplication: Isolates deduplication by Campaign ID.
  * 5. Grounding Evidence Logging: Stores audit citation URLs in Tab 9 "Research Evidence" (9 canonical columns).
- * 6. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
+ * 6. API Usage Tracking: Passes campaign ID and operation context to ApiTracker.
+ * 7. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
  * ============================================================================
  */
 
 /**
- * Called directly from the Sidebar Control Panel (No blocking popups; returns results to sidebar)
+ * Called directly from the Sidebar Control Panel (Resolves active campaign if parameter is blank)
  */
 function runCompanyDiscoveryFromSidebar(campaignId) {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -30,9 +31,12 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
   }
 
   try {
-    const config = getCampaignConfigurationRecord_(spreadsheet, campaignId);
+    // Resolve active campaign ID robustly if blank
+    const activeCampaignId = campaignId || (typeof getStudioActiveCampaignId_ === 'function' ? getStudioActiveCampaignId_() : 'CMP-005');
+    const config = getCampaignConfigurationRecord_(spreadsheet, activeCampaignId);
+    
     if (!config || !config.id) {
-      return { success: false, message: 'No configuration found for Campaign ID: ' + (campaignId || 'Active') + ' in "Campaign Configuration".' };
+      return { success: false, message: 'No configuration found for Campaign ID: ' + activeCampaignId + ' in "Campaign Configuration".' };
     }
 
     const companyLimit = Math.min(25, Math.max(1, Number(config.companyLimit || 5)));
@@ -45,11 +49,13 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
     Logger.log('Launching Agent 1 with ' + providerLabel + ' for campaign: ' + config.id);
 
     const aiResponse = executeAiDiscoveryCall_({
+      campaignId: config.id, // Explicitly pass active campaign ID for API tracking
       provider: provider,
       model: model,
       prompt: prompt,
       enableWebSearch: true,
-      json: true
+      json: true,
+      operation: 'CompanyDiscovery'
     });
 
     const discoveredCompanies = (aiResponse && aiResponse.json && Array.isArray(aiResponse.json.companies)) 
@@ -100,13 +106,12 @@ function runCompanyDiscoveryForSelectedCampaign() {
   }
 
   try {
-    const campaignId = getActiveCampaignId_(spreadsheet, ui);
-    if (!campaignId) return;
-
-    const config = getCampaignConfigurationRecord_(spreadsheet, campaignId);
+    const activeCampaignId = getActiveCampaignId_(spreadsheet, ui) || (typeof getStudioActiveCampaignId_ === 'function' ? getStudioActiveCampaignId_() : 'CMP-005');
+    const config = getCampaignConfigurationRecord_(spreadsheet, activeCampaignId);
+    
     if (!config || !config.id) {
-      if (ui) ui.alert('No configuration found for Campaign ID: ' + campaignId + ' in "Campaign Configuration".');
-      else Logger.log('No configuration found for Campaign ID: ' + campaignId);
+      if (ui) ui.alert('No configuration found for Campaign ID: ' + activeCampaignId + ' in "Campaign Configuration".');
+      else Logger.log('No configuration found for Campaign ID: ' + activeCampaignId);
       return;
     }
 
@@ -118,7 +123,7 @@ function runCompanyDiscoveryForSelectedCampaign() {
     if (ui) {
       ui.alert(
         'Starting Company Discovery (Agent 1)',
-        'Searching for up to ' + companyLimit + ' companies using ' + providerLabel + ':\n' +
+        'Searching for up to ' + companyLimit + ' companies using ' + providerLabel + ' (Campaign: ' + config.id + '):\n' +
         '• Department: ' + config.department + '\n' +
         '• Industry: ' + (config.industry || 'Any') + '\n' +
         '• Geography: ' + (config.country || 'Any') + '\n' +
@@ -130,11 +135,13 @@ function runCompanyDiscoveryForSelectedCampaign() {
 
     const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
     const aiResponse = executeAiDiscoveryCall_({
+      campaignId: config.id, // Explicitly pass active campaign ID for API tracking
       provider: provider,
       model: model,
       prompt: prompt,
       enableWebSearch: true,
-      json: true
+      json: true,
+      operation: 'CompanyDiscovery'
     });
 
     const discoveredCompanies = (aiResponse && aiResponse.json && Array.isArray(aiResponse.json.companies)) 
@@ -219,7 +226,7 @@ function buildCompanyDiscoveryPrompt_(config, limit) {
 }
 
 /**
- * Resilient AI Router supporting Script Properties (Project Settings) & Agent Settings
+ * Resilient AI Router supporting Script Properties & Agent Settings
  */
 function executeAiDiscoveryCall_(options) {
   if (typeof callAI === 'function') {
@@ -280,7 +287,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   if (!dbSheet) throw new Error('Sheet "Company Database" not found.');
   if (!intelSheet) throw new Error('Sheet "Company Intelligence" not found.');
 
-  // Guarantee Column J in Company Database is "Campaign ID"
   const lastCol = Math.max(dbSheet.getLastColumn(), 10);
   const currentDbHeaders = dbSheet.getRange(1, 1, 1, lastCol).getValues()[0];
   let hasCampaignCol = currentDbHeaders.some(h => String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') === 'campaignid');
@@ -293,7 +299,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
       .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
   }
 
-  // Ensure high-contrast headers on destination sheets
   [dbSheet, intelSheet, evidenceSheet].forEach(sh => {
     if (sh && sh.getLastColumn() > 0) {
       sh.getRange(1, 1, 1, sh.getLastColumn())
@@ -309,7 +314,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   const intelHeaders = intelSheet.getRange(1, 1, 1, intelSheet.getLastColumn()).getValues()[0];
   const dbHeaders = dbSheet.getRange(1, 1, 1, dbSheet.getLastColumn()).getValues()[0];
 
-  // Extract live search grounding metadata from Gemini/OpenAI
   const grounding = (typeof extractGroundingMetadata_ === 'function' && aiResponse)
     ? extractGroundingMetadata_(aiResponse)
     : { citationsByUrl: {}, searchQueries: [] };
@@ -329,7 +333,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     const website = String(item.website || '').trim();
     const domain = domainFromUrl_(website);
 
-    // Scenario B Deduplication: Deduplicates only within the CURRENT campaign run
     const isDuplicate = existingDbRecords.some(function(row) {
       const rowCampaign = String(row['Campaign ID'] || '').trim();
       const rowDomain = domainFromUrl_(row['Domain'] || row['Website'] || '');
@@ -347,7 +350,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     const score = Number(item.companyOpportunityScore || item.initialScore || 85);
     const status = score >= (config.minCompanyScore || 80) ? 'Qualified' : 'Disqualified';
 
-    // 1. Write to "Company Database" (Includes Column J: Campaign ID)
     const dbRecord = {
       'Company ID': companyId,
       'Campaign ID': campaignId,
@@ -362,7 +364,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     };
     dbSheet.appendRow(buildRowFromHeaders_(dbHeaders, dbRecord));
 
-    // 2. Write to "Company Intelligence" (All 25 Columns)
     const fitLabel = score >= 85 ? 'High' : (score >= 70 ? 'Medium' : 'Low');
 
     const intelRecord = {
@@ -394,7 +395,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     };
     intelSheet.appendRow(buildRowFromHeaders_(intelHeaders, intelRecord));
 
-    // 3. Write to Tab 9 "Research Evidence" (Exact 9 Canonical Columns)
     if (evidenceSheet && (item.sourceUrl || website)) {
       const evidenceUrl = String(item.sourceUrl || website).trim();
       const normUrl = typeof normalizeSourceUrl_ === 'function' ? normalizeSourceUrl_(evidenceUrl) : evidenceUrl.replace(/\/+$/, '');
@@ -403,15 +403,15 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
       const snippet = String(item.businessTriggers || item.solutionFit || item.businessSummary || companyName).trim();
 
       evidenceSheet.appendRow([
-        'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(), // Col A: Evidence ID
-        campaignId,                                             // Col B: Campaign ID
-        companyName,                                            // Col C: Entity Name
-        'Company',                                              // Col D: Entity Type
-        defaultSearchQuery,                                     // Col E: Search Query Used
-        evidenceUrl,                                            // Col F: Grounding Evidence URL
-        snippet,                                                // Col G: Extracted Snippet / Signal
-        verificationScore,                                      // Col H: Verification Score
-        now.toLocaleString()                                    // Col I: Date Captured
+        'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(),
+        campaignId,
+        companyName,
+        'Company',
+        defaultSearchQuery,
+        evidenceUrl,
+        snippet,
+        verificationScore,
+        now.toLocaleString()
       ]);
     }
 
@@ -421,9 +421,6 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   return addedCount;
 }
 
-/**
- * Resolves default model based on selected AI Provider
- */
 function resolveAiModel_(provider, configuredModel) {
   if (configuredModel && String(configuredModel).trim() !== '') {
     return String(configuredModel).trim();
@@ -431,15 +428,14 @@ function resolveAiModel_(provider, configuredModel) {
   return (provider === 'OPENAI') ? 'gpt-4o' : 'gemini-3.8-flash';
 }
 
-/**
- * Universal Configuration Loader: Reads from Campaign Configuration & Agent Settings with Key Normalization
- */
 function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
   const configSheet = spreadsheet.getSheetByName('Campaign Configuration');
   const agentSheet = spreadsheet.getSheetByName('Agent Settings');
 
+  const targetId = campaignId || (typeof getStudioActiveCampaignId_ === 'function' ? getStudioActiveCampaignId_() : 'CMP-005');
+
   const config = {
-    id: campaignId || 'CMP-005',
+    id: targetId,
     name: '',
     department: 'ESG Advisory',
     industry: 'Freight & Logistics, Manufacturing',
@@ -480,7 +476,6 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
     if (cleanKey === 'AIMODEL' || cleanKey === 'OPENAIMODEL' || cleanKey === 'GEMINIMODEL') config.aiModel = String(val).trim();
   }
 
-  // Load Model from Agent Settings if not specified
   if (agentSheet && agentSheet.getLastRow() > 1) {
     const agentData = agentSheet.getDataRange().getValues();
     for (let i = 1; i < agentData.length; i++) {
@@ -502,29 +497,22 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
   return config;
 }
 
-/**
- * Gets Active Campaign ID safely without throwing undefined exceptions.
- * Checks Dashboard B2, Campaign Configuration, active selection, or prompts.
- */
 function getActiveCampaignId_(spreadsheet, ui) {
   const ss = spreadsheet || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return 'CMP-005';
 
-  // 1. Try reading from Dashboard Cell B2
   const dashSheet = ss.getSheetByName('Dashboard');
   if (dashSheet) {
     const b2 = String(dashSheet.getRange('B2').getValue() || '').trim();
     if (b2 && b2 !== 'Select Campaign' && b2 !== 'No Active Campaign') return b2;
   }
 
-  // 2. Try reading from Campaign Configuration Row 2
   const configSheet = ss.getSheetByName('Campaign Configuration');
   if (configSheet && configSheet.getLastRow() > 1) {
     const cId = String(configSheet.getRange(2, 2).getValue() || '').trim();
     if (cId) return cId;
   }
 
-  // 3. Try checking active sheet selection safely
   try {
     const sheet = ss.getActiveSheet ? ss.getActiveSheet() : null;
     const allowed = ['Campaigns', 'Campaign Configuration', 'Company Database', 'Dashboard', 'Company Intelligence'];
@@ -538,11 +526,8 @@ function getActiveCampaignId_(spreadsheet, ui) {
         if (record['Campaign ID']) return String(record['Campaign ID']).trim();
       }
     }
-  } catch (e) {
-    // Ignore selection read errors in headless/sidebar contexts
-  }
+  } catch (e) {}
 
-  // 4. Fallback to UI prompt if ui is available
   if (ui && typeof ui.prompt === 'function') {
     try {
       const prompt = ui.prompt('Company Discovery', 'Enter the Campaign ID to discover companies for (e.g. CMP-005):', ui.ButtonSet.OK_CANCEL);
@@ -556,9 +541,6 @@ function getActiveCampaignId_(spreadsheet, ui) {
   return 'CMP-005';
 }
 
-/**
- * Updates timestamp in Campaigns tab
- */
 function updateCampaignDiscoveryCounts_(spreadsheet, campaignId) {
   const campSheet = spreadsheet.getSheetByName('Campaigns');
   if (!campSheet || campSheet.getLastRow() <= 1) return;
@@ -576,9 +558,6 @@ function updateCampaignDiscoveryCounts_(spreadsheet, campaignId) {
   }
 }
 
-/**
- * Helper: Normalizes URL to root domain
- */
 function domainFromUrl_(url) {
   if (!url) return '';
   let clean = String(url).trim().toLowerCase();
@@ -586,9 +565,6 @@ function domainFromUrl_(url) {
   return clean.split('/')[0].split('?')[0];
 }
 
-/**
- * Helper: Converts Sheet Rows to Objects
- */
 function getSheetRecords_(sheet) {
   if (!sheet || sheet.getLastRow() <= 1) return [];
   const data = sheet.getDataRange().getValues();
@@ -604,9 +580,6 @@ function getSheetRecords_(sheet) {
   return records;
 }
 
-/**
- * Helper: Maps Object to Array matching sheet header columns exactly
- */
 function buildRowFromHeaders_(sheetHeaders, dataObject) {
   return sheetHeaders.map(header => {
     const cleanHeader = String(header).trim();

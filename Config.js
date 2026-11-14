@@ -6,7 +6,8 @@
  * File: Config.gs / Config.js
  * 
  * Provides frozen master settings, API property keys, model designations,
- * and canonical header schemas across all 12 project tabs.
+ * pricing rates, budget guardrails, and canonical header schemas across 
+ * all project tabs.
  * ============================================================================
  */
 
@@ -22,8 +23,27 @@ const APP_CONFIG = Object.freeze({
   openAiChatCompletionsUrl: 'https://api.openai.com/v1/chat/completions',
   defaultEmailVerifier: 'ZeroBounce',
   defaultSenderMode: 'Workspace Gmail (Drafts Only)',
+
+  // API Financial & Guardrail Defaults (Configurable)
+  guardrails: {
+    defaultDailySpendCapUsd: 10.00,        // Max daily spend limit in USD before hard exit
+    defaultMinVerifierCredits: 500,        // Minimum email verification credits before email alert
+    // Standard Pricing Rates (per 1 Million tokens for LLMs, per credit for verifiers)
+    pricing: {
+      'gemini-3.8-flash': { inputPer1M: 0.075, outputPer1M: 0.30 },
+      'gemini-2.5-flash': { inputPer1M: 0.075, outputPer1M: 0.30 },
+      'gemini-2.0-flash': { inputPer1M: 0.10,  outputPer1M: 0.40 },
+      'gemini-1.5-pro':   { inputPer1M: 1.25,  outputPer1M: 5.00 },
+      'gpt-4o':           { inputPer1M: 2.50,  outputPer1M: 10.00 },
+      'gpt-4o-mini':      { inputPer1M: 0.15,  outputPer1M: 0.60 },
+      'o1-mini':          { inputPer1M: 1.10,  outputPer1M: 4.40 },
+      'ZeroBounce':       { costPerUnit: 0.007 },
+      'MillionVerifier':  { costPerUnit: 0.003 },
+      'NeverBounce':      { costPerUnit: 0.008 }
+    }
+  },
   
-  // 12 Confirmed Tab Schemas
+  // Confirmed Tab Schemas (12 Operational + 1 Usage Log = 13 Total Tabs)
   sheetDefinitions: [
     {
       name: 'Dashboard',
@@ -131,6 +151,13 @@ const APP_CONFIG = Object.freeze({
     {
       name: 'Lists & Settings',
       headers: ['List name', 'Value', 'Active status']
+    },
+    {
+      name: 'API_Usage_Log',
+      headers: [
+        'Timestamp', 'Campaign ID', 'Service Name', 'Operation', 'HTTP Status',
+        'Input Tokens / Units', 'Output Tokens', 'Est. Cost ($)', 'Status', 'Details / Error'
+      ]
     }
   ]
 });

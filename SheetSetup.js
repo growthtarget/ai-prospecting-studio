@@ -11,6 +11,7 @@
  * 3. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across tabs.
  * 4. Ensures 100% column schema consistency across the entire workbook.
  * 5. Pre-populates "Agent Settings" and dynamically refreshes Script Properties status.
+ * 6. Initializes and formats the new "API_Usage_Log" tracking tab.
  * ============================================================================
  */
 
@@ -38,8 +39,11 @@ function setupAllSheetsAndDropdowns() {
   // 7. Setup Agent Settings Tab with Structured Rows & Dynamic Key Status
   setupAgentSettingsTabDropdowns(ss);
 
+  // 8. Setup API Usage Log Tab
+  setupApiUsageLogTab(ss);
+
   SpreadsheetApp.flush();
-  ss.toast('All tabs formatted and dynamic dropdown menus applied successfully!', '✅ Setup Complete', 10);
+  ss.toast('All 13 tabs formatted and dynamic dropdown menus applied successfully!', '✅ Setup Complete', 10);
   Logger.log('>>> ALL TABS & DROPDOWNS CONFIGURED SUCCESSFULLY <<<');
 }
 
@@ -103,7 +107,6 @@ function setupCampaignConfigurationTab(ss) {
 
   sheet.getRange(2, 1, configRows.length, 3).setValues(configRows);
 
-  // Dynamic Parameter Dropdown Rules Definition (Key-Based)
   const dynamicRules = {
     'DEPARTMENT': ['Procurement', 'ESG Advisory', 'Enterprise Sales', 'Cybersecurity & IT', 'Operations & Compliance', 'Enterprise SaaS / IT', 'FinTech & Banking', 'HR & Talent Ops', 'Marketing', 'Executive Leadership'],
     'TARGET_COUNTRIES': ['United States & Canada', 'United States Only', 'Canada Only', 'Sweden, Norway, Denmark', 'United Kingdom & Europe', 'Global'],
@@ -235,7 +238,6 @@ function setupAgentSettingsTabDropdowns(ss) {
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   styleHeaderRow(sheet);
 
-  // Check existing Script Properties securely with alias tolerance
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
   
   function checkPropertyConfigured(primaryKey, aliases) {
@@ -260,7 +262,7 @@ function setupAgentSettingsTabDropdowns(ss) {
 
   const protectedMsg = 'Configured in Script Properties (Protected)';
 
-  // 10 Canonical Operational Settings Rows
+  // Operational Settings Rows (Including Budget Guardrails)
   const agentRows = [
     ['AI Routing', 'PRIMARY_AI_PROVIDER', 'GEMINI', 'Primary AI provider for discovery & persona mapping'],
     ['AI Models', 'GEMINI_MODEL', 'gemini-3.8-flash', 'Default Google Gemini model version'],
@@ -271,14 +273,14 @@ function setupAgentSettingsTabDropdowns(ss) {
     ['Email Verification', 'VERIFIER_PROVIDER', 'ZeroBounce', 'Default email verification vendor'],
     ['API Credentials', 'VERIFIER_API_KEY', hasVerifier ? protectedMsg : '', 'Email verifier API key (kept encrypted in Project Settings)'],
     ['Outreach Sequencers', 'SMARTLEAD_API_KEY', hasSmartlead ? protectedMsg : '', 'Smartlead sequencer API key (kept encrypted in Project Settings)'],
-    ['Outreach Sequencers', 'INSTANTLY_API_KEY', hasInstantly ? protectedMsg : '', 'Instantly sequencer API key (kept encrypted in Project Settings)']
+    ['Outreach Sequencers', 'INSTANTLY_API_KEY', hasInstantly ? protectedMsg : '', 'Instantly sequencer API key (kept encrypted in Project Settings)'],
+    ['Budget Guardrails', 'DAILY_SPEND_CAP_USD', '10.00', 'Maximum daily API spend limit in USD before hard exit'],
+    ['Budget Guardrails', 'MIN_VERIFIER_CREDITS', '500', 'Minimum email verification credits before email alert']
   ];
 
-  // If sheet is empty below header, write entire table
   if (sheet.getLastRow() <= 1) {
     sheet.getRange(2, 1, agentRows.length, 4).setValues(agentRows);
   } else {
-    // If rows already exist, refresh Column C for API Key status while preserving model selections
     const lastR = sheet.getLastRow();
     const existingData = sheet.getRange(2, 1, lastR - 1, 4).getValues();
 
@@ -299,7 +301,6 @@ function setupAgentSettingsTabDropdowns(ss) {
       }
     }
 
-    // Append any missing rows if table was incomplete
     const existingKeyList = existingData.map(function(r) {
       return String(r[1] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     });
@@ -311,18 +312,44 @@ function setupAgentSettingsTabDropdowns(ss) {
     });
   }
 
-  // Apply Dropdowns to Column C (Value)
   applyDropdownToRange(sheet.getRange('C2'), ['GEMINI', 'OPENAI']);
   applyDropdownToRange(sheet.getRange('C3'), ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']);
   applyDropdownToRange(sheet.getRange('C4'), ['gpt-4o', 'gpt-4o-mini', 'o1-mini']);
   applyDropdownToRange(sheet.getRange('C7'), ['TRUE', 'FALSE']);
   applyDropdownToRange(sheet.getRange('C8'), ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None']);
 
-  // Column Widths
   sheet.setColumnWidth(1, 180);
   sheet.setColumnWidth(2, 260);
   sheet.setColumnWidth(3, 300);
   sheet.setColumnWidth(4, 420);
+}
+
+/**
+ * 8. Initializes and Formats "API_Usage_Log" Tab (Tab 13)
+ */
+function setupApiUsageLogTab(ss) {
+  const sheet = getOrCreateSheet(ss, 'API_Usage_Log');
+  const headers = [
+    'Timestamp', 'Campaign ID', 'Service Name', 'Operation', 'HTTP Status',
+    'Input Tokens / Units', 'Output Tokens', 'Est. Cost ($)', 'Status', 'Details / Error'
+  ];
+  
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(headers);
+  }
+  
+  styleHeaderRow(sheet);
+  
+  sheet.setColumnWidth(1, 160); // Timestamp
+  sheet.setColumnWidth(2, 140); // Campaign ID
+  sheet.setColumnWidth(3, 130); // Service Name
+  sheet.setColumnWidth(4, 160); // Operation
+  sheet.setColumnWidth(5, 90);  // HTTP Status
+  sheet.setColumnWidth(6, 140); // Input Tokens / Units
+  sheet.setColumnWidth(7, 130); // Output Tokens
+  sheet.setColumnWidth(8, 110); // Est. Cost ($)
+  sheet.setColumnWidth(9, 100); // Status
+  sheet.setColumnWidth(10, 260); // Details / Error
 }
 
 /**

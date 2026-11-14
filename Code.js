@@ -144,15 +144,12 @@ function onEdit(e) {
 
     // 1. EDITS ON DASHBOARD TAB
     if (sheetName === 'Dashboard') {
-      // Cell D1: Campaign Status toggled (Active / Paused / Draft / Completed)
       if (row === 1 && col === 4 && val) {
         syncStatusFromDashboard_(val);
       }
-      // Cell C4: Status in table row 4 changed
       else if (row === 4 && col === 3 && val) {
         syncStatusFromDashboard_(val);
       }
-      // Cell B2: Campaign ID changed directly
       else if (row === 2 && col === 2 && val) {
         selectAndActivateCampaign(val);
       }
@@ -180,7 +177,6 @@ function syncStatusFromDashboard_(newStatus) {
   const activeCampId = getStudioActiveCampaignId_();
   if (!activeCampId) return;
 
-  // 1. Update Campaigns Tab Column 4 (Status)
   const campSheet = ss.getSheetByName('Campaigns');
   if (campSheet && campSheet.getLastRow() > 1) {
     const cData = campSheet.getDataRange().getValues();
@@ -192,7 +188,6 @@ function syncStatusFromDashboard_(newStatus) {
     }
   }
 
-  // 2. Update Dashboard Cells and Rollup table
   updateDashboardStatusOnly_(activeCampId, newStatus);
 }
 
@@ -205,12 +200,9 @@ function updateDashboardStatusOnly_(cid, newStatus) {
   const dashSheet = ss.getSheetByName('Dashboard');
   if (!dashSheet) return;
 
-  // Cell D1: Top Green Bar Status
   dashSheet.getRange('D1').setValue(newStatus);
-  // Cell C4: Operational Status Column for Active Campaign Name row
   dashSheet.getRange('C4').setValue(newStatus);
 
-  // Update Status in Campaign Performance Rollup (Row 18+)
   const lastRow = dashSheet.getLastRow();
   if (lastRow >= 18) {
     for (let r = 18; r <= lastRow; r++) {
@@ -383,7 +375,6 @@ function getSidebarInitialData() {
   const configsMap = {};
   let activeCampaignId = '';
 
-  // 1. Read Campaign Configuration
   const cSheet = ss ? ss.getSheetByName('Campaign Configuration') : null;
   const activeConfigDict = {};
   if (cSheet && cSheet.getLastRow() > 1) {
@@ -399,7 +390,6 @@ function getSidebarInitialData() {
     activeCampaignId = getStudioActiveCampaignId_();
   }
 
-  // 2. Read from Campaigns Tab (Primary Campaign Store)
   const campSheet = ss ? ss.getSheetByName('Campaigns') : null;
   if (campSheet && campSheet.getLastRow() > 1) {
     const campData = campSheet.getDataRange().getValues();
@@ -480,7 +470,6 @@ function getSidebarInitialData() {
     }
   }
 
-  // 3. Read from Persona Mapper Settings
   const pSheet = findPersonaMapperSettingsSheet(ss);
   if (pSheet && pSheet.getLastRow() > 1) {
     const pData = pSheet.getDataRange().getValues();
@@ -513,7 +502,6 @@ function getSidebarInitialData() {
     }
   }
 
-  // 4. Merge Active Campaign Details from Campaign Configuration
   if (activeCampaignId && configsMap[activeCampaignId]) {
     const c = configsMap[activeCampaignId];
     if (activeConfigDict['CAMPAIGNNAME']) c.name = String(activeConfigDict['CAMPAIGNNAME']);
@@ -522,7 +510,6 @@ function getSidebarInitialData() {
     if (activeConfigDict['EMAILSENDERPROVIDER']) c.emailSenderProvider = String(activeConfigDict['EMAILSENDERPROVIDER']);
   }
 
-  // 5. Convert map to array
   for (let cid in campaignsMap) {
     campaignsList.push({ id: cid, name: campaignsMap[cid] });
   }
@@ -548,7 +535,6 @@ function selectAndActivateCampaign(cid) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return { success: false, message: 'Spreadsheet not accessible.' };
 
-  // 1. Fetch campaign attributes directly from Campaigns tab
   let config = { id: cid, name: cid };
   const campSheet = ss.getSheetByName('Campaigns');
   if (campSheet && campSheet.getLastRow() > 1) {
@@ -578,10 +564,7 @@ function selectAndActivateCampaign(cid) {
     }
   }
 
-  // 2. Direct Save Pipeline: writes B2 on Dashboard and Row 2 in Campaign Configuration
   studioDirectSaveCampaignPipeline(config, true);
-
-  // 3. Apply native view filter across all operational tabs
   filterOperationalSheetsByCampaign_(cid);
 
   return {
@@ -608,7 +591,6 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   const campId = payload.id;
   const campName = payload.name || campId;
 
-  // Preserve existing status if not explicitly passed
   let status = payload.status || 'Active';
   const campSheetExisting = ss.getSheetByName('Campaigns');
   if (campSheetExisting && campSheetExisting.getLastRow() > 1 && !payload.status) {
@@ -621,7 +603,6 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     }
   }
 
-  // 1. REBUILD CAMPAIGN CONFIGURATION (EXACT ORIGINAL 38 PARAMETERS - ZERO MUTATION)
   let configSheet = ss.getSheetByName('Campaign Configuration');
   if (!configSheet) configSheet = ss.insertSheet('Campaign Configuration');
 
@@ -676,7 +657,6 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   configSheet.setFrozenRows(1);
   SpreadsheetApp.flush();
 
-  // 2. WRITE TO Campaigns TAB (EXACT 28 COLUMNS - ZERO MUTATION)
   let campSheet = ss.getSheetByName('Campaigns');
   if (!campSheet) campSheet = ss.insertSheet('Campaigns');
 
@@ -739,7 +719,6 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   campSheet.getRange(cTargetRow, 1, 1, campMasterRow.length).setValues([campMasterRow]);
   SpreadsheetApp.flush();
 
-  // 3. WRITE TO Persona Mapper Settings (EXACT 39 COLUMNS - ZERO MUTATION)
   let pSheet = findPersonaMapperSettingsSheet(ss);
   if (!pSheet) pSheet = ss.insertSheet('Persona Mapper Settings');
 
@@ -813,11 +792,9 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   pSheet.getRange(pTargetRow, 1, 1, 39).setValues([pRow]);
   SpreadsheetApp.flush();
 
-  // 4. UPDATE DASHBOARD TAB (Exact 4-Column Layout)
   const dashboardPayload = Object.assign({}, payload, { status: status });
   updateDashboardForActiveCampaign(dashboardPayload);
 
-  // 5. APPLY NATIVE VIEW FILTER ACROSS ALL OPERATIONAL TABS (INCLUDING COMPANY DATABASE)
   filterOperationalSheetsByCampaign_(campId);
 
   return {
@@ -830,8 +807,6 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
 
 /**
  * EXACT 4-COLUMN DASHBOARD UPDATER
- * Dynamically scans table headers across Company Intelligence, Persona Leads,
- * and Prospect Review Queue to accurately calculate and display live KPIs.
  */
 function updateDashboardForActiveCampaign(payloadOrId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -853,7 +828,6 @@ function updateDashboardForActiveCampaign(payloadOrId) {
 
   if (!cid) cid = getStudioActiveCampaignId_();
 
-  // 1. Resolve parameters from payload, Campaigns, or Campaign Configuration
   let status = payload.status || 'Active';
   let dept = payload.department || '';
   let limit = payload.limit || '';
@@ -904,7 +878,6 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   const keyStatus = key ? 'Connected' : 'Key Not Configured';
   const nowTimestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
 
-  // 2. DYNAMIC LIVE KPI CALCULATION (Dynamic Header Scanning)
   let discoveredCount = 0;
   const compSheet = ss.getSheetByName('Company Intelligence');
   if (compSheet && compSheet.getLastRow() > 1) {
@@ -953,13 +926,11 @@ function updateDashboardForActiveCampaign(payloadOrId) {
     }
   }
 
-  // 3. UPDATE TOP GREEN BAR (Row 1) & ROW 2 & ROW 3 TIMESTAMP
   dashSheet.getRange('C1').setValue(campName);
   dashSheet.getRange('D1').setValue(status);
   dashSheet.getRange('B2').setValue(cid);
   dashSheet.getRange('D3').setValue(nowTimestamp);
 
-  // 4. SCAN METRIC ROWS (Rows 4 to 14) BY COLUMN A LABEL
   const lastRow = Math.min(dashSheet.getLastRow(), 20);
   if (lastRow >= 4) {
     const labels = dashSheet.getRange(4, 1, lastRow - 3, 1).getValues();
@@ -1021,7 +992,6 @@ function updateDashboardForActiveCampaign(payloadOrId) {
     }
   }
 
-  // 5. UPDATE CAMPAIGN PERFORMANCE ROLLUP TABLE (Row 17 = Headers, Rows 18+ = Data)
   if (dashSheet.getLastRow() >= 16) {
     const rollupHeaders = [
       'Campaign ID',
@@ -1087,7 +1057,6 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
     }
   }
 
-  // If missing, establish "Campaign ID" in Column J (Col 10)
   if (campaignColIdx === -1) {
     sheet.getRange(1, 10).setValue('Campaign ID')
       .setFontWeight('bold')
@@ -1096,7 +1065,6 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
       .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
     campaignColIdx = 10;
 
-    // Backfill existing pilot rows (rows 2 to lastRow) so they are recognized under PILOT-CMP-001
     const lastRow = sheet.getLastRow();
     if (lastRow >= 2) {
       const colJVals = sheet.getRange(2, 10, lastRow - 1, 1).getValues();
@@ -1110,10 +1078,8 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
 }
 
 /**
- * Applies Google Sheets native FilterCriteria to operational tabs so
+ * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log) so
  * rows from other campaigns are hidden, displaying exclusively the active campaign.
- * Uses existing filter safely without throwing "filter already exists" exceptions.
- * Skips Lists & Settings to protect system dropdowns and suppression guards.
  */
 function filterOperationalSheetsByCampaign_(activeCampaignId) {
   if (!activeCampaignId) return;
@@ -1127,11 +1093,11 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
     'Company Intelligence',
     'Company Database',
     'Research Evidence',
-    'Execution Logs'
+    'Execution Logs',
+    'API_Usage_Log'
   ];
 
   targetSheetNames.forEach(targetName => {
-    // 1. Adaptive Case-Insensitive Tab Lookup
     let sheet = ss.getSheetByName(targetName);
     if (!sheet) {
       const normTarget = targetName.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1146,12 +1112,10 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
 
     if (!sheet || sheet.getLastRow() <= 1) return;
 
-    // 2. Guarantee Column J exists on Company Database
     if (sheet.getName().toLowerCase().replace(/[^a-z0-9]/g, '') === 'companydatabase') {
       ensureCompanyDatabaseCampaignIdColumn_(sheet);
     }
 
-    // 3. Scan Row 1 (or Row 2) for Campaign ID column
     let headerRow = 1;
     let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
     let campaignColIndex = -1;
@@ -1164,7 +1128,6 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
       }
     }
 
-    // Secondary scan on Row 2 if Row 1 has a merged title banner
     if (campaignColIndex === -1 && sheet.getLastRow() > 2) {
       const row2Headers = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
       for (let c = 0; c < row2Headers.length; c++) {
@@ -1177,10 +1140,8 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
       }
     }
 
-    // Skip sheets without a Campaign ID column (e.g. Lists & Settings)
     if (campaignColIndex === -1) return;
 
-    // 4. Safe filter handling: use existing filter or create new without throwing
     let filter = sheet.getFilter();
     const startRow = headerRow;
     const numDataRows = sheet.getLastRow() - startRow;
@@ -1193,7 +1154,6 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
 
     const colValues = sheet.getRange(startRow + 1, campaignColIndex, numDataRows, 1).getValues();
 
-    // 5. Collect all unique campaign IDs that do NOT match the active campaign
     const hiddenValues = [];
     const seen = {};
     for (let i = 0; i < colValues.length; i++) {
@@ -1204,14 +1164,12 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
       }
     }
 
-    // 6. Apply native Google Sheets filter criteria safely
     if (hiddenValues.length > 0) {
       const criteria = SpreadsheetApp.newFilterCriteria()
         .setHiddenValues(hiddenValues)
         .build();
       filter.setColumnFilterCriteria(campaignColIndex, criteria);
     } else {
-      // If nothing to hide, clear column criteria so all rows for active campaign show
       filter.removeColumnFilterCriteria(campaignColIndex);
     }
   });
@@ -1221,13 +1179,11 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
 
 /**
  * Menu action to trigger tab re-filtering manually.
- * Also checks Dashboard cell B2 or prompt to guarantee correct active ID.
  */
 function filterSheetsForActiveCampaignMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   let activeId = getStudioActiveCampaignId_();
   
-  // Also check Campaign Configuration directly
   const cfg = ss.getSheetByName('Campaign Configuration');
   if (cfg && cfg.getLastRow() > 1) {
     const cfgId = String(cfg.getRange(2, 2).getValue() || '').trim();
@@ -1241,15 +1197,12 @@ function filterSheetsForActiveCampaignMenu() {
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
-    ui.alert('Tabs Filtered', 'Operational tabs (including Company Database) filtered to active campaign: ' + activeId, ui.ButtonSet.OK);
+    ui.alert('Tabs Filtered', 'Operational tabs (including API_Usage_Log) filtered to active campaign: ' + activeId, ui.ButtonSet.OK);
   } catch (e) {
     Logger.log('Operational tabs filtered to active campaign: ' + activeId);
   }
 }
 
-/**
- * Menu action to trigger master sync (kept as internal utility).
- */
 function executeMasterPersonaMapperSync() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return;
@@ -1310,9 +1263,6 @@ function syncActiveCampaignToPersonaMapperSettings() {
   executeMasterPersonaMapperSync();
 }
 
-/**
- * Navigates the Google Sheets UI to the Prospect Review Queue tab.
- */
 function navigateToReviewQueueSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return { success: false, message: 'Spreadsheet not found.' };
@@ -1324,11 +1274,6 @@ function navigateToReviewQueueSheet() {
   return { success: true, message: 'Switched to Prospect Review Queue.' };
 }
 
-/**
- * Isolated audit function with zero dependencies on other files.
- * Uses getStudioActiveCampaignId_ to guarantee no cross-file collisions.
- * Safe in both Menu (UI popup) and Editor Console (Logger) contexts.
- */
 function runStudioSpreadsheetAudit() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) {
@@ -1339,9 +1284,7 @@ function runStudioSpreadsheetAudit() {
   let ui = null;
   try {
     ui = SpreadsheetApp.getUi();
-  } catch (e) {
-    // Running from editor execution where UI is unavailable
-  }
+  } catch (e) {}
 
   const requiredTabs = [
     'Dashboard',
@@ -1355,7 +1298,8 @@ function runStudioSpreadsheetAudit() {
     'Research Evidence',
     'Agent Settings',
     'Execution Logs',
-    'Lists & Settings'
+    'Lists & Settings',
+    'API_Usage_Log'
   ];
 
   const present = [];
@@ -1425,7 +1369,7 @@ function runStudioSpreadsheetAudit() {
   if (missing.length > 0) {
     message += '⚠️ Missing Tabs: ' + missing.join(', ') + '\n\n';
   } else {
-    message += '✅ All 12 project tabs exist and match system schema.\n\n';
+    message += '✅ All 13 project tabs exist and match system schema.\n\n';
   }
 
   message += '• AI Engine Status: ' + apiKeyInfo + '\n';
