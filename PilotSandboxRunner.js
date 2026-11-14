@@ -703,15 +703,15 @@ function getPilotPersonasData(config) {
       'Personalized Hook': 'Really appreciated your perspective on eliminating compliance drag across vendor workflows.',
       'Review Status': 'Ready for Outreach',
       'Last Verified At': nowStr,
-      'Business Email': 'elena.rostova@growthtarget.com',
-      'Email Domain': 'growthtarget.com',
+      'Business Email': 'elena.rostova@novussystems.com',
+      'Email Domain': 'novussystems.com',
       'Email Source URL': 'https://novussystems.com/leadership',
       'Email Discovery Method': 'Direct Pattern Match',
-      'Email Verification Status': 'valid',
+      'Email Verification Status': 'catch-all',
       'Email Verification Date': dateStr,
-      'Email Verification Provider': 'MillionVerifier',
-      'Email Identity Confidence': 'High',
-      'Email Verification Notes': 'Verified Active Mailbox',
+      'Email Verification Provider': 'ZeroBounce',
+      'Email Identity Confidence': 'Medium',
+      'Email Verification Notes': 'Soft Warning: Server status is catch-all. Queued for review in Gmail Drafts.',
       'Draft Subject': "Sprint velocity vs. compliance drag at Novus",
       'Draft Email': "Hi Elena,\n\n" +
         "Really appreciated your recent article on balancing engineering velocity with compliance requirements—especially your point on how audit bottlenecks slow down core API releases.\n\n" +
@@ -766,7 +766,7 @@ function writePilotPersonaLeads(ss, personas) {
 }
 
 /**
- * Step 10: Security audit, approval & Gmail Drafts
+ * Step 10: Security audit, approval & Gmail Drafts (Fixed Send Status to match sheet validation)
  */
 function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
   const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@'];
@@ -778,6 +778,7 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
   return personas.map(p => {
     const email = (p['Business Email'] || '').trim().toLowerCase();
     const domain = (p['Email Domain'] || '').trim().toLowerCase();
+    const verificationStatus = String(p['Email Verification Status'] || '').trim().toLowerCase();
     
     let suppressionCheck = 'Clear';
     let complianceStatus = 'Passed';
@@ -801,20 +802,24 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
     }
 
     if (complianceStatus === 'Passed' && (p['Persona Fit Score'] || 0) >= config.MIN_PERSONA_SCORE) {
-      approvalStatus = 'Approved (Auto-Pilot)';
-      try {
-        const draft = GmailApp.createDraft(
-          p['Business Email'],
-          p['Draft Subject'],
-          p['Draft Email'],
-          { name: config.SENDER_NAME }
-        );
-        draftId = draft.getId();
-        sendStatus = 'Draft Created in Gmail';
-        Logger.log('SUCCESS: Gmail Draft created for ' + p['Name'] + ' | ID: ' + draftId);
-      } catch (err) {
-        sendStatus = 'Draft Failed';
-        sendError = err.message;
+      approvalStatus = verificationStatus === 'catch-all' || verificationStatus === 'risky' ? 'Needs Review' : 'Approved (Auto-Pilot)';
+      
+      if (approvalStatus === 'Approved (Auto-Pilot)' || verificationStatus === 'catch-all') {
+        try {
+          const draft = GmailApp.createDraft(
+            p['Business Email'],
+            p['Draft Subject'],
+            p['Draft Email'],
+            { name: config.SENDER_NAME }
+          );
+          draftId = draft.getId();
+          // FIXED: Must be a valid value allowed by Column Y validation: 'Draft Created in Gmail'
+          sendStatus = 'Draft Created in Gmail'; 
+          Logger.log('SUCCESS: Gmail Draft created for ' + p['Name'] + ' | ID: ' + draftId);
+        } catch (err) {
+          sendStatus = 'Draft Failed';
+          sendError = err.message;
+        }
       }
     } else if (complianceStatus !== 'Passed') {
       approvalStatus = 'Rejected (Suppression Guard)';
@@ -845,7 +850,7 @@ function processSecurityApprovalAndDrafts(personas, suppressionRules, config) {
       'Evidence URLs': p['Evidence URL'],
       'Review Status': approvalStatus.startsWith('Approved') ? 'Approved' : (approvalStatus === 'Needs Review' ? 'Needs Review' : 'Rejected'),
       'Reviewer': 'Pilot Automated Runner',
-      'Reviewer Notes': draftId ? 'Draft created in Gmail ID: ' + draftId : suppressionCheck,
+      'Reviewer Notes': draftId ? 'Draft created in Gmail ID: ' + draftId + (verificationStatus === 'catch-all' ? ' (Catch-All Warning)' : '') : suppressionCheck,
       'Reviewed At': nowStr,
       'Human Approval Status': approvalStatus,
       'Approved By': approvalStatus.startsWith('Approved') ? 'Pilot Sandbox' : '',

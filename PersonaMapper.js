@@ -241,10 +241,13 @@ function runPersonaMapperFromSidebar(campaignId) {
 
     for (let index = start; index < end; index++) {
       const company = companies[index];
+      const companyName = String(company['Company name'] || company['Company Name'] || '').trim();
+      const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName);
+
       const aiResponse = executeAiCall_({
         provider: providerChoice,
         model: modelChoice,
-        prompt: buildPersonaMapperPrompt_(company, settings),
+        prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets),
         enableWebSearch: true,
         json: true
       });
@@ -361,11 +364,14 @@ function runPersonaMapperForSelectedCampaign() {
     
     for (let index = start; index < end; index++) {
       const company = companies[index];
+      const companyName = String(company['Company name'] || company['Company Name'] || '').trim();
+      const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName);
+
       try {
         const aiResponse = executeAiCall_({
           provider: providerChoice,
           model: modelChoice,
-          prompt: buildPersonaMapperPrompt_(company, settings),
+          prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets),
           enableWebSearch: true,
           json: true
         });
@@ -425,14 +431,44 @@ function runPersonaMapperForSelectedCampaign() {
 }
 
 /**
- * Builds the Multi-Department Persona Research & Outreach Prompt
+ * Suggestion 3 Helper: Queries Tab 9 (Research Evidence) for existing evidence snippets & email pattern clues
  */
-function buildPersonaMapperPrompt_(company, settings) {
+function getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName) {
+  const snippets = [];
+  if (!spreadsheet || !companyName) return snippets;
+  
+  const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
+  if (!evidenceSheet || evidenceSheet.getLastRow() <= 1) return snippets;
+
+  const data = evidenceSheet.getDataRange().getValues();
+  // Tab 9 columns: Evidence ID (0), Campaign ID (1), Entity Name (2), Entity Type (3), Search Query (4), URL (5), Snippet (6)
+  for (let i = 1; i < data.length; i++) {
+    const rowCampId = String(data[i][1] || '').trim();
+    const entityName = String(data[i][2] || '').trim().toLowerCase();
+    const snippet = String(data[i][6] || '').trim();
+    const url = String(data[i][5] || '').trim();
+
+    if (rowCampId === String(campaignId).trim() && entityName.includes(companyName.toLowerCase())) {
+      if (snippet) {
+        snippets.push('• ' + snippet + (url ? ' (Source: ' + url + ')' : ''));
+      }
+    }
+  }
+  return snippets;
+}
+
+/**
+ * Builds the Multi-Department Persona Research & Outreach Prompt (Enhanced with Tab 9 Evidence Clues)
+ */
+function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
   const department = settings['Department'] || 'Procurement';
   const senderName = settings['Sender Name'] || 'Alex Mercer';
   const senderTitle = settings['Sender Title'] || 'Solutions Consultant';
   const senderCompany = settings['Sender Company'] || 'eValuater Solutions';
   const customNeeds = settings['Custom Business Needs'] || settings['Campaign Focus'] || 'operational scalability and automated compliance';
+  const snippetsText = (evidenceSnippets && evidenceSnippets.length > 0) 
+    ? evidenceSnippets.slice(0, 8).join('\n') 
+    : 'No prior company research snippets recorded yet. Perform fresh discovery.';
 
   return [
     'Act as the Senior B2B Account Researcher, Executive Persona Mapper, and Outbound Email Copywriter.',
@@ -446,6 +482,9 @@ function buildPersonaMapperPrompt_(company, settings) {
     '• Core Business Pain / Buying Triggers to Target: ' + customNeeds,
     '• Research Depth: ' + (settings['Research Depth'] || 'Deep Persona') + '.',
     '• Target Persona Titles: ' + (settings['Persona Titles'] || 'VP, Director, Head of Department, Chief Officer'),
+    '',
+    'EXISTING RESEARCH EVIDENCE & CLUES (FROM TAB 9):',
+    snippetsText,
     '',
     'COMPANY PROFILE UNDER RESEARCH:',
     JSON.stringify(company),
@@ -596,7 +635,7 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
       if (k === 'SENDERTITLE' && v) merged['Sender Title'] = String(v);
       if (k === 'SENDERCOMPANY' && v) merged['Sender Company'] = String(v);
       if (k === 'RESEARCHDEPTH' && v) merged['Research Depth'] = String(v);
-      if ((k === 'MINCOMPANYSCORE' || k === 'MINCOMPANYFITSCORE') && v) merged['Minimum Company Opportunity Score'] = Number(v);
+      if ((k === 'MINCOMPانYSCORE' || k === 'MINCOMPANYSCORE' || k === 'MINCOMPANYFITSCORE') && v) merged['Minimum Company Opportunity Score'] = Number(v);
       if (k === 'EMAILVERIFICATIONPROVIDER' && v) merged['Email Verification Provider'] = String(v);
       if ((k === 'EMAILSENDERPROVIDER' || k === 'DISPATCHMODE') && v) merged['Email Sender Provider'] = String(v);
     }
@@ -633,7 +672,7 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
 }
 
 /**
- * Unified AI Caller with Script Properties and Fallback
+ * Universal AI Caller with Script Properties and Fallback
  */
 function executeAiCall_(options) {
   if (typeof callAI === 'function') {
@@ -908,6 +947,9 @@ function makeEmailQueueRecord_(company, persona, companyScore, fitScore, citatio
   };
 }
 
+/**
+ * Suggestion 2 Update: Prepares email intelligence and allows catch-all/risky statuses through as soft warnings
+ */
 function prepareEmailIntelligence_(persona, company, settings, spreadsheet) {
   const candidate = String(persona.businessEmail || '').trim().toLowerCase();
   const method = String(persona.emailDiscoveryMethod || (candidate ? 'Public web source' : 'Not Found')).trim();
@@ -957,18 +999,28 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet) {
 
   const verifier = callConfiguredEmailVerifier_(candidate, settings, spreadsheet);
   let status = verifier.configured ? verifier.status : 'valid';
-  let queueStatus = (status === 'deliverable' || status === 'valid') ? 'Ready for Review' : 'Needs Manual Verification';
+  
+  // Suggestion 2 Implementation: Handle catch-all, risky, and unknown gracefully as soft warnings
+  let normalizedStatus = String(status).toLowerCase();
+  let queueStatus = 'Ready for Review';
+  let verificationNotes = verifier.notes || 'Domain verified';
+
+  if (normalizedStatus === 'invalid' || normalizedStatus === 'bouncable') {
+    queueStatus = 'Email Verification Failed';
+  } else if (normalizedStatus === 'catch-all' || normalizedStatus === 'risky' || normalizedStatus === 'unknown') {
+    verificationNotes = 'Soft Warning: Server status is ' + normalizedStatus + '. Queued for review in Gmail Drafts.';
+  }
 
   return {
     businessEmail: candidate,
     emailDomain: domain,
     emailSourceUrl: sourceUrl,
     emailDiscoveryMethod: normalizedMethod,
-    emailVerificationStatus: status,
+    emailVerificationStatus: normalizedStatus,
     emailVerificationDate: new Date().toISOString().split('T')[0],
     emailVerificationProvider: verifier.provider || settings['Email Verification Provider'] || 'ZeroBounce',
     emailIdentityConfidence: confidence,
-    emailVerificationNotes: verifier.notes || 'Domain verified',
+    emailVerificationNotes: verificationNotes,
     queueStatus: queueStatus,
     country: persona.country || ''
   };
@@ -1005,7 +1057,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
       
       const body = JSON.parse(response.getContentText() || '{}');
       const st = String(body.status || '').toLowerCase();
-      let status = (st === 'valid') ? 'valid' : (st === 'invalid') ? 'invalid' : 'risky';
+      let status = (st === 'valid') ? 'valid' : (st === 'invalid') ? 'invalid' : (st === 'catch-all' || st === 'risky' || st === 'unknown') ? st : 'risky';
       return { configured: true, status: status, provider: 'ZeroBounce', notes: 'ZeroBounce: ' + st };
     }
 
