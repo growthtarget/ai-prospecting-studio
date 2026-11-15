@@ -1,16 +1,17 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * PLUGGABLE EMAIL SENDER & OUTREACH DISPATCH ENGINE
+ * PLUGGABLE EMAIL SENDER & CLIENT-ISOLATED OUTREACH DISPATCH ENGINE
  * ============================================================================
  * File: EmailSender.gs / EmailSender.js
  * 
  * CAPABILITIES:
- * 1. Multi-Provider Dispatch: Google Workspace (Drafts & Direct), Smartlead, Instantly, Custom Webhooks.
- * 2. Campaign Isolation: Resolves sender profile and provider dynamically per prospect Campaign ID.
- * 3. Sender Identity Stamping: Attaches configured Sender Display Name to Gmail drafts and emails.
- * 4. Multi-Source Credential Resolution: Reads API keys from Script Properties, User Properties,
- *    or Agent Settings while rejecting protected placeholder labels.
+ * 1. Multi-Provider Dispatch: Google Workspace (Local & Client Relay), Smartlead,
+ *    Instantly, Custom Webhooks.
+ * 2. Strict Client Isolation: External clients strictly require CLIENT_{NAME}_*
+ *    credentials in Script Properties (zero fallback to local keys or personal Gmail).
+ * 3. Campaign Isolation: Resolves sender profile and provider dynamically per prospect Campaign ID.
+ * 4. Sender Identity Stamping: Attaches configured Sender Display Name to Gmail drafts and emails.
  * 5. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
  * ============================================================================
  */
@@ -31,7 +32,7 @@ function createGmailDraftsForApprovedProspects() {
 
 /**
  * Core outreach processor.
- * Resolves settings per prospect row, ensuring complete campaign isolation.
+ * Resolves settings per prospect row, ensuring complete campaign and client isolation.
  * 
  * @param {boolean} forceDrafts When true, routes all approved prospects to Gmail Drafts
  */
@@ -128,8 +129,17 @@ function processOutreachQueue_(forceDrafts) {
     return;
   }
 
+  const campaignSettingsCache = {};
   const uniqueCampaigns = Array.from(new Set(queueToProcess.map(function(item) {
     return item.campaignId || 'DEFAULT';
+  })));
+
+  uniqueCampaigns.forEach(function(cId) {
+    campaignSettingsCache[cId] = getCampaignSenderSettings_(spreadsheet, cId);
+  });
+
+  const uniqueClients = Array.from(new Set(uniqueCampaigns.map(function(cId) {
+    return campaignSettingsCache[cId].clientName || 'Growth Target';
   })));
 
   if (ui) {
@@ -138,24 +148,21 @@ function processOutreachQueue_(forceDrafts) {
       'Confirm Outreach Execution',
       'Mode: ' + modeLabel + '\n' +
       'Prospects to process: ' + queueToProcess.length + '\n' +
-      'Target Campaign(s): ' + uniqueCampaigns.join(', ') + '\n\n' +
+      'Target Campaign(s): ' + uniqueCampaigns.join(', ') + '\n' +
+      'Client / Owner(s): ' + uniqueClients.join(', ') + '\n\n' +
       'Do you want to proceed?',
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
   }
 
-  const campaignSettingsCache = {};
   let successCount = 0;
   let failCount = 0;
   const nowStr = new Date().toLocaleString();
 
   queueToProcess.forEach(function(item) {
     const cId = item.campaignId || 'DEFAULT';
-    if (!campaignSettingsCache[cId]) {
-      campaignSettingsCache[cId] = getCampaignSenderSettings_(spreadsheet, cId);
-    }
-    const campaignConfig = campaignSettingsCache[cId];
+    const campaignConfig = campaignSettingsCache[cId] || getCampaignSenderSettings_(spreadsheet, cId);
 
     const rawProvider = forceDrafts
       ? 'Workspace Gmail (Drafts Only)'
@@ -212,34 +219,84 @@ function processOutreachQueue_(forceDrafts) {
 }
 
 /**
- * Universal Dispatcher: Routes to Google Workspace, Smartlead, Instantly, or Custom Webhook.
- * Stamps the configured Sender Display Name onto drafts and direct emails.
+ * Universal Dispatcher: Routes to Google Workspace (local or client relay), Smartlead, Instantly, or Custom Webhook.
  */
 function dispatchOutreach_(item, provider, config, spreadsheet) {
   const p = String(provider || '').toLowerCase();
   const senderName = String(config.senderName || '').trim();
+  const clientName = String(config.clientName || 'Growth Target').trim();
+  const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
 
-  // 1. Google Workspace Drafts (Creates real draft with sender display name)
-  if (p.indexOf('draft') >= 0) {
-    const draftOptions = {};
-    if (senderName) draftOptions.name = senderName;
+  // 1. Google Workspace Drafts & Direct Send
+  if (p.indexOf('draft') >= 0 || p.indexOf('gmail') >= 0 || p.indexOf('workspace') >= 0 || p.indexOf('direct') >= 0) {
+    const isDraftMode = p.indexOf('draft') >= 0;
 
-    GmailApp.createDraft(item.email, item.subject, item.body, draftOptions);
-    return { status: 'draft_created' };
+    if (isLocal) {
+      // Local Agency ("Growth Target"): Use your logged-in Google Workspace GmailApp
+      const mailOptions = {};
+      if (senderName) mailOptions.name = senderName;
+
+      if (isDraftMode) {
+        GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
+        return { status: 'draft_created' };
+      }
+      GmailApp.sendEmail(item.email, item.subject, item.body, mailOptions);
+      return { status: 'sent' };
+    }
+
+    // External Client Workspace Relay (Option A): Strictly routes via client's own Relay Web App
+    const relayUrl = getSenderApiKey_('GMAIL_RELAY_URL', spreadsheet, config);
+    const relaySecret = getSenderApiKey_('GMAIL_RELAY_SECRET', spreadsheet, config);
+
+    if (!/^https:\/\//i.test(relayUrl)) {
+      throw new Error('Client Gmail Relay URL for "' + clientName + '" must start with https://.');
+    }
+
+    const relayPayload = {
+      secret: relaySecret,
+      action: isDraftMode ? 'createDraft' : 'sendEmail',
+      to: item.email,
+      subject: item.subject,
+      body: item.body,
+      senderName: senderName,
+      campaignId: item.campaignId,
+      clientName: clientName
+    };
+
+    const relayRes = UrlFetchApp.fetch(relayUrl, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(relayPayload),
+      muteHttpExceptions: true
+    });
+
+    const relayCode = relayRes.getResponseCode();
+    const relayText = relayRes.getContentText() || '';
+
+    if (relayCode >= 300) {
+      throw new Error('Client Gmail Relay HTTP ' + relayCode + ': ' + relayText.slice(0, 200));
+    }
+
+    let parsedRelay;
+    try {
+      parsedRelay = JSON.parse(relayText);
+    } catch (parseErr) {
+      throw new Error(
+        'Client Gmail Relay for "' + clientName + '" returned non-JSON response. ' +
+        'Ensure the client\'s Relay Web App is deployed with "Execute as: Me" and "Who has access: Anyone".'
+      );
+    }
+
+    if (!parsedRelay || parsedRelay.success !== true) {
+      throw new Error('Client Gmail Relay error: ' + (parsedRelay && parsedRelay.error ? parsedRelay.error : relayText.slice(0, 200)));
+    }
+
+    return { status: isDraftMode ? 'draft_created_client_relay' : 'sent_client_relay' };
   }
 
-  // 2. Google Workspace Direct Send (Dispatches direct email with sender display name)
-  if (p.indexOf('gmail') >= 0 || p.indexOf('workspace') >= 0 || p.indexOf('direct') >= 0) {
-    const sendOptions = {};
-    if (senderName) sendOptions.name = senderName;
-
-    GmailApp.sendEmail(item.email, item.subject, item.body, sendOptions);
-    return { status: 'sent' };
-  }
-
-  // 3. Smartlead Sequencer Integration
+  // 2. Smartlead Sequencer Integration (Option B)
   if (p.indexOf('smartlead') >= 0) {
-    const apiKey = getSenderApiKey_('SMARTLEAD_API_KEY', spreadsheet);
+    const apiKey = getSenderApiKey_('SMARTLEAD_API_KEY', spreadsheet, config);
     const campaignId = String(config.emailSenderEndpoint || config['Smartlead Campaign ID'] || '').trim();
     if (!apiKey) throw new Error('SMARTLEAD_API_KEY not found in Project Settings > Script Properties.');
     if (!campaignId) throw new Error('Smartlead Campaign ID is missing in Email Sender Endpoint.');
@@ -258,7 +315,8 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
         custom_fields: {
           draft_subject: item.subject,
           draft_body: item.body,
-          sender_name: senderName
+          sender_name: senderName,
+          client_name: clientName
         }
       }]
     };
@@ -276,9 +334,9 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
     return { status: 'pushed_smartlead' };
   }
 
-  // 4. Instantly Sequencer Integration
+  // 3. Instantly Sequencer Integration (Option B)
   if (p.indexOf('instantly') >= 0) {
-    const apiKey = getSenderApiKey_('INSTANTLY_API_KEY', spreadsheet);
+    const apiKey = getSenderApiKey_('INSTANTLY_API_KEY', spreadsheet, config);
     const campaignId = String(config.emailSenderEndpoint || config['Instantly Campaign ID'] || '').trim();
     if (!apiKey) throw new Error('INSTANTLY_API_KEY not found in Project Settings > Script Properties.');
     if (!campaignId) throw new Error('Instantly Campaign ID is missing in Email Sender Endpoint.');
@@ -298,7 +356,8 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
       custom_variables: {
         draft_subject: item.subject,
         draft_body: item.body,
-        sender_name: senderName
+        sender_name: senderName,
+        client_name: clientName
       }
     };
 
@@ -315,15 +374,37 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
     return { status: 'pushed_instantly' };
   }
 
-  // 5. Custom HTTPS Webhook (Zapier, Make, n8n, CRM)
+  // 4. Custom HTTPS Webhook (Zapier, Make, n8n, CRM)
   if (p.indexOf('webhook') >= 0 || p.indexOf('custom') >= 0) {
-    const webhookUrl = String(config.emailSenderEndpoint || '').trim();
+    let webhookUrl = String(config.emailSenderEndpoint || '').trim();
+    if (!webhookUrl && typeof resolveClientScopedSecret_ === 'function') {
+      const urlRes = resolveClientScopedSecret_(
+        ['WEBHOOK_URL', 'EMAIL_SENDER_WEBHOOK_URL'],
+        { campaignId: config.campaignId, clientName: clientName },
+        { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: spreadsheet }
+      );
+      if (urlRes.key) webhookUrl = urlRes.key;
+    }
+
     if (!webhookUrl || !/^https:\/\//i.test(webhookUrl)) {
       throw new Error('A valid HTTPS Webhook Endpoint is required in Email Sender Endpoint.');
     }
 
+    const headers = {};
+    if (typeof resolveClientScopedSecret_ === 'function') {
+      const secretRes = resolveClientScopedSecret_(
+        ['WEBHOOK_SECRET'],
+        { campaignId: config.campaignId, clientName: clientName },
+        { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: spreadsheet }
+      );
+      if (secretRes.key) {
+        headers['X-Webhook-Secret'] = secretRes.key;
+      }
+    }
+
     const payload = {
       campaignId: item.campaignId,
+      clientName: clientName,
       email: item.email,
       leadName: item.leadName,
       companyName: item.companyName,
@@ -338,6 +419,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
     const res = UrlFetchApp.fetch(webhookUrl, {
       method: 'post',
       contentType: 'application/json',
+      headers: headers,
       payload: JSON.stringify(payload),
       muteHttpExceptions: true
     });
@@ -352,7 +434,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
 }
 
 /**
- * Dynamically resolves sender profile and provider configuration per Campaign ID.
+ * Dynamically resolves sender profile, provider configuration, and Client / Owner per Campaign ID.
  * Scans Campaigns (28 cols), Persona Mapper Settings (39 cols), and Campaign Configuration.
  * 
  * @param {Spreadsheet} spreadsheet Active spreadsheet instance
@@ -362,6 +444,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
 function getCampaignSenderSettings_(spreadsheet, campaignId) {
   const settings = {
     campaignId: campaignId,
+    clientName: '',
     emailSenderProvider: '',
     emailSenderEndpoint: '',
     senderName: '',
@@ -370,6 +453,7 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
   };
 
   if (!spreadsheet || !campaignId) {
+    settings.clientName = 'Growth Target';
     settings.emailSenderProvider = 'Workspace Gmail (Drafts Only)';
     return settings;
   }
@@ -383,6 +467,7 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
     });
 
     const idIdx = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
+    const deptIdx = headers.indexOf('DEPARTMENT') >= 0 ? headers.indexOf('DEPARTMENT') : 2;
     const provIdx = headers.indexOf('EMAILSENDERPROVIDER');
     const endIdx = headers.indexOf('EMAILSENDERENDPOINT');
     const nameIdx = headers.indexOf('SENDERNAME');
@@ -396,6 +481,7 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
           try {
             const parsed = JSON.parse(campData[r][jsonIdx]);
             if (parsed && typeof parsed === 'object') {
+              if (parsed.department) settings.clientName = String(parsed.department).trim();
               if (parsed.emailSenderProvider) settings.emailSenderProvider = parsed.emailSenderProvider;
               if (parsed.emailSenderEndpoint) settings.emailSenderEndpoint = parsed.emailSenderEndpoint;
               if (parsed.senderName) settings.senderName = parsed.senderName;
@@ -404,6 +490,7 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
             }
           } catch (e) {}
         }
+        if (deptIdx >= 0 && campData[r][deptIdx]) settings.clientName = String(campData[r][deptIdx]).trim();
         if (provIdx >= 0 && campData[r][provIdx]) settings.emailSenderProvider = String(campData[r][provIdx]).trim();
         if (endIdx >= 0 && campData[r][endIdx]) settings.emailSenderEndpoint = String(campData[r][endIdx]).trim();
         if (nameIdx >= 0 && campData[r][nameIdx]) settings.senderName = String(campData[r][nameIdx]).trim();
@@ -438,6 +525,9 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
     }
     const currentActiveId = String(cfgDict['CAMPAIGNID'] || '').trim();
     if (currentActiveId && currentActiveId.toLowerCase() === campaignId.toLowerCase()) {
+      if (!settings.clientName && (cfgDict['DEPARTMENT'] || cfgDict['CLIENTOWNER'] || cfgDict['CLIENT'])) {
+        settings.clientName = String(cfgDict['DEPARTMENT'] || cfgDict['CLIENTOWNER'] || cfgDict['CLIENT']).trim();
+      }
       if (!settings.emailSenderProvider && (cfgDict['EMAILSENDERPROVIDER'] || cfgDict['DISPATCHMODE'])) {
         settings.emailSenderProvider = String(cfgDict['EMAILSENDERPROVIDER'] || cfgDict['DISPATCHMODE']).trim();
       }
@@ -446,6 +536,12 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
       if (!settings.senderTitle && cfgDict['SENDERTITLE']) settings.senderTitle = String(cfgDict['SENDERTITLE']).trim();
       if (!settings.senderCompany && cfgDict['SENDERCOMPANY']) settings.senderCompany = String(cfgDict['SENDERCOMPANY']).trim();
     }
+  }
+
+  if (!settings.clientName) {
+    settings.clientName = typeof resolveCampaignClientName_ === 'function'
+      ? resolveCampaignClientName_(campaignId, '', spreadsheet)
+      : 'Growth Target';
   }
 
   if (!settings.emailSenderProvider) {
@@ -466,12 +562,29 @@ function isValidSenderSecretValue_(val) {
 }
 
 /**
- * Universal API Key resolver that checks:
- * 1. Script Properties
- * 2. User Properties
- * 3. Agent Settings (rejecting Protected placeholder labels)
+ * Strict Client-Scoped Sender Credential Resolver.
+ * For external clients, strictly requires CLIENT_{NAME}_{keyName} (zero local fallback).
  */
-function getSenderApiKey_(keyName, spreadsheet) {
+function getSenderApiKey_(keyName, spreadsheet, config) {
+  const ctx = {
+    campaignId: (config && config.campaignId) ? config.campaignId : '',
+    clientName: (config && config.clientName) ? config.clientName : ''
+  };
+
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const resolved = resolveClientScopedSecret_(
+      [keyName],
+      ctx,
+      {
+        serviceLabel: 'Email Sender (' + keyName + ')',
+        throwOnMissing: true,
+        allowAgentSettingsForLocal: true,
+        spreadsheet: spreadsheet
+      }
+    );
+    return resolved.key || '';
+  }
+
   const targetKey = String(keyName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   const scriptProps = PropertiesService.getScriptProperties().getProperties();

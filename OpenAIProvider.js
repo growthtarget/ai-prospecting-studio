@@ -1,13 +1,13 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * OPENAI AI PROVIDER (WITH USAGE TRACKING & BUDGET GUARDRAILS)
+ * OPENAI AI PROVIDER (WITH USAGE TRACKING, BUDGET GUARDRAILS & CLIENT ISOLATION)
  * ============================================================================
  * File: OpenAIProvider.gs / OpenAIProvider.js
  * 
  * Handles LLM calls to OpenAI Responses API & Chat Completions with
- * pre-flight budget hard-cap checks, placeholder-safe API key resolution,
- * accurate token extraction, and API usage logging.
+ * client-isolated budget hard-cap checks, strict client-scoped API key
+ * resolution, accurate token extraction, and API usage logging.
  * ============================================================================
  */
 
@@ -19,12 +19,12 @@ function requestOpenAIResponse_(request) {
     throw new Error('AI request input is required.');
   }
 
-  // 0. Pre-Flight Budget Hard Cap Check
+  // 0. Pre-Flight Budget Hard Cap Check (Scoped per Client / Owner)
   if (typeof checkApiBudgetGuardrails_ === 'function') {
-    checkApiBudgetGuardrails_(request.campaignId);
+    checkApiBudgetGuardrails_(request.campaignId, request.clientName);
   }
 
-  const apiKey = resolveValidOpenAiApiKey_();
+  const apiKey = resolveValidOpenAiApiKey_(request);
   if (!apiKey) {
     throw new Error('The OpenAI API key is not configured in Apps Script Script Properties.');
   }
@@ -39,7 +39,7 @@ function requestOpenAIResponse_(request) {
     if (err && err.isWebSearchFallbackEligible && Array.isArray(request.tools) && request.tools.length > 0) {
       Logger.log('OpenAI web_search tool unavailable for current tier/model (' + err.message + '). Retrying without web_search...');
       if (typeof checkApiBudgetGuardrails_ === 'function') {
-        checkApiBudgetGuardrails_(request.campaignId);
+        checkApiBudgetGuardrails_(request.campaignId, request.clientName);
       }
       return executeOpenAIResponsesFetch_(responsesUrl, apiKey, request, false);
     }
@@ -76,6 +76,7 @@ function executeOpenAIResponsesFetch_(responsesUrl, apiKey, request, includeTool
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: request.campaignId,
+        clientName: request.clientName,
         serviceName: 'OPENAI',
         operation: request.operation || 'OpenAIResponse',
         httpStatus: 500,
@@ -93,6 +94,7 @@ function executeOpenAIResponsesFetch_(responsesUrl, apiKey, request, includeTool
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: request.campaignId,
+        clientName: request.clientName,
         serviceName: 'OPENAI',
         operation: request.operation || 'OpenAIResponse',
         httpStatus: status,
@@ -129,6 +131,7 @@ function executeOpenAIResponsesFetch_(responsesUrl, apiKey, request, includeTool
   if (typeof logApiUsage_ === 'function') {
     logApiUsage_({
       campaignId: request.campaignId,
+      clientName: request.clientName,
       serviceName: 'OPENAI',
       operation: request.operation || 'OpenAIResponse',
       httpStatus: status,
@@ -152,10 +155,10 @@ function requestOpenAIChatCompletion_(options) {
   }
 
   if (typeof checkApiBudgetGuardrails_ === 'function') {
-    checkApiBudgetGuardrails_(options.campaignId);
+    checkApiBudgetGuardrails_(options.campaignId, options.clientName);
   }
 
-  const apiKey = resolveValidOpenAiApiKey_();
+  const apiKey = resolveValidOpenAiApiKey_(options);
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY is not configured in Project Settings (Script Properties).');
   }
@@ -189,6 +192,7 @@ function requestOpenAIChatCompletion_(options) {
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: options.campaignId,
+        clientName: options.clientName,
         serviceName: 'OPENAI',
         operation: options.operation || 'OpenAIChatCompletion',
         httpStatus: 500,
@@ -206,6 +210,7 @@ function requestOpenAIChatCompletion_(options) {
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: options.campaignId,
+        clientName: options.clientName,
         serviceName: 'OPENAI',
         operation: options.operation || 'OpenAIChatCompletion',
         httpStatus: statusCode,
@@ -227,6 +232,7 @@ function requestOpenAIChatCompletion_(options) {
   if (typeof logApiUsage_ === 'function') {
     logApiUsage_({
       campaignId: options.campaignId,
+      clientName: options.clientName,
       serviceName: 'OPENAI',
       operation: options.operation || 'OpenAIChatCompletion',
       httpStatus: statusCode,
@@ -242,12 +248,29 @@ function requestOpenAIChatCompletion_(options) {
 }
 
 /**
- * Resolves a valid OPENAI_API_KEY, ignoring sheet status labels and placeholder strings.
+ * Resolves a valid OpenAI API key strictly scoped to the campaign's Client / Owner.
+ * External clients require CLIENT_{NAME}_OPENAI_API_KEY (zero local fallback).
  */
-function resolveValidOpenAiApiKey_() {
+function resolveValidOpenAiApiKey_(context) {
   const propName = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.openAiApiKeyProperty)
     ? APP_CONFIG.openAiApiKeyProperty
     : 'OPENAI_API_KEY';
+
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const resolved = resolveClientScopedSecret_(
+      [propName, 'OPENAI_API_KEY'],
+      {
+        campaignId: context && context.campaignId ? context.campaignId : '',
+        clientName: context && context.clientName ? context.clientName : ''
+      },
+      {
+        serviceLabel: 'OpenAI',
+        throwOnMissing: true,
+        allowAgentSettingsForLocal: true
+      }
+    );
+    return resolved.key || '';
+  }
 
   const scriptVal = PropertiesService.getScriptProperties().getProperty(propName);
   if (isValidOpenAiKeyValue_(scriptVal)) return String(scriptVal).trim();
@@ -256,7 +279,7 @@ function resolveValidOpenAiApiKey_() {
   if (isValidOpenAiKeyValue_(userVal)) return String(userVal).trim();
 
   if (typeof getStudioApiKey === 'function') {
-    const studioVal = getStudioApiKey('OPENAI');
+    const studioVal = getStudioApiKey('OPENAI', context);
     if (isValidOpenAiKeyValue_(studioVal)) return String(studioVal).trim();
   }
 

@@ -24,7 +24,7 @@
       .btn-success:hover:not(:disabled) { background: #188038; }
       .btn-secondary { background: #fff; color: #174ea6; border: 1px solid #dadce0; }
       .btn-secondary:hover:not(:disabled) { background: #f1f3f4; }
-      .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; }
+      .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; margin-top: 0; }
       .row { display: flex; gap: 8px; }
       .row .field { flex: 1; }
       .status { font-size: 11px; padding: 8px; border-radius: 4px; margin-top: 8px; display: none; line-height: 1.4; }
@@ -32,6 +32,12 @@
       .status.success { display: block; background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
       .status.error { display: block; background: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }
       .hint { font-size: 11px; color: #5f6368; margin-top: 3px; font-style: italic; }
+      .client-badge { font-size: 11px; padding: 5px 8px; border-radius: 4px; margin-top: 5px; line-height: 1.35; }
+      .client-badge.local { background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
+      .client-badge.external { background: #e8f0fe; color: #174ea6; border: 1px solid #d2e3fc; }
+      .new-client-box { display: none; background: #f1f3f4; border: 1px solid #dadce0; border-radius: 6px; padding: 8px; margin-top: 6px; }
+      .new-client-actions { display: flex; gap: 6px; margin-top: 6px; }
+      .new-client-actions .btn { margin-top: 0; padding: 6px 10px; font-size: 11px; }
       hr { border: 0; border-top: 1px solid #eee; margin: 12px 0; }
       .subheading { font-weight: 700; font-size: 11px; color: #174ea6; text-transform: uppercase; margin: 8px 0 6px 0; }
       .custom-needs-container { background: #f1f3f4; border: 1px dashed #c6c9cc; border-radius: 6px; padding: 10px; margin-top: 10px; }
@@ -42,7 +48,7 @@
     <div class="card">
       <div class="header-title">
         <span>Campaign Control</span>
-        <button id="btnRefreshCampaigns" class="btn btn-secondary btn-icon" onclick="refreshCampaigns()" title="Reload campaigns list">🔄 Refresh</button>
+        <button id="btnRefreshCampaigns" class="btn btn-secondary btn-icon" onclick="refreshCampaigns()" title="Reload campaigns & client list">🔄 Refresh</button>
       </div>
       <div class="field">
         <label for="campaignSelect">Active Campaign</label>
@@ -57,23 +63,21 @@
         </div>
         <div class="field">
           <label for="campaignNameInput">Campaign Name</label>
-          <input type="text" id="campaignNameInput" placeholder="e.g. Energy Canada">
+          <input type="text" id="campaignNameInput" placeholder="e.g. Energy US">
         </div>
       </div>
       <div class="field">
-        <label for="departmentOwner">Department / Owner</label>
-        <select id="departmentOwner">
-          <option value="Procurement" selected>Procurement</option>
-          <option value="ESG Advisory">ESG Advisory</option>
-          <option value="Enterprise Sales">Enterprise Sales</option>
-          <option value="Cybersecurity & IT">Cybersecurity & IT</option>
-          <option value="Operations & Compliance">Operations & Compliance</option>
-          <option value="Enterprise SaaS / IT">Enterprise SaaS / IT</option>
-          <option value="FinTech & Banking">FinTech & Banking</option>
-          <option value="HR & Talent Ops">HR & Talent Ops</option>
-          <option value="Marketing">Marketing</option>
-          <option value="Executive Leadership">Executive Leadership</option>
-        </select>
+        <label for="departmentOwner">Client / Owner</label>
+        <select id="departmentOwner" onchange="onClientOwnerChanged()"></select>
+        <div id="newClientBox" class="new-client-box">
+          <label for="newClientNameInput">New Client / Brand Name</label>
+          <input type="text" id="newClientNameInput" placeholder="e.g. Acme Corp">
+          <div class="new-client-actions">
+            <button type="button" id="btnAddClientSave" class="btn btn-primary" onclick="confirmAddNewClient()">Save Client</button>
+            <button type="button" id="btnAddClientCancel" class="btn btn-secondary" onclick="cancelAddNewClient()">Cancel</button>
+          </div>
+        </div>
+        <div id="clientScopeBadge" class="client-badge local"></div>
       </div>
     </div>
 
@@ -208,15 +212,15 @@
           <label class="checkbox-item"><input type="checkbox" id="incEvaluater" checked> eValuater / EvA Solution Fit</label>
         </div>
 
-        <!-- Custom Manual Business Needs for Any Department -->
+        <!-- Custom Manual Business Needs -->
         <div class="custom-needs-container">
-          <label for="customBusinessNeeds" style="color:#202124; font-weight:700;">Manual / Department Business Needs</label>
-          <div class="hint" style="margin-bottom:6px;">Define specific pain points, software migrations, or triggers for your department:</div>
+          <label for="customBusinessNeeds" style="color:#202124; font-weight:700;">Manual Business Needs & Triggers</label>
+          <div class="hint" style="margin-bottom:6px;">Define specific pain points, software migrations, or buying triggers for this campaign:</div>
 
           <div class="field" style="margin-bottom:6px;">
             <select id="presetNeedSelect" onchange="applyDepartmentPreset(this.value)">
-              <option value="">-- Quick Load Department Preset (Optional) --</option>
-              <option value="procurement">Procurement (Vendor Risk, Questionnaire Drag, Tier-1 Audits)</option>
+              <option value="">-- Quick Load Pain-Point Preset (Optional) --</option>
+              <option value="procurement">Procurement & Supply Chain (Vendor Risk, Questionnaire Drag, Tier-1 Audits)</option>
               <option value="cybersecurity">Cybersecurity & IT (SOC 2, ISO 27001, AWS Migration)</option>
               <option value="enterprise_saas">Enterprise SaaS (Legacy ERP Migration, API Modernization)</option>
               <option value="fintech">FinTech & Banking (Banking Regulations, AML, Payment Compliance)</option>
@@ -385,7 +389,7 @@
         </div>
         <div class="field">
           <label for="senderCompany">Sender Company Name</label>
-          <input type="text" id="senderCompany" placeholder="e.g. Energy Canada Solutions">
+          <input type="text" id="senderCompany" placeholder="e.g. eValuater Solutions">
         </div>
       </div>
     </div>
@@ -403,10 +407,13 @@
     <script>
       var serverCampaigns = <?!= (typeof initialCampaigns !== 'undefined' && initialCampaigns) ? JSON.stringify(initialCampaigns) : '[]' ?>;
       var serverConfigsMap = <?!= (typeof initialConfigsMap !== 'undefined' && initialConfigsMap) ? JSON.stringify(initialConfigsMap) : '{}' ?>;
+      var serverClients = <?!= (typeof initialClients !== 'undefined' && initialClients) ? JSON.stringify(initialClients) : '["Growth Target","Pilot Acme"]' ?>;
       var currentActiveId = '<?= (typeof activeCampaignId !== 'undefined' && activeCampaignId) ? activeCampaignId : "" ?>';
+      var lastValidClientOwner = 'Growth Target';
       var isPipelineBusy = false;
 
       window.onload = function() {
+        renderClientOptions(serverClients, 'Growth Target');
         renderCampaignOptions(serverCampaigns, currentActiveId);
         onSenderChanged();
         if (serverCampaigns && serverCampaigns.length > 0) {
@@ -417,6 +424,7 @@
           document.getElementById('campaignIdInput').value = 'CMP-001';
           document.getElementById('campaignNameInput').value = 'Enterprise Scope 3 & ESG Supply Chain Readiness';
           applyDepartmentPreset('procurement');
+          updateClientScopeBadge_();
         }
       };
 
@@ -427,6 +435,134 @@
         document.getElementById('btnRunPersonaMapper').disabled = isPipelineBusy;
         document.getElementById('btnRefreshCampaigns').disabled = isPipelineBusy;
         document.getElementById('campaignSelect').disabled = isPipelineBusy;
+      }
+
+      function normalizeClientPrefix_(clientName) {
+        const clean = String(clientName || '')
+          .trim()
+          .toUpperCase()
+          .replace(/[^A-Z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '');
+        return clean ? ('CLIENT_' + clean + '_') : '';
+      }
+
+      function isLocalBrand_(clientName) {
+        const norm = String(clientName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        return !norm || norm === 'GROWTHTARGET' || norm === 'LOCAL' || norm === 'AGENCY' || norm === 'DEFAULT';
+      }
+
+      function renderClientOptions(clients, selectedClient) {
+        const select = document.getElementById('departmentOwner');
+        const list = (Array.isArray(clients) && clients.length > 0)
+          ? clients.slice()
+          : ['Growth Target', 'Pilot Acme'];
+
+        select.innerHTML = '';
+        let matched = false;
+        const target = String(selectedClient || list[0] || 'Growth Target').trim();
+
+        list.forEach(function(clientName) {
+          const opt = document.createElement('option');
+          opt.value = clientName;
+          opt.textContent = clientName;
+          if (clientName.toLowerCase() === target.toLowerCase()) {
+            opt.selected = true;
+            matched = true;
+          }
+          select.appendChild(opt);
+        });
+
+        if (!matched && target && target !== '__ADD_NEW_CLIENT__') {
+          const legacyOpt = document.createElement('option');
+          legacyOpt.value = target;
+          legacyOpt.textContent = target;
+          legacyOpt.selected = true;
+          select.appendChild(legacyOpt);
+        }
+
+        const addOpt = document.createElement('option');
+        addOpt.value = '__ADD_NEW_CLIENT__';
+        addOpt.textContent = '+ Add New Client...';
+        select.appendChild(addOpt);
+
+        if (select.value && select.value !== '__ADD_NEW_CLIENT__') {
+          lastValidClientOwner = select.value;
+        }
+        updateClientScopeBadge_();
+        onSenderChanged();
+      }
+
+      function onClientOwnerChanged() {
+        const select = document.getElementById('departmentOwner');
+        const box = document.getElementById('newClientBox');
+        if (select.value === '__ADD_NEW_CLIENT__') {
+          box.style.display = 'block';
+          const input = document.getElementById('newClientNameInput');
+          input.value = '';
+          input.focus();
+          return;
+        }
+        box.style.display = 'none';
+        if (select.value) lastValidClientOwner = select.value;
+        updateClientScopeBadge_();
+        onSenderChanged();
+      }
+
+      function cancelAddNewClient() {
+        document.getElementById('newClientBox').style.display = 'none';
+        renderClientOptions(serverClients, lastValidClientOwner || 'Growth Target');
+      }
+
+      function confirmAddNewClient() {
+        const input = document.getElementById('newClientNameInput');
+        const newName = input.value.trim();
+        if (!newName) {
+          alert('Please enter a Client / Brand name.');
+          input.focus();
+          return;
+        }
+
+        const btnSave = document.getElementById('btnAddClientSave');
+        const btnCancel = document.getElementById('btnAddClientCancel');
+        btnSave.disabled = true;
+        btnCancel.disabled = true;
+        showStatus('Registering client "' + newName + '" in Lists & Settings...', 'info');
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            btnSave.disabled = false;
+            btnCancel.disabled = false;
+            document.getElementById('newClientBox').style.display = 'none';
+            if (res && res.clients) {
+              serverClients = res.clients;
+            } else if (serverClients.indexOf(newName) < 0) {
+              serverClients.push(newName);
+            }
+            const addedName = (res && res.clientName) ? res.clientName : newName;
+            renderClientOptions(serverClients, addedName);
+            showStatus('✅ ' + (res && res.message ? res.message : 'Client added!'), 'success');
+          })
+          .withFailureHandler(function(err) {
+            btnSave.disabled = false;
+            btnCancel.disabled = false;
+            showStatus('Failed to add client: ' + err.message, 'error');
+          })
+          .addClientAccountToSettings(newName);
+      }
+
+      function updateClientScopeBadge_() {
+        const badge = document.getElementById('clientScopeBadge');
+        const val = document.getElementById('departmentOwner').value;
+        if (!val || val === '__ADD_NEW_CLIENT__') return;
+
+        if (isLocalBrand_(val)) {
+          badge.className = 'client-badge local';
+          badge.textContent = '🏠 Local Agency Brand — Uses your default Script Properties and local Gmail.';
+        } else {
+          const prefix = normalizeClientPrefix_(val);
+          badge.className = 'client-badge external';
+          badge.textContent = '🔒 Strict Client Isolation — Requires ' + prefix + '* keys in Script Properties (no local fallback).';
+        }
       }
 
       function renderCampaignOptions(campaigns, selectedId) {
@@ -462,19 +598,24 @@
       }
 
       function refreshCampaigns(quiet, preferredId) {
-        if (!quiet) showStatus('Refreshing campaigns list from spreadsheet...', 'info');
+        if (!quiet) showStatus('Refreshing campaigns & client list from spreadsheet...', 'info');
         google.script.run
           .withSuccessHandler(function(res) {
-            if (res && res.campaigns) {
-              serverCampaigns = res.campaigns;
-              serverConfigsMap = res.configsMap || {};
-              const curId = preferredId || document.getElementById('campaignSelect').value.trim() || res.activeCampaignId;
-              renderCampaignOptions(serverCampaigns, curId);
-              if (curId && serverConfigsMap[curId]) {
-                document.getElementById('campaignSelect').value = curId;
-                populateFormWithData(serverConfigsMap[curId]);
+            if (res) {
+              if (res.clients) serverClients = res.clients;
+              if (res.campaigns) {
+                serverCampaigns = res.campaigns;
+                serverConfigsMap = res.configsMap || {};
+                const curId = preferredId || document.getElementById('campaignSelect').value.trim() || res.activeCampaignId;
+                renderCampaignOptions(serverCampaigns, curId);
+                if (curId && serverConfigsMap[curId]) {
+                  document.getElementById('campaignSelect').value = curId;
+                  populateFormWithData(serverConfigsMap[curId]);
+                } else {
+                  renderClientOptions(serverClients, document.getElementById('departmentOwner').value || 'Growth Target');
+                }
+                if (!quiet) showStatus('Loaded ' + serverCampaigns.length + ' campaign(s) & ' + serverClients.length + ' client(s).', 'success');
               }
-              if (!quiet) showStatus('Loaded ' + serverCampaigns.length + ' campaign(s).', 'success');
             }
           })
           .withFailureHandler(function(err) {
@@ -526,24 +667,10 @@
         document.getElementById('campaignIdInput').value = cid;
         document.getElementById('campaignNameInput').value = data.name || cid;
         document.getElementById('presetNeedSelect').value = '';
+        document.getElementById('newClientBox').style.display = 'none';
 
-        const targetDept = data.department || 'Procurement';
-        const deptSelect = document.getElementById('departmentOwner');
-        let matched = false;
-        for (let i = 0; i < deptSelect.options.length; i++) {
-          if (deptSelect.options[i].value.toLowerCase() === targetDept.toLowerCase()) {
-            deptSelect.selectedIndex = i;
-            matched = true;
-            break;
-          }
-        }
-        if (!matched) {
-          const newOpt = document.createElement('option');
-          newOpt.value = targetDept;
-          newOpt.textContent = targetDept;
-          deptSelect.appendChild(newOpt);
-          deptSelect.value = targetDept;
-        }
+        const targetClient = data.department || 'Growth Target';
+        renderClientOptions(serverClients, targetClient);
 
         document.getElementById('targetCountries').value = data.country || '';
         document.getElementById('targetIndustries').value = data.industry || '';
@@ -659,19 +786,31 @@
         const label = document.getElementById('senderEndpointLabel');
         const input = document.getElementById('senderEndpointInput');
         const hint = document.getElementById('senderEndpointHint');
+        const selectedClient = document.getElementById('departmentOwner') ? document.getElementById('departmentOwner').value : 'Growth Target';
+        const isLocal = isLocalBrand_(selectedClient);
+        const prefix = normalizeClientPrefix_(selectedClient);
 
         if (p.indexOf('Gmail') >= 0) {
           label.textContent = 'Email Sender Endpoint (Not Required for Gmail)';
-          input.placeholder = 'Not required — sends directly via your Google Workspace';
-          hint.textContent = 'Your current Google Workspace email will be used automatically. No endpoint required.';
+          if (isLocal) {
+            input.placeholder = 'Not required — sends via your local Google Workspace';
+            hint.textContent = 'Your local Google Workspace email will be used automatically. No endpoint required.';
+          } else {
+            input.placeholder = 'Not required — routed via client Gmail Relay Script Properties';
+            hint.textContent = 'Requires ' + prefix + 'GMAIL_RELAY_URL and ' + prefix + 'GMAIL_RELAY_SECRET in Script Properties so emails go from the client\'s Google Workspace.';
+          }
         } else if (p === 'Smartlead') {
           label.textContent = 'Smartlead Campaign ID';
           input.placeholder = 'e.g. 123456';
-          hint.textContent = 'Enter the Campaign ID from your Smartlead dashboard.';
+          hint.textContent = isLocal
+            ? 'Enter Smartlead Campaign ID (uses SMARTLEAD_API_KEY).'
+            : 'Enter Smartlead Campaign ID (uses ' + prefix + 'SMARTLEAD_API_KEY).';
         } else if (p === 'Instantly') {
           label.textContent = 'Instantly Campaign ID';
           input.placeholder = 'e.g. 987654-abcd-ef01';
-          hint.textContent = 'Enter the Campaign UUID from your Instantly dashboard.';
+          hint.textContent = isLocal
+            ? 'Enter Instantly Campaign UUID (uses INSTANTLY_API_KEY).'
+            : 'Enter Instantly Campaign UUID (uses ' + prefix + 'INSTANTLY_API_KEY).';
         } else if (p === 'Custom Webhook') {
           label.textContent = 'Webhook URL (Make, Zapier, CRM)';
           input.placeholder = 'https://hook.eu1.make.com/...';
@@ -683,15 +822,21 @@
         if (isPipelineBusy) return;
         const cid = document.getElementById('campaignIdInput').value.trim();
         const cname = document.getElementById('campaignNameInput').value.trim();
+        const clientOwner = document.getElementById('departmentOwner').value;
+
         if (!cid) {
           alert('Please enter a Campaign ID (e.g. CMP-001)');
+          return;
+        }
+        if (!clientOwner || clientOwner === '__ADD_NEW_CLIENT__') {
+          alert('Please select a Client / Owner or finish saving your new client name first.');
           return;
         }
 
         const payload = {
           id: cid,
           name: cname || cid,
-          department: document.getElementById('departmentOwner').value,
+          department: clientOwner,
           country: document.getElementById('targetCountries').value.trim(),
           industry: document.getElementById('targetIndustries').value.trim(),
           size: document.getElementById('companySize').value.trim(),

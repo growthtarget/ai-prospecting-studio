@@ -1,14 +1,15 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * GOOGLE GEMINI AI PROVIDER (WITH GOOGLE SEARCH GROUNDING & USAGE TRACKING)
+ * GOOGLE GEMINI AI PROVIDER (WITH GOOGLE SEARCH GROUNDING & CLIENT ISOLATION)
  * ============================================================================
  * File: GeminiProvider.gs / GeminiProvider.js
  * 
  * Connects directly to Google Generative Language API (v1beta)
  * with real-time Google Search Grounding, free-tier/unpaid fallback safety,
  * automatic model cascade on 503/429 overload (3.8-flash -> 3.5-flash-lite -> 2.5-flash),
- * fast thinking configuration, resilient JSON parsing, and ApiTracker logging.
+ * fast thinking configuration, resilient JSON parsing, strict client-scoped
+ * API key resolution, and ApiTracker logging.
  * ============================================================================
  */
 
@@ -20,13 +21,13 @@ function callGemini_(options) {
   const startTimeMs = Date.now();
   const MAX_ELAPSED_MS = 220000; // Stop gracefully before Apps Script's 360s hard limit
 
-  // 0. Pre-Flight Budget Hard Cap Check (Never catch/suppress hard-cap aborts)
+  // 0. Pre-Flight Budget Hard Cap Check (Scoped per Client / Owner)
   if (typeof checkApiBudgetGuardrails_ === 'function') {
-    checkApiBudgetGuardrails_(options.campaignId);
+    checkApiBudgetGuardrails_(options.campaignId, options.clientName);
   }
 
-  // 1. Multi-Tier API Key Resolution (Rejecting Protected/Placeholder Labels)
-  const apiKey = resolveValidGeminiApiKey_();
+  // 1. Strict Client-Scoped API Key Resolution (Zero fallback for external clients)
+  const apiKey = resolveValidGeminiApiKey_(options);
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is missing. Add a valid key under Project Settings > Script Properties.');
   }
@@ -47,10 +48,10 @@ function callGemini_(options) {
     });
 
   // 3. Check GOOGLE_SEARCH_GROUNDING setting & recent grounding quota skip cache (keyed by API key suffix)
-  const groundingAllowedBySheet = isGeminiSearchGroundingEnabled_();
+  const groundingAllowedByConfig = isGeminiSearchGroundingEnabled_(options);
   const groundingSkipKey = 'GEMINI_GROUNDING_SKIP_' + apiKey.slice(-6);
   const groundingRecentlyBlocked = isCacheFlagSet_(groundingSkipKey);
-  const wantGrounding = (options.enableWebSearch !== false) && groundingAllowedBySheet && !groundingRecentlyBlocked;
+  const wantGrounding = (options.enableWebSearch !== false) && groundingAllowedByConfig && !groundingRecentlyBlocked;
 
   let responseData = null;
   let lastError = null;
@@ -63,7 +64,7 @@ function callGemini_(options) {
     }
 
     if (typeof checkApiBudgetGuardrails_ === 'function') {
-      checkApiBudgetGuardrails_(options.campaignId);
+      checkApiBudgetGuardrails_(options.campaignId, options.clientName);
     }
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
@@ -231,6 +232,7 @@ function executeGeminiFetch_(url, model, options, enableGroundingTool, allowThin
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: options.campaignId,
+        clientName: options.clientName,
         serviceName: 'GEMINI',
         operation: options.operation || 'CompanyDiscovery',
         httpStatus: 500,
@@ -256,6 +258,7 @@ function executeGeminiFetch_(url, model, options, enableGroundingTool, allowThin
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: options.campaignId,
+        clientName: options.clientName,
         serviceName: 'GEMINI',
         operation: options.operation || 'CompanyDiscovery',
         httpStatus: statusCode,
@@ -294,6 +297,7 @@ function executeGeminiFetch_(url, model, options, enableGroundingTool, allowThin
   if (typeof logApiUsage_ === 'function') {
     logApiUsage_({
       campaignId: options.campaignId,
+      clientName: options.clientName,
       serviceName: 'GEMINI',
       operation: options.operation || 'CompanyDiscovery',
       httpStatus: statusCode,
@@ -364,12 +368,29 @@ function setCacheFlag_(key, seconds) {
 }
 
 /**
- * Resolves a valid GEMINI_API_KEY, ignoring sheet status labels and placeholder strings.
+ * Resolves a valid Gemini API key strictly scoped to the campaign's Client / Owner.
+ * External clients require CLIENT_{NAME}_GEMINI_API_KEY (zero local fallback).
  */
-function resolveValidGeminiApiKey_() {
+function resolveValidGeminiApiKey_(options) {
   const propName = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.geminiApiKeyProperty)
     ? APP_CONFIG.geminiApiKeyProperty
     : 'GEMINI_API_KEY';
+
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const resolved = resolveClientScopedSecret_(
+      [propName, 'GEMINI_API_KEY'],
+      {
+        campaignId: options && options.campaignId ? options.campaignId : '',
+        clientName: options && options.clientName ? options.clientName : ''
+      },
+      {
+        serviceLabel: 'Gemini AI',
+        throwOnMissing: true,
+        allowAgentSettingsForLocal: true
+      }
+    );
+    return resolved.key || '';
+  }
 
   const scriptVal = PropertiesService.getScriptProperties().getProperty(propName);
   if (isValidGeminiKeyValue_(scriptVal)) return String(scriptVal).trim();
@@ -378,7 +399,7 @@ function resolveValidGeminiApiKey_() {
   if (isValidGeminiKeyValue_(userVal)) return String(userVal).trim();
 
   if (typeof getStudioApiKey === 'function') {
-    const studioVal = getStudioApiKey('GEMINI');
+    const studioVal = getStudioApiKey('GEMINI', options);
     if (isValidGeminiKeyValue_(studioVal)) return String(studioVal).trim();
   }
 
@@ -396,11 +417,25 @@ function isValidGeminiKeyValue_(val) {
 }
 
 /**
- * Checks GOOGLE_SEARCH_GROUNDING in Agent Settings (defaults to true if unset).
+ * Checks GOOGLE_SEARCH_GROUNDING in client-specific override or Agent Settings (defaults to true if unset).
  */
-function isGeminiSearchGroundingEnabled_() {
+function isGeminiSearchGroundingEnabled_(options) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+    if (options && typeof resolveCampaignClientName_ === 'function' && typeof isLocalAgencyClient_ === 'function' && typeof normalizeClientPropertyPrefix_ === 'function') {
+      const clientName = resolveCampaignClientName_(options.campaignId, options.clientName, ss);
+      if (!isLocalAgencyClient_(clientName)) {
+        const overrideProp = normalizeClientPropertyPrefix_(clientName) + 'GOOGLE_SEARCH_GROUNDING';
+        const overrideVal = String(PropertiesService.getScriptProperties().getProperty(overrideProp) || '').trim().toUpperCase();
+        if (overrideVal === 'FALSE' || overrideVal === 'NO' || overrideVal === '0' || overrideVal === 'DISABLED') {
+          return false;
+        }
+        if (overrideVal === 'TRUE' || overrideVal === 'YES' || overrideVal === '1' || overrideVal === 'ENABLED') {
+          return true;
+        }
+      }
+    }
+
     if (!ss) return true;
     const sheet = ss.getSheetByName('Agent Settings');
     if (!sheet || sheet.getLastRow() <= 1) return true;

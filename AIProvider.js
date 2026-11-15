@@ -1,13 +1,13 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * AI PROVIDER UNIVERSAL ROUTER
+ * AI PROVIDER UNIVERSAL ROUTER (CLIENT-ISOLATED)
  * ============================================================================
  * File: AIProvider.gs / AIProvider.js
  * 
  * Routes requests dynamically to Gemini (with Google Search Grounding)
  * or OpenAI (GPT-4o) with structured JSON extraction, citation parsing,
- * and strict ApiTracker budget guardrail enforcement.
+ * strict client-scoped API key routing, and ApiTracker budget guardrails.
  * ============================================================================
  */
 
@@ -20,20 +20,25 @@ function callAI(options) {
     throw new Error('callAI requires an options object with a prompt.');
   }
 
+  const routedOptions = Object.assign({}, options);
+  if (!routedOptions.clientName && typeof resolveCampaignClientName_ === 'function') {
+    routedOptions.clientName = resolveCampaignClientName_(routedOptions.campaignId, '');
+  }
+
   const defaultProvider = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultAIProvider)
     ? APP_CONFIG.defaultAIProvider
     : 'GEMINI';
 
-  const provider = String(options.provider || defaultProvider).toUpperCase();
+  const provider = String(routedOptions.provider || defaultProvider).toUpperCase();
   let response;
 
   if (provider === 'GEMINI') {
     if (typeof callGemini_ !== 'function') {
       throw new Error('callGemini_() is not loaded. Ensure GeminiProvider.gs is present.');
     }
-    response = callGemini_(options);
+    response = callGemini_(routedOptions);
   } else if (provider === 'OPENAI') {
-    response = executeOpenAiRouting_(options);
+    response = executeOpenAiRouting_(routedOptions);
   } else {
     throw new Error('Unsupported AI provider: ' + provider);
   }
@@ -62,6 +67,7 @@ function executeOpenAiRouting_(options) {
     try {
       const openAiPayload = {
         campaignId: options.campaignId,
+        clientName: options.clientName,
         operation: options.operation || 'OpenAIResponse',
         model: model,
         input: options.prompt,
@@ -73,8 +79,10 @@ function executeOpenAiRouting_(options) {
       rawOpenAi = requestOpenAIResponse_(openAiPayload);
     } catch (e) {
       const errMsg = String(e && e.message ? e.message : e);
-      // Never swallow budget cap aborts or missing API key errors
+      // Never swallow budget cap aborts, missing client credentials, or auth errors
       if (errMsg.indexOf('RUNAWAY LOOP ABORTED') >= 0 ||
+          errMsg.indexOf('Missing client credential') >= 0 ||
+          errMsg.indexOf('Strict client isolation') >= 0 ||
           errMsg.indexOf('not configured') >= 0 ||
           errMsg.indexOf('HTTP 401') >= 0) {
         throw e;
@@ -88,6 +96,7 @@ function executeOpenAiRouting_(options) {
     if (typeof requestOpenAIChatCompletion_ === 'function') {
       rawOpenAi = requestOpenAIChatCompletion_({
         campaignId: options.campaignId,
+        clientName: options.clientName,
         operation: options.operation || 'OpenAIChatCompletion',
         model: model,
         prompt: options.prompt,
@@ -97,10 +106,10 @@ function executeOpenAiRouting_(options) {
     } else {
       // Defensive fallback if OpenAIProvider.js helper is unavailable
       if (typeof checkApiBudgetGuardrails_ === 'function') {
-        checkApiBudgetGuardrails_(options.campaignId);
+        checkApiBudgetGuardrails_(options.campaignId, options.clientName);
       }
 
-      const apiKey = resolveAiProviderOpenAiKey_();
+      const apiKey = resolveAiProviderOpenAiKey_(options);
       if (!apiKey) {
         throw new Error('OPENAI_API_KEY is not configured in Project Settings (Script Properties).');
       }
@@ -144,16 +153,24 @@ function executeOpenAiRouting_(options) {
 }
 
 /**
- * Resolves valid OPENAI_API_KEY without accepting sheet placeholder strings.
+ * Resolves valid OpenAI API key strictly scoped to campaign/client without fallback.
  */
-function resolveAiProviderOpenAiKey_() {
+function resolveAiProviderOpenAiKey_(options) {
   if (typeof resolveValidOpenAiApiKey_ === 'function') {
-    return resolveValidOpenAiApiKey_();
+    return resolveValidOpenAiApiKey_(options || {});
+  }
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const resolved = resolveClientScopedSecret_(
+      ['OPENAI_API_KEY'],
+      options || {},
+      { serviceLabel: 'OpenAI', throwOnMissing: true, allowAgentSettingsForLocal: true }
+    );
+    return resolved.key || '';
   }
   const candidates = [
     PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY'),
     PropertiesService.getUserProperties().getProperty('OPENAI_API_KEY'),
-    typeof getStudioApiKey === 'function' ? getStudioApiKey('OPENAI') : ''
+    typeof getStudioApiKey === 'function' ? getStudioApiKey('OPENAI', options) : ''
   ];
   for (let i = 0; i < candidates.length; i++) {
     const val = String(candidates[i] || '').trim();

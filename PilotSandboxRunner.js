@@ -1,12 +1,12 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * AUTHENTIC PIPELINE PILOT RUNNER (FULL WORKSPACE GENERATION & SYNC)
+ * AUTHENTIC PIPELINE PILOT RUNNER (CLIENT-ISOLATED SANDBOX SIMULATION)
  * ============================================================================
  * File: PilotSandboxRunner.gs / PilotSandboxRunner.js
  * 
  * CAPABILITIES:
- * 1. Generates & Synchronizes ALL 13 Tabs for the Pilot Run:
+ * 1. Generates & Synchronizes ALL 13 Tabs for the Pilot Run (Client: "Pilot Acme"):
  *    - Cold-start safe: Automatically seeds canonical headers across all 13 tabs.
  *    - Updates "Campaign Configuration" strictly preserving the locked 38 parameters.
  *    - Generates 39-column row in "Persona Mapper Settings" for PILOT-CMP-001.
@@ -14,8 +14,8 @@
  *    - Populates "Campaigns" (28 master cols), "Company Database" (Col J Campaign ID),
  *      "Company Intelligence" (25 cols), "Persona Leads" (29 cols),
  *      "Research Evidence" (9 canonical cols), "Prospect Review Queue" (45 cols),
- *      and logs token/credit usage to "API_Usage_Log".
- * 2. Creates Safe Gmail Drafts for qualified leads in your personal Gmail.
+ *      and logs client-tagged token/credit usage to "API_Usage_Log".
+ * 2. Creates Safe Gmail Drafts (via Pilot Acme Relay if configured, or local sandbox Gmail).
  * 3. Enforces real-time suppression rules from "Lists & Settings".
  * 4. Safe Purge: Removes pilot records from ALL tabs including API_Usage_Log and Execution Logs.
  * ============================================================================
@@ -24,7 +24,7 @@
 const PILOT_CONFIG = {
   CAMPAIGN_ID: 'PILOT-CMP-001',
   CAMPAIGN_NAME: '[PILOT] Enterprise Compliance & Operations Readiness',
-  DEPARTMENT: 'ESG Advisory',
+  DEPARTMENT: 'Pilot Acme',
   COMPANY_LIMIT: 5,
   RESEARCH_DEPTH: 'Deep Persona',
   MIN_COMPANY_SCORE: 80,
@@ -51,12 +51,12 @@ const PILOT_CONFIG = {
 };
 
 /**
- * MAIN ENTRY POINT: Runs the full pilot, logs API usage, and updates Dashboard.
+ * MAIN ENTRY POINT: Runs the full pilot for client "Pilot Acme", logs API usage, and updates Dashboard.
  */
 function runPilotOnRealSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   Logger.log('===============================================================');
-  Logger.log('>>> STARTING FULL WORKSPACE PILOT: ' + PILOT_CONFIG.CAMPAIGN_ID + ' <<<');
+  Logger.log('>>> STARTING FULL WORKSPACE PILOT: ' + PILOT_CONFIG.CAMPAIGN_ID + ' (Client: ' + PILOT_CONFIG.DEPARTMENT + ') <<<');
   Logger.log('===============================================================');
 
   try {
@@ -67,14 +67,17 @@ function runPilotOnRealSheets() {
     purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
     Logger.log('Step 1: Purged previous pilot records.');
 
-    // Step 2: Ensure and load suppression rules from "Lists & Settings"
+    // Step 2: Ensure client entries & load suppression rules from "Lists & Settings"
     ensureSuppressionRulesInSettings(ss);
+    if (typeof refreshClientDropdownValidations_ === 'function') {
+      refreshClientDropdownValidations_(ss);
+    }
     const suppressionRules = loadSuppressionRulesFromSettings(ss);
     Logger.log('Step 2: Loaded suppression rules (' + suppressionRules.domains.length + ' domains, ' + suppressionRules.emails.length + ' emails).');
 
     // Step 3: Update "Campaign Configuration" tab with standardized Pilot parameters (locked 38 rows)
     updateCampaignConfigurationTab(ss, PILOT_CONFIG);
-    Logger.log('Step 3: "Campaign Configuration" updated with Company Limit: ' + PILOT_CONFIG.COMPANY_LIMIT);
+    Logger.log('Step 3: "Campaign Configuration" updated for client ' + PILOT_CONFIG.DEPARTMENT + ' with Company Limit: ' + PILOT_CONFIG.COMPANY_LIMIT);
 
     // Step 4: Generate 39-column settings row in "Persona Mapper Settings"
     generatePersonaMapperSettingsRow(ss, PILOT_CONFIG);
@@ -109,10 +112,11 @@ function runPilotOnRealSheets() {
     writePilotReviewQueue(ss, processedQueue);
     Logger.log('Step 10: Staged and processed leads in "Prospect Review Queue".');
 
-    // Step 11: Log API Usage & Estimated Cost to "API_Usage_Log"
+    // Step 11: Log API Usage & Estimated Cost to "API_Usage_Log" tagged with Client "Pilot Acme"
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: PILOT_CONFIG.CAMPAIGN_ID,
+        clientName: PILOT_CONFIG.DEPARTMENT,
         serviceName: 'GEMINI',
         operation: 'PilotSandboxDiscovery',
         httpStatus: 200,
@@ -124,6 +128,7 @@ function runPilotOnRealSheets() {
       });
       logApiUsage_({
         campaignId: PILOT_CONFIG.CAMPAIGN_ID,
+        clientName: PILOT_CONFIG.DEPARTMENT,
         serviceName: 'ZeroBounce',
         operation: 'EmailVerification',
         httpStatus: 200,
@@ -143,10 +148,10 @@ function runPilotOnRealSheets() {
     const draftsCreated = processedQueue.filter(function(p) { return p['Send Status'] === 'Draft Created in Gmail'; }).length;
     const blockedCount = processedQueue.filter(function(p) { return p['Compliance Status'] !== 'Passed'; }).length;
     updatePilotDashboard(ss, PILOT_CONFIG, enrichedCompanies.length, pilotPersonas.length, draftsCreated, blockedCount);
-    Logger.log('Step 13: Master Dashboard updated with live KPIs.');
+    Logger.log('Step 13: Master Dashboard updated with live KPIs for client ' + PILOT_CONFIG.DEPARTMENT + '.');
 
     ss.toast(
-      'Pilot generated successfully! ' + draftsCreated + ' Gmail drafts created. Check Dashboard, API_Usage_Log, and Gmail.',
+      'Pilot for "' + PILOT_CONFIG.DEPARTMENT + '" completed! ' + draftsCreated + ' Gmail drafts created. Check Dashboard, API_Usage_Log, and Gmail.',
       '🚀 Pilot Complete',
       12
     );
@@ -332,7 +337,11 @@ function generatePersonaMapperSettingsRow(ss, config) {
     ''
   ];
 
-  sheet.appendRow(row);
+  const targetRow = sheet.getLastRow() + 1;
+  sheet.getRange(targetRow, 9).setNumberFormat('0');
+  sheet.getRange(targetRow, 26, 1, 3).setNumberFormat('0');
+  sheet.getRange(targetRow, 35).setNumberFormat('0');
+  sheet.getRange(targetRow, 1, 1, row.length).setValues([row]);
 }
 
 function writePilotCampaign(ss, config) {
@@ -414,7 +423,10 @@ function writePilotCampaign(ss, config) {
     sheet.setFrozenRows(1);
   }
 
-  sheet.appendRow(master28Row);
+  const targetRow = sheet.getLastRow() + 1;
+  sheet.getRange(targetRow, 8).setNumberFormat('0');
+  sheet.getRange(targetRow, 10, 1, 4).setNumberFormat('0');
+  sheet.getRange(targetRow, 1, 1, master28Row.length).setValues([master28Row]);
 }
 
 function getPilotCompanyDatabaseRecords(config) {
@@ -507,13 +519,13 @@ function getPilotCompaniesData(config) {
       'Business Triggers': 'Active Trigger: ' + config.CUSTOM_BUSINESS_NEEDS.slice(0, 80),
       'eValuater Solution Fit': 'High',
       'Company Opportunity Score': 94,
-      'Company Opportunity': 'Urgent bottleneck: manual evidence collection pulling engineering bandwidth (Matched for ' + config.DEPARTMENT + ')',
+      'Company Opportunity': 'Urgent bottleneck: manual evidence collection pulling engineering bandwidth (Client: ' + config.DEPARTMENT + ')',
       'Evidence URLs': 'https://example.com/apex-operations-audit',
       'Evidence Checked Date': dateStr,
       'Verification Status': 'Verified',
       'Human Review Status': 'Accepted',
       'Last Enriched At': nowStr,
-      'Company Score Rationale': 'High alignment with ' + config.DEPARTMENT + ' criteria.'
+      'Company Score Rationale': 'High alignment with ' + config.DEPARTMENT + ' campaign criteria.'
     },
     {
       'Campaign ID': config.CAMPAIGN_ID,
@@ -766,6 +778,10 @@ function writePilotPersonaLeads(ss, personas) {
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
 }
 
+/**
+ * Checks if Pilot Acme has a live Client Gmail Relay configured; if so, routes sandbox drafts through it.
+ * Otherwise safely creates sandbox test drafts in local Gmail so Pilot testing works without a separate Workspace.
+ */
 function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressionRules, config) {
   const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@'];
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -777,6 +793,24 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
   (enrichedCompanies || []).forEach(function(c) {
     companyScoreMap[c['Company ID']] = c['Company Opportunity Score'];
   });
+
+  // Check optional Pilot Acme Gmail Relay configuration (sandbox only)
+  let relayUrl = '';
+  let relaySecret = '';
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const urlCheck = resolveClientScopedSecret_(
+      ['GMAIL_RELAY_URL'],
+      { campaignId: config.CAMPAIGN_ID, clientName: config.DEPARTMENT },
+      { throwOnMissing: false }
+    );
+    const secCheck = resolveClientScopedSecret_(
+      ['GMAIL_RELAY_SECRET'],
+      { campaignId: config.CAMPAIGN_ID, clientName: config.DEPARTMENT },
+      { throwOnMissing: false }
+    );
+    relayUrl = urlCheck.key || '';
+    relaySecret = secCheck.key || '';
+  }
 
   return personas.map(function(p) {
     const email = (p['Business Email'] || '').trim().toLowerCase();
@@ -790,6 +824,7 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
     let sendStatus = 'Queued';
     let sendError = '';
     let draftId = '';
+    let draftNote = '';
 
     if (!email || !emailRegex.test(email)) {
       complianceStatus = 'Failed - Invalid Syntax';
@@ -810,15 +845,40 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
 
       if (approvalStatus === 'Approved (Auto-Pilot)' || verificationStatus === 'catch-all') {
         try {
-          const draft = GmailApp.createDraft(
-            p['Business Email'],
-            p['Draft Subject'],
-            p['Draft Email'],
-            { name: config.SENDER_NAME }
-          );
-          draftId = draft.getId();
+          if (relayUrl && relaySecret && /^https:\/\//i.test(relayUrl)) {
+            const relayRes = UrlFetchApp.fetch(relayUrl, {
+              method: 'post',
+              contentType: 'application/json',
+              payload: JSON.stringify({
+                secret: relaySecret,
+                action: 'createDraft',
+                to: p['Business Email'],
+                subject: p['Draft Subject'],
+                body: p['Draft Email'],
+                senderName: config.SENDER_NAME,
+                campaignId: config.CAMPAIGN_ID,
+                clientName: config.DEPARTMENT
+              }),
+              muteHttpExceptions: true
+            });
+            const parsed = JSON.parse(relayRes.getContentText() || '{}');
+            if (!parsed || parsed.success !== true) {
+              throw new Error(parsed && parsed.error ? parsed.error : 'Relay error');
+            }
+            draftId = parsed.draftId || 'Client-Relay-Draft';
+            draftNote = 'Draft created via ' + config.DEPARTMENT + ' Relay ID: ' + draftId;
+          } else {
+            const draft = GmailApp.createDraft(
+              p['Business Email'],
+              p['Draft Subject'],
+              p['Draft Email'],
+              { name: config.SENDER_NAME }
+            );
+            draftId = draft.getId();
+            draftNote = 'Sandbox draft created in local Gmail ID: ' + draftId + ' (Client: ' + config.DEPARTMENT + ')';
+          }
           sendStatus = 'Draft Created in Gmail';
-          Logger.log('SUCCESS: Gmail Draft created for ' + p['Name'] + ' | ID: ' + draftId);
+          Logger.log('SUCCESS: ' + draftNote + ' for ' + p['Name']);
         } catch (err) {
           sendStatus = 'Draft Failed';
           sendError = err.message;
@@ -853,7 +913,7 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
       'Evidence URLs': p['Evidence URL'],
       'Review Status': approvalStatus.startsWith('Approved') ? 'Approved' : (approvalStatus === 'Needs Review' ? 'Needs Review' : 'Rejected'),
       'Reviewer': 'Pilot Automated Runner',
-      'Reviewer Notes': draftId ? 'Draft created in Gmail ID: ' + draftId + (verificationStatus === 'catch-all' ? ' (Catch-All Warning)' : '') : suppressionCheck,
+      'Reviewer Notes': draftNote ? (draftNote + (verificationStatus === 'catch-all' ? ' (Catch-All Warning)' : '')) : suppressionCheck,
       'Reviewed At': nowStr,
       'Human Approval Status': approvalStatus,
       'Approved By': approvalStatus.startsWith('Approved') ? 'Pilot Sandbox' : '',
@@ -900,7 +960,7 @@ function logPilotExecution(ss, processedQueue) {
     return [
       timestamp,
       PILOT_CONFIG.CAMPAIGN_ID,
-      'Multi-Department Pilot Run',
+      'Client-Scoped Pilot Run (' + PILOT_CONFIG.DEPARTMENT + ')',
       item['Name'] + ' (' + item['Business Email'] + ')',
       item['Compliance Status'] === 'Passed' ? 'SUCCESS' : 'SUPPRESSED',
       item['Send Status'] + (item['Send Error'] ? ' - ' + item['Send Error'] : '')
@@ -931,7 +991,7 @@ function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCoun
   const kpiData = [
     ['Active Campaign Name', config.CAMPAIGN_NAME, 'Active', now],
     ['Campaign ID', config.CAMPAIGN_ID, 'Pilot Mode', now],
-    ['Operating Department', config.DEPARTMENT, 'Active Owner', now],
+    ['Operating Department', config.DEPARTMENT, 'Client Owner', now],
     ['Company Discovery Limit', config.COMPANY_LIMIT + ' Companies', 'Enforced Limit', now],
     ['Companies Discovered & Qualified', companiesCount, companiesCount > 0 ? 'Discovery Complete' : 'Pending Discovery', now],
     ['Persona Leads Identified', leadsCount, leadsCount > 0 ? 'Mapping Complete' : 'Pending Mapping', now],
@@ -996,14 +1056,25 @@ function ensureSuppressionRulesInSettings(ss) {
 
   const data = sheet.getDataRange().getValues();
   let hasCompetitorRule = false;
+  let hasGrowthTarget = false;
+  let hasPilotAcme = false;
+
   for (let i = 1; i < data.length; i++) {
-    const val = String(data[i][1] || '').toLowerCase();
-    if (val.includes('competitor-esg.com')) {
-      hasCompetitorRule = true;
-      break;
+    const listType = String(data[i][0] || '').trim().toLowerCase();
+    const val = String(data[i][1] || '').trim().toLowerCase();
+    if (val.includes('competitor-esg.com')) hasCompetitorRule = true;
+    if ((listType === 'client - account' || listType === 'client / owner' || listType === 'client')) {
+      if (val === 'growth target') hasGrowthTarget = true;
+      if (val === 'pilot acme') hasPilotAcme = true;
     }
   }
 
+  if (!hasGrowthTarget) {
+    sheet.appendRow(['Client - Account', 'Growth Target', 'Active']);
+  }
+  if (!hasPilotAcme) {
+    sheet.appendRow(['Client - Account', 'Pilot Acme', 'Active']);
+  }
   if (!hasCompetitorRule) {
     sheet.appendRow(['Suppression - Competitor Domain', 'competitor-esg.com', 'Active']);
     sheet.appendRow(['Suppression - Opt-Out Email', 'optout-lead@novusmfg.com', 'Active']);

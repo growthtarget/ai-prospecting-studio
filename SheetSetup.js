@@ -6,12 +6,14 @@
  * File: SheetSetup.gs / SheetSetup.js
  * 
  * PURPOSE:
- * 1. Pre-populates "Campaign Configuration" with all 38 standardized parameters.
- * 2. Injects native Google Sheets dropdown menus dynamically by parameter key.
- * 3. Enforces plain integer formatting (0) on limit/score columns to prevent date conversion.
- * 4. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across all 13 tabs.
- * 5. Pre-populates "Agent Settings" and dynamically refreshes Script Properties status.
- * 6. Initializes and formats "API_Usage_Log" (Tab 2).
+ * 1. Manages "Lists & Settings" client registry ("Client - Account") & suppression dropdowns.
+ * 2. Preserves locked 38 parameters in "Campaign Configuration" & 28 columns in "Campaigns".
+ * 3. Dynamically binds Client / Owner dropdowns from active "Client - Account" rows.
+ * 4. Enforces plain integer formatting (0) on limit/score columns to prevent date conversion.
+ * 5. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across all 13 tabs.
+ * 6. Pre-populates "Agent Settings" with Growth Target defaults + per-client status & guardrails.
+ * 7. Filters "Agent Settings" cleanly to the active Client / Owner.
+ * 8. Initializes and formats "API_Usage_Log" (Tab 2).
  * ============================================================================
  */
 
@@ -22,19 +24,25 @@ function setupAllSheetsAndDropdowns() {
   // 1. Setup Dashboard if brand new (non-destructive if already populated)
   setupDashboardTabIfEmpty_(ss);
 
-  // 2. Setup API Usage Log Tab (Tab 2)
+  // 2. Setup Lists & Settings first so active "Client - Account" rows are seeded & ready
+  setupListsAndSettingsTabDropdowns(ss);
+
+  // 3. Migrate legacy department strings (e.g. "ESG Advisory") to real Client names before strict validations
+  migrateLegacyClientNames_(ss);
+
+  // 4. Setup API Usage Log Tab (Tab 2)
   setupApiUsageLogTab(ss);
 
-  // 3. Setup Campaigns Tab with 28 Canonical Headers, Number Formats & Dropdowns
+  // 5. Setup Campaigns Tab with 28 Canonical Headers, Number Formats & Dynamic Client Dropdown
   setupCampaignsTabDropdowns(ss);
 
-  // 4. Setup Company Intelligence Tab with 25 Canonical Headers & Dropdowns
+  // 6. Setup Company Intelligence Tab with 25 Canonical Headers & Dropdowns
   setupCompanyIntelligenceTabDropdowns(ss);
 
-  // 5. Setup Persona Leads Tab with 29 Canonical Headers & Dropdowns
+  // 7. Setup Persona Leads Tab with 29 Canonical Headers & Dropdowns
   setupPersonaLeadsTabDropdowns(ss);
 
-  // 6. Ensure Persona Mapper Settings (39 Canonical Headers) & Plain Integer Formats
+  // 8. Ensure Persona Mapper Settings (39 Canonical Headers) & Plain Integer Formats
   setupHeaderOnlyTab_(ss, 'Persona Mapper Settings', [
     'Campaign ID','Campaign Name','Persona Mapper Enabled','AI Provider','AI Model','Persona Titles',
     'Search Keywords','Campaign Focus','Evidence Period Months','Research Depth','Include ESG Reporting Obligations',
@@ -53,39 +61,231 @@ function setupAllSheetsAndDropdowns() {
     pSettingsSheet.getRange('AI2:AI500').setNumberFormat('0');
   }
 
-  // 7. Setup Prospect Review Queue Tab with 45 Canonical Headers & Dropdowns
+  // 9. Setup Prospect Review Queue Tab with 45 Canonical Headers & Dropdowns
   setupReviewQueueTabDropdowns(ss);
 
-  // 8. Setup Campaign Configuration with Locked 38 Parameters & Dynamic Dropdowns
+  // 10. Setup Campaign Configuration with Locked 38 Parameters & Dynamic Client Dropdowns
   setupCampaignConfigurationTab(ss);
 
-  // 9. Ensure Company Database (10 Canonical Headers, Col J = Campaign ID)
+  // 11. Ensure Company Database (10 Canonical Headers, Col J = Campaign ID)
   setupHeaderOnlyTab_(ss, 'Company Database', [
     'Company ID', 'Company Name', 'Domain', 'Country', 'Industry',
     'Employee Size', 'Discovery Method', 'Discovery Date', 'Status', 'Campaign ID'
   ]);
 
-  // 10. Ensure Research Evidence (9 Canonical Headers)
+  // 12. Ensure Research Evidence (9 Canonical Headers)
   setupHeaderOnlyTab_(ss, 'Research Evidence', [
     'Evidence ID', 'Campaign ID', 'Entity Name', 'Entity Type',
     'Search Query Used', 'Grounding Evidence URL', 'Extracted Snippet / Signal',
     'Verification Score', 'Date Captured'
   ]);
 
-  // 11. Setup Agent Settings Tab with Structured Rows & Dynamic Key Status
+  // 13. Setup Agent Settings Tab with Local Defaults + Per-Client Blocks & Active Filter
   setupAgentSettingsTabDropdowns(ss);
 
-  // 12. Ensure Execution Logs (6 Canonical Headers)
+  // 14. Ensure Execution Logs (6 Canonical Headers)
   setupHeaderOnlyTab_(ss, 'Execution Logs', [
     'Timestamp', 'Campaign ID', 'Action', 'Target', 'Status', 'Details'
   ]);
 
-  // 13. Setup Lists & Settings Tab with Dropdowns
-  setupListsAndSettingsTabDropdowns(ss);
-
   SpreadsheetApp.flush();
-  ss.toast('All 13 tabs formatted and dynamic dropdown menus applied successfully!', '✅ Setup Complete', 10);
+  ss.toast('All 13 tabs formatted, per-client Agent Settings synced, and dropdowns applied!', '✅ Setup Complete', 10);
   Logger.log('>>> ALL 13 TABS & DROPDOWNS CONFIGURED SUCCESSFULLY <<<');
+}
+
+/**
+ * Helper: Identifies local/agency brand ("Growth Target") safely inside SheetSetup.
+ */
+function isSetupLocalBrand_(clientName) {
+  const clean = String(clientName || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return !clean || clean === 'GROWTHTARGET' || clean === 'LOCAL' || clean === 'AGENCY' || clean === 'DEFAULT';
+}
+
+/**
+ * Helper: Builds canonical Script Property prefix e.g. "eValuater" -> "CLIENT_EVALUATER_".
+ */
+function normalizeSetupClientPrefix_(clientName) {
+  const clean = String(clientName || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return clean ? ('CLIENT_' + clean + '_') : '';
+}
+
+/**
+ * Reads active Client / Account names from Tab 13 ("Lists & Settings").
+ * Falls back to ['Growth Target', 'Pilot Acme'] if none are configured yet.
+ */
+function getRegisteredClientsFromSettings_(ss) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  const clients = [];
+  const seen = {};
+
+  if (spreadsheet) {
+    const sheet = spreadsheet.getSheetByName('Lists & Settings');
+    if (sheet && sheet.getLastRow() > 1) {
+      const data = sheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        const listName = String(data[i][0] || '').trim().toLowerCase();
+        const val = String(data[i][1] || '').trim();
+        const status = String(data[i][2] || '').trim().toLowerCase();
+        const isActive = (status === 'active' || status === 'true' || status === '');
+
+        if (isActive && val && (listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
+          const norm = val.toLowerCase();
+          if (!seen[norm]) {
+            clients.push(val);
+            seen[norm] = true;
+          }
+        }
+      }
+    }
+  }
+
+  if (clients.length === 0) {
+    return ['Growth Target', 'Pilot Acme'];
+  }
+  return clients;
+}
+
+/**
+ * Refreshes the Client / Owner dropdown validation rules on "Campaign Configuration" (Row 4)
+ * and "Campaigns" (Col C) using the latest active "Client - Account" entries in "Lists & Settings".
+ */
+function refreshClientDropdownValidations_(ss) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!spreadsheet) return [];
+
+  const clientList = getRegisteredClientsFromSettings_(spreadsheet);
+
+  // 1. Update Campaign Configuration Row for DEPARTMENT
+  const cfgSheet = spreadsheet.getSheetByName('Campaign Configuration');
+  if (cfgSheet && cfgSheet.getLastRow() > 1) {
+    const keys = cfgSheet.getRange(2, 1, cfgSheet.getLastRow() - 1, 1).getValues();
+    for (let r = 0; r < keys.length; r++) {
+      const key = String(keys[r][0] || '').trim().toUpperCase();
+      if (key === 'DEPARTMENT') {
+        applyDropdownToRange(cfgSheet.getRange(r + 2, 2), clientList, false);
+        break;
+      }
+    }
+  }
+
+  // 2. Update Campaigns Tab Column C (Department / Client Owner)
+  const campSheet = spreadsheet.getSheetByName('Campaigns');
+  if (campSheet) {
+    applyDropdownToRange(campSheet.getRange('C2:C500'), clientList, false);
+  }
+
+  return clientList;
+}
+
+/**
+ * Safely migrates legacy internal department strings (e.g. "ESG Advisory", "Procurement")
+ * to "Growth Target" (for production/CMP-005) or "Pilot Acme" (for PILOT- campaigns).
+ * Clears old cell validations before writing so legacy strict lists never block migration.
+ */
+function migrateLegacyClientNames_(ss) {
+  if (!ss) return;
+  const legacySet = {
+    'esg advisory': true,
+    'procurement': true,
+    'enterprise sales': true,
+    'cybersecurity & it': true,
+    'operations & compliance': true,
+    'enterprise saas / it': true,
+    'fintech & banking': true,
+    'hr & talent ops': true,
+    'marketing': true,
+    'executive leadership': true
+  };
+
+  function mapLegacyClient(campaignId, currentVal) {
+    const clean = String(currentVal || '').trim();
+    if (!clean || legacySet[clean.toLowerCase()]) {
+      return String(campaignId || '').trim().toUpperCase().indexOf('PILOT') === 0
+        ? 'Pilot Acme'
+        : 'Growth Target';
+    }
+    return clean;
+  }
+
+  // 1. Migrate Campaign Configuration (Row 4)
+  const cfgSheet = ss.getSheetByName('Campaign Configuration');
+  if (cfgSheet && cfgSheet.getLastRow() > 1) {
+    const cfgData = cfgSheet.getDataRange().getValues();
+    let cfgCampId = '';
+    let deptRow = -1;
+    let deptVal = '';
+    for (let r = 1; r < cfgData.length; r++) {
+      const k = String(cfgData[r][0] || '').trim().toUpperCase();
+      if (k === 'CAMPAIGN_ID') cfgCampId = String(cfgData[r][1] || '').trim();
+      if (k === 'DEPARTMENT') {
+        deptRow = r + 1;
+        deptVal = String(cfgData[r][1] || '').trim();
+      }
+    }
+    if (deptRow > 1 && legacySet[deptVal.toLowerCase()]) {
+      const targetCell = cfgSheet.getRange(deptRow, 2);
+      targetCell.clearDataValidations();
+      targetCell.setValue(mapLegacyClient(cfgCampId, deptVal));
+    }
+  }
+
+  // 2. Migrate Campaigns Tab (Col C + JSON backup in Col AA)
+  const campSheet = ss.getSheetByName('Campaigns');
+  if (campSheet && campSheet.getLastRow() > 1) {
+    const lastR = campSheet.getLastRow();
+    const lastC = campSheet.getLastColumn();
+    const cData = campSheet.getRange(2, 1, lastR - 1, lastC).getValues();
+    const headers = campSheet.getRange(1, 1, 1, lastC).getValues()[0].map(function(h) {
+      return String(h || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+    const jsonCol = headers.indexOf('CAMPAIGNCONFIGJSON');
+
+    for (let r = 0; r < cData.length; r++) {
+      const cid = String(cData[r][0] || '').trim();
+      const dept = String(cData[r][2] || '').trim();
+      if (cid && legacySet[dept.toLowerCase()]) {
+        const mapped = mapLegacyClient(cid, dept);
+        const cCell = campSheet.getRange(r + 2, 3);
+        cCell.clearDataValidations();
+        cCell.setValue(mapped);
+        if (jsonCol >= 0 && cData[r][jsonCol]) {
+          try {
+            const parsed = JSON.parse(cData[r][jsonCol]);
+            if (parsed && typeof parsed === 'object') {
+              parsed.department = mapped;
+              campSheet.getRange(r + 2, jsonCol + 1).setValue(JSON.stringify(parsed));
+            }
+          } catch (e) {}
+        }
+      }
+    }
+  }
+
+  // 3. Migrate Dashboard KPI & Performance Rollup if displaying legacy label
+  const dashSheet = ss.getSheetByName('Dashboard');
+  if (dashSheet && dashSheet.getLastRow() >= 6) {
+    const activeId = String(dashSheet.getRange('B2').getValue() || '').trim();
+    const b6 = String(dashSheet.getRange('B6').getValue() || '').trim();
+    if (legacySet[b6.toLowerCase()]) {
+      dashSheet.getRange('B6').clearDataValidations();
+      dashSheet.getRange('B6').setValue(mapLegacyClient(activeId, b6));
+    }
+    const lastDashRow = dashSheet.getLastRow();
+    if (lastDashRow >= 18) {
+      for (let r = 18; r <= lastDashRow; r++) {
+        const rId = String(dashSheet.getRange(r, 1).getValue() || '').trim();
+        const rDept = String(dashSheet.getRange(r, 3).getValue() || '').trim();
+        if (rId && legacySet[rDept.toLowerCase()]) {
+          dashSheet.getRange(r, 3).clearDataValidations();
+          dashSheet.getRange(r, 3).setValue(mapLegacyClient(rId, rDept));
+        }
+      }
+    }
+  }
 }
 
 function setupDashboardTabIfEmpty_(ss) {
@@ -131,61 +331,65 @@ function setupHeaderOnlyTab_(ss, name, headers) {
 
 /**
  * Formats "Campaign Configuration" with 38 Locked Parameters and Dynamic Dropdowns
- * STRICT: Zero Schema Mutations (Locked 38 Parameters)
+ * STRICT: Zero Schema Mutations (Locked 38 Parameters), non-destructive if already populated.
  */
 function setupCampaignConfigurationTab(ss) {
   const sheet = getOrCreateSheet(ss, 'Campaign Configuration');
-  sheet.clear();
+  const activeClients = getRegisteredClientsFromSettings_(ss);
 
-  const headers = ['Parameter', 'Configured Value', 'Description'];
-  sheet.appendRow(headers);
+  if (sheet.getLastRow() <= 1) {
+    sheet.clear();
+    const headers = ['Parameter', 'Configured Value', 'Description'];
+    sheet.appendRow(headers);
+
+    const configRows = [
+      ['CAMPAIGN_ID', 'CMP-2026-001', 'Active Campaign Identifier'],
+      ['CAMPAIGN_NAME', 'Enterprise Scope 3 & ESG Supply Chain Readiness', 'Active Campaign Name'],
+      ['DEPARTMENT', activeClients[0] || 'Growth Target', 'Client / Account Owner'],
+      ['TARGET_COUNTRIES', 'United States & Canada', 'Target Geographies / Regions'],
+      ['TARGET_INDUSTRIES', 'Freight & Logistics, Industrial Equipment', 'Target Industry Verticals'],
+      ['COMPANY_SIZE_RANGE', '50 - 250 employees', 'Target Employee Size Range'],
+      ['MAX_COMPANIES', '5', 'Maximum target companies to discover per run'],
+      ['RESEARCH_DEPTH', 'Deep Persona', 'Depth of company research and profiling'],
+      ['EVIDENCE_PERIOD_MONTHS', '12', 'Historical lookback window in months'],
+      ['MIN_COMPANY_SCORE', '80', 'Minimum company qualification threshold (0-100)'],
+      ['MIN_PERSONA_SCORE', '85', 'Minimum persona fit confidence threshold (0-100)'],
+      ['MIN_EMAIL_PRIORITY_SCORE', '80', 'Minimum email priority score for sending (0-100)'],
+      ['TARGET_TITLES', 'VP Procurement; Head of Supply Chain; Director of Sustainability', 'Semicolon-delimited target job titles'],
+      ['CAMPAIGN_FOCUS', 'Scope 3 vendor emissions transparency and CSRD readiness', 'Primary value proposition hook'],
+      ['SEARCH_KEYWORDS', 'Scope 3, CSRD, GHG Protocol, supplier risk, compliance audits', 'Search discovery query keywords'],
+      ['CUSTOM_BUSINESS_NEEDS', '- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency\n- High vendor questionnaire drop-off rate during procurement audits\n- Eliminating manual spreadsheet follow-ups with suppliers', 'Manual client business needs & buying triggers'],
+      ['AI_PROVIDER', 'GEMINI', 'Selected AI engine (GEMINI or OPENAI)'],
+      ['PRIMARY_AI_PROVIDER', 'GEMINI', 'Selected AI engine (legacy alias)'],
+      ['AI_MODEL', 'gemini-3.8-flash', 'AI Model version name'],
+      ['EMAIL_VERIFICATION_PROVIDER', 'ZeroBounce', 'Email verification vendor'],
+      ['EMAIL_VERIFICATION_ENDPOINT', 'https://api.zerobounce.net/v2/validate', 'Email verification REST endpoint URL'],
+      ['EMAIL_SENDER_PROVIDER', 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform'],
+      ['DISPATCH_MODE', 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform mode'],
+      ['EMAIL_SENDER_ENDPOINT', '', 'Sender campaign UUID or webhook URL'],
+      ['SENDER_NAME', 'Alex Mercer', 'Display name for outreach email signature'],
+      ['SENDER_TITLE', 'Solutions Consultant', 'Sender job title for email signature'],
+      ['SENDER_COMPANY', 'eValuater Solutions', 'Sender company name for email signature'],
+      ['INCLUDE_ESG_OBLIGATIONS', 'TRUE', 'Evaluate CSRD/GRI obligations'],
+      ['INCLUDE_ESG_MATURITY', 'TRUE', 'Evaluate ESG reporting maturity'],
+      ['INCLUDE_SUPPLY_CHAIN', 'TRUE', 'Evaluate supply chain complexity'],
+      ['INCLUDE_SCOPE3', 'TRUE', 'Evaluate Scope 3 emissions exposure'],
+      ['INCLUDE_DATA_CHALLENGES', 'TRUE', 'Evaluate sustainability data challenges'],
+      ['INCLUDE_DIGITAL', 'TRUE', 'Evaluate digital transformation & AI adoption'],
+      ['INCLUDE_ESG_GOVERNANCE', 'TRUE', 'Evaluate ESG board oversight'],
+      ['INCLUDE_TRIGGERS', 'TRUE', 'Evaluate commercial buying triggers'],
+      ['INCLUDE_EVALUATER', 'TRUE', 'Evaluate eValuater solution fit'],
+      ['HUMAN_APPROVAL_REQUIRED', 'TRUE', 'Requires human review in queue before sending'],
+      ['AUTO_SEND_ENABLED', 'FALSE', 'Auto-send emails immediately upon approval']
+    ];
+
+    sheet.getRange(2, 1, configRows.length, 3).setValues(configRows);
+  }
+
   styleHeaderRow(sheet);
 
-  const configRows = [
-    ['CAMPAIGN_ID', 'CMP-2026-001', 'Active Campaign Identifier'],
-    ['CAMPAIGN_NAME', 'Enterprise Scope 3 & ESG Supply Chain Readiness', 'Active Campaign Name'],
-    ['DEPARTMENT', 'ESG Advisory', 'Operating Department / Business Unit'],
-    ['TARGET_COUNTRIES', 'United States & Canada', 'Target Geographies / Regions'],
-    ['TARGET_INDUSTRIES', 'Freight & Logistics, Industrial Equipment', 'Target Industry Verticals'],
-    ['COMPANY_SIZE_RANGE', '50 - 250 employees', 'Target Employee Size Range'],
-    ['MAX_COMPANIES', '5', 'Maximum target companies to discover per run'],
-    ['RESEARCH_DEPTH', 'Deep Persona', 'Depth of company research and profiling'],
-    ['EVIDENCE_PERIOD_MONTHS', '12', 'Historical lookback window in months'],
-    ['MIN_COMPANY_SCORE', '80', 'Minimum company qualification threshold (0-100)'],
-    ['MIN_PERSONA_SCORE', '85', 'Minimum persona fit confidence threshold (0-100)'],
-    ['MIN_EMAIL_PRIORITY_SCORE', '80', 'Minimum email priority score for sending (0-100)'],
-    ['TARGET_TITLES', 'VP Procurement; Head of Supply Chain; Director of Sustainability', 'Semicolon-delimited target job titles'],
-    ['CAMPAIGN_FOCUS', 'Scope 3 vendor emissions transparency and CSRD readiness', 'Primary value proposition hook'],
-    ['SEARCH_KEYWORDS', 'Scope 3, CSRD, GHG Protocol, supplier risk, compliance audits', 'Search discovery query keywords'],
-    ['CUSTOM_BUSINESS_NEEDS', '- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency\n- High vendor questionnaire drop-off rate during procurement audits\n- Eliminating manual spreadsheet follow-ups with suppliers', 'Manual department business needs & buying triggers'],
-    ['AI_PROVIDER', 'GEMINI', 'Selected AI engine (GEMINI or OPENAI)'],
-    ['PRIMARY_AI_PROVIDER', 'GEMINI', 'Selected AI engine (legacy alias)'],
-    ['AI_MODEL', 'gemini-3.8-flash', 'AI Model version name'],
-    ['EMAIL_VERIFICATION_PROVIDER', 'ZeroBounce', 'Email verification vendor'],
-    ['EMAIL_VERIFICATION_ENDPOINT', 'https://api.zerobounce.net/v2/validate', 'Email verification REST endpoint URL'],
-    ['EMAIL_SENDER_PROVIDER', 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform'],
-    ['DISPATCH_MODE', 'Workspace Gmail (Drafts Only)', 'Outreach dispatch platform mode'],
-    ['EMAIL_SENDER_ENDPOINT', '', 'Sender campaign UUID or webhook URL'],
-    ['SENDER_NAME', 'Alex Mercer', 'Display name for outreach email signature'],
-    ['SENDER_TITLE', 'Solutions Consultant', 'Sender job title for email signature'],
-    ['SENDER_COMPANY', 'eValuater Solutions', 'Sender company name for email signature'],
-    ['INCLUDE_ESG_OBLIGATIONS', 'TRUE', 'Evaluate CSRD/GRI obligations'],
-    ['INCLUDE_ESG_MATURITY', 'TRUE', 'Evaluate ESG reporting maturity'],
-    ['INCLUDE_SUPPLY_CHAIN', 'TRUE', 'Evaluate supply chain complexity'],
-    ['INCLUDE_SCOPE3', 'TRUE', 'Evaluate Scope 3 emissions exposure'],
-    ['INCLUDE_DATA_CHALLENGES', 'TRUE', 'Evaluate sustainability data challenges'],
-    ['INCLUDE_DIGITAL', 'TRUE', 'Evaluate digital transformation & AI adoption'],
-    ['INCLUDE_ESG_GOVERNANCE', 'TRUE', 'Evaluate ESG board oversight'],
-    ['INCLUDE_TRIGGERS', 'TRUE', 'Evaluate commercial buying triggers'],
-    ['INCLUDE_EVALUATER', 'TRUE', 'Evaluate eValuater solution fit'],
-    ['HUMAN_APPROVAL_REQUIRED', 'TRUE', 'Requires human review in queue before sending'],
-    ['AUTO_SEND_ENABLED', 'FALSE', 'Auto-send emails immediately upon approval']
-  ];
-
-  sheet.getRange(2, 1, configRows.length, 3).setValues(configRows);
-
   const strictRules = {
-    'DEPARTMENT': ['Procurement', 'ESG Advisory', 'Enterprise Sales', 'Cybersecurity & IT', 'Operations & Compliance', 'Enterprise SaaS / IT', 'FinTech & Banking', 'HR & Talent Ops', 'Marketing', 'Executive Leadership'],
+    'DEPARTMENT': activeClients,
     'RESEARCH_DEPTH': ['Standard', 'Deep Persona', 'Comprehensive / Forensic'],
     'EVIDENCE_PERIOD_MONTHS': ['6', '12', '24'],
     'MIN_COMPANY_SCORE': ['70', '75', '80', '85', '90'],
@@ -264,6 +468,8 @@ function setupCampaignsTabDropdowns(ss) {
   sheet.getRange('H2:H500').setNumberFormat('0');
   sheet.getRange('J2:M500').setNumberFormat('0');
 
+  const activeClients = getRegisteredClientsFromSettings_(ss);
+  applyDropdownToRange(sheet.getRange('C2:C500'), activeClients, false);
   applyDropdownToRange(sheet.getRange('D2:D500'), ['Draft', 'Active', 'Paused', 'Completed', 'Pilot Active'], false);
   applyDropdownToRange(sheet.getRange('H2:H500'), ['3', '5', '10', '25', '50'], true);
   applyDropdownToRange(sheet.getRange('I2:I500'), ['Standard', 'Deep Persona', 'Comprehensive / Forensic'], false);
@@ -354,7 +560,7 @@ function setupPersonaLeadsTabDropdowns(ss) {
 }
 
 /**
- * Injects Dropdowns into "Lists & Settings" Tab
+ * Injects Dropdowns into "Lists & Settings" Tab and seeds active Client accounts if missing.
  */
 function setupListsAndSettingsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Lists & Settings');
@@ -363,7 +569,9 @@ function setupListsAndSettingsTabDropdowns(ss) {
   }
   styleHeaderRow(sheet);
 
+  // Apply updated dropdown validation FIRST so seeding "Client - Account" never collides with old rules
   applyDropdownToRange(sheet.getRange('A2:A500'), [
+    'Client - Account',
     'Suppression - Domain',
     'Suppression - Email',
     'Suppression - Competitor Domain',
@@ -372,14 +580,36 @@ function setupListsAndSettingsTabDropdowns(ss) {
     'Whitelist - Verified Domain'
   ], false);
   applyDropdownToRange(sheet.getRange('C2:C500'), ['Active', 'Inactive'], false);
+
+  // Seed initial "Client - Account" entries if none exist yet
+  let hasClientEntries = false;
+  if (sheet.getLastRow() > 1) {
+    const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      const listType = String(rows[i][0] || '').trim().toLowerCase();
+      if (listType === 'client - account' || listType === 'client / owner' || listType === 'client') {
+        hasClientEntries = true;
+        break;
+      }
+    }
+  }
+
+  if (!hasClientEntries) {
+    sheet.appendRow(['Client - Account', 'Growth Target', 'Active']);
+    sheet.appendRow(['Client - Account', 'Pilot Acme', 'Active']);
+  }
 }
 
 /**
  * Formats, Populates & Dynamically Refreshes Tab 11: "Agent Settings"
  * Layout: Category | Setting Key | Value | Status / Description
+ * Includes Growth Target (Local Default) rows AND per-client rows for every external client.
  */
-function setupAgentSettingsTabDropdowns(ss) {
-  const sheet = getOrCreateSheet(ss, 'Agent Settings');
+function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!spreadsheet) return;
+
+  const sheet = getOrCreateSheet(spreadsheet, 'Agent Settings');
 
   const headers = ['Category', 'Setting Key', 'Value', 'Status / Description'];
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -387,77 +617,188 @@ function setupAgentSettingsTabDropdowns(ss) {
 
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
 
-  function checkPropertyConfigured(primaryKey, aliases) {
+  function isValidPropVal(val) {
+    const s = String(val || '').trim();
+    if (!s) return false;
+    const upper = s.toUpperCase();
+    if (upper.indexOf('PASTE_') >= 0) return false;
+    if (upper.indexOf('CONFIGURED IN SCRIPT PROPERTIES') >= 0) return false;
+    if (upper.indexOf('PROTECTED') >= 0 && s.length < 35) return false;
+    return true;
+  }
+
+  // Strictly checks LOCAL agency keys (ignores CLIENT_* keys)
+  function checkLocalPropertyConfigured(primaryKey, aliases) {
     const searchKeys = [primaryKey].concat(aliases || []).map(function(k) {
       return k.toUpperCase().replace(/[^A-Z0-9]/g, '');
     });
     for (let k in scriptProps) {
+      if (String(k).toUpperCase().indexOf('CLIENT_') === 0) continue;
       const cleanK = k.toUpperCase().replace(/[^A-Z0-9]/g, '');
-      if (searchKeys.indexOf(cleanK) >= 0) {
-        const val = String(scriptProps[k] || '').trim();
-        if (val && val.toUpperCase().indexOf('PASTE_') < 0) return true;
+      if (searchKeys.indexOf(cleanK) >= 0 && isValidPropVal(scriptProps[k])) {
+        return true;
       }
     }
     return false;
   }
 
-  const hasGemini = checkPropertyConfigured('GEMINI_API_KEY');
-  const hasOpenAi = checkPropertyConfigured('OPENAI_API_KEY');
-  const hasSmartlead = checkPropertyConfigured('SMARTLEAD_API_KEY');
-  const hasInstantly = checkPropertyConfigured('INSTANTLY_API_KEY');
-  const hasVerifier = checkPropertyConfigured('VERIFIER_API_KEY', ['EMAIL_VERIFICATION_API_KEY']);
+  // Strictly checks EXTERNAL CLIENT keys matching CLIENT_{NAME}_{SUFFIX}
+  function checkClientPropertyConfigured(prefix, suffixes) {
+    const searchKeys = suffixes.map(function(suf) {
+      return (prefix + suf).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    });
+    for (let k in scriptProps) {
+      const cleanK = k.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (searchKeys.indexOf(cleanK) >= 0 && isValidPropVal(scriptProps[k])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const hasGemini = checkLocalPropertyConfigured('GEMINI_API_KEY');
+  const hasOpenAi = checkLocalPropertyConfigured('OPENAI_API_KEY');
+  const hasSmartlead = checkLocalPropertyConfigured('SMARTLEAD_API_KEY');
+  const hasInstantly = checkLocalPropertyConfigured('INSTANTLY_API_KEY');
+  const hasVerifier = checkLocalPropertyConfigured('VERIFIER_API_KEY', [
+    'EMAIL_VERIFICATION_API_KEY',
+    'ZEROBOUNCE_API_KEY',
+    'MILLIONVERIFIER_API_KEY',
+    'NEVERBOUNCE_API_KEY'
+  ]);
 
   const protectedMsg = 'Configured in Script Properties (Protected)';
 
-  const agentRows = [
-    ['AI Routing', 'PRIMARY_AI_PROVIDER', 'GEMINI', 'Primary AI provider for discovery & persona mapping'],
-    ['AI Models', 'GEMINI_MODEL', 'gemini-3.8-flash', 'Default Google Gemini model version'],
-    ['AI Models', 'OPENAI_MODEL', 'gpt-4o', 'Default OpenAI model version'],
-    ['API Credentials', 'GEMINI_API_KEY', hasGemini ? protectedMsg : '', 'Google Gemini API key (kept encrypted in Project Settings)'],
-    ['API Credentials', 'OPENAI_API_KEY', hasOpenAi ? protectedMsg : '', 'OpenAI API key (kept encrypted in Project Settings)'],
-    ['Search Grounding', 'GOOGLE_SEARCH_GROUNDING', 'TRUE', 'Enable live web search grounding citations for Gemini'],
-    ['Email Verification', 'VERIFIER_PROVIDER', 'ZeroBounce', 'Default email verification vendor'],
-    ['API Credentials', 'VERIFIER_API_KEY', hasVerifier ? protectedMsg : '', 'Email verifier API key (kept encrypted in Project Settings)'],
-    ['Outreach Sequencers', 'SMARTLEAD_API_KEY', hasSmartlead ? protectedMsg : '', 'Smartlead sequencer API key (kept encrypted in Project Settings)'],
-    ['Outreach Sequencers', 'INSTANTLY_API_KEY', hasInstantly ? protectedMsg : '', 'Instantly sequencer API key (kept encrypted in Project Settings)'],
-    ['Budget Guardrails', 'DAILY_SPEND_CAP_USD', '10.00', 'Maximum daily API spend limit in USD before hard exit'],
-    ['Budget Guardrails', 'MIN_VERIFIER_CREDITS', '500', 'Minimum email verification credits before email alert']
+  // 1. Local Agency ("Growth Target") & Global Defaults
+  const localRows = [
+    ['AI Routing', 'PRIMARY_AI_PROVIDER', 'GEMINI', 'Default AI provider for Growth Target (overridden per campaign)'],
+    ['AI Models', 'GEMINI_MODEL', 'gemini-3.8-flash', 'Default Gemini model for Growth Target'],
+    ['AI Models', 'OPENAI_MODEL', 'gpt-4o', 'Default OpenAI model for Growth Target'],
+    ['API Credentials', 'GEMINI_API_KEY', hasGemini ? protectedMsg : '', 'Growth Target Gemini API key (encrypted in Script Properties)'],
+    ['API Credentials', 'OPENAI_API_KEY', hasOpenAi ? protectedMsg : '', 'Growth Target OpenAI API key (encrypted in Script Properties)'],
+    ['Search Grounding', 'GOOGLE_SEARCH_GROUNDING', 'TRUE', 'Enable live Google Search Grounding for Growth Target'],
+    ['Email Verification', 'VERIFIER_PROVIDER', 'ZeroBounce', 'Default email verification vendor for Growth Target'],
+    ['API Credentials', 'VERIFIER_API_KEY', hasVerifier ? protectedMsg : '', 'Growth Target verifier API key (encrypted in Script Properties)'],
+    ['Outreach Sequencers', 'SMARTLEAD_API_KEY', hasSmartlead ? protectedMsg : '', 'Growth Target Smartlead key (encrypted in Script Properties)'],
+    ['Outreach Sequencers', 'INSTANTLY_API_KEY', hasInstantly ? protectedMsg : '', 'Growth Target Instantly key (encrypted in Script Properties)'],
+    ['Budget Guardrails', 'DAILY_SPEND_CAP_USD', '10.00', 'Growth Target daily API spend limit in USD (editable)'],
+    ['Budget Guardrails', 'MIN_VERIFIER_CREDITS', '500', 'Growth Target min verifier credits before email alert (editable)']
   ];
 
+  // Track exact live protection values & descriptions by normalized Setting Key
+  const secretValueByKey = {
+    'GEMINIAPIKEY': hasGemini ? protectedMsg : '',
+    'OPENAIAPIKEY': hasOpenAi ? protectedMsg : '',
+    'VERIFIERAPIKEY': hasVerifier ? protectedMsg : '',
+    'EMAILVERIFICATIONAPIKEY': hasVerifier ? protectedMsg : '',
+    'SMARTLEADAPIKEY': hasSmartlead ? protectedMsg : '',
+    'INSTANTLYAPIKEY': hasInstantly ? protectedMsg : ''
+  };
+  const categorySyncByKey = {};
+  const descriptionSyncByKey = {};
+  const numericFormatByKey = {
+    'DAILYSPENDCAPUSD': '0.00',
+    'MINVERIFIERCREDITS': '0'
+  };
+
+  localRows.forEach(function(r) {
+    const cleanKey = r[1].toUpperCase().replace(/[^A-Z0-9]/g, '');
+    descriptionSyncByKey[cleanKey] = r[3];
+  });
+
+  // 2. Per-Client Rows for every active External Client in "Lists & Settings"
+  const clientRows = [];
+  const allClients = getRegisteredClientsFromSettings_(spreadsheet);
+
+  allClients.forEach(function(clientName) {
+    if (isSetupLocalBrand_(clientName)) return;
+
+    const prefix = normalizeSetupClientPrefix_(clientName);
+    const catLabel = 'Client: ' + clientName;
+
+    const cGemini = checkClientPropertyConfigured(prefix, ['GEMINI_API_KEY']);
+    const cOpenAi = checkClientPropertyConfigured(prefix, ['OPENAI_API_KEY']);
+    const cVerifier = checkClientPropertyConfigured(prefix, [
+      'ZEROBOUNCE_API_KEY',
+      'MILLIONVERIFIER_API_KEY',
+      'NEVERBOUNCE_API_KEY',
+      'CUSTOM_VERIFIER_API_KEY',
+      'VERIFIER_API_KEY',
+      'EMAIL_VERIFICATION_API_KEY'
+    ]);
+    const cSmartlead = checkClientPropertyConfigured(prefix, ['SMARTLEAD_API_KEY']);
+    const cInstantly = checkClientPropertyConfigured(prefix, ['INSTANTLY_API_KEY']);
+    const cRelayUrl = checkClientPropertyConfigured(prefix, ['GMAIL_RELAY_URL']);
+    const cRelaySec = checkClientPropertyConfigured(prefix, ['GMAIL_RELAY_SECRET']);
+    const relayStatus = (cRelayUrl && cRelaySec)
+      ? protectedMsg
+      : ((cRelayUrl || cRelaySec) ? 'Incomplete (Set both _URL and _SECRET in Script Properties)' : '');
+
+    const cRows = [
+      [catLabel, prefix + 'GEMINI_API_KEY', cGemini ? protectedMsg : '', clientName + ' Gemini API key (add in Project Settings > Script Properties)'],
+      [catLabel, prefix + 'OPENAI_API_KEY', cOpenAi ? protectedMsg : '', clientName + ' OpenAI API key (add in Project Settings > Script Properties)'],
+      [catLabel, prefix + 'GOOGLE_SEARCH_GROUNDING', 'TRUE', 'Enable live Search Grounding for ' + clientName + ' (optional Script Property override)'],
+      [catLabel, prefix + 'VERIFIER_API_KEY', cVerifier ? protectedMsg : '', clientName + ' verifier key (ZeroBounce / MillionVerifier / NeverBounce in Script Properties)'],
+      [catLabel, prefix + 'SMARTLEAD_API_KEY', cSmartlead ? protectedMsg : '', clientName + ' Smartlead API key (add in Script Properties)'],
+      [catLabel, prefix + 'INSTANTLY_API_KEY', cInstantly ? protectedMsg : '', clientName + ' Instantly API key (add in Script Properties)'],
+      [catLabel, prefix + 'GMAIL_RELAY_URL', relayStatus, clientName + ' Google Workspace Relay (_URL and _SECRET in Script Properties)'],
+      [catLabel, prefix + 'DAILY_SPEND_CAP_USD', '10.00', clientName + ' daily API spend limit in USD (editable)'],
+      [catLabel, prefix + 'MIN_VERIFIER_CREDITS', '500', clientName + ' min verifier credits before alert (editable)']
+    ];
+
+    cRows.forEach(function(r) {
+      clientRows.push(r);
+      const cleanK = r[1].toUpperCase().replace(/[^A-Z0-9]/g, '');
+      categorySyncByKey[cleanK] = r[0];
+      descriptionSyncByKey[cleanK] = r[3];
+      if (r[1].indexOf('DAILY_SPEND_CAP_USD') < 0 &&
+          r[1].indexOf('MIN_VERIFIER_CREDITS') < 0 &&
+          r[1].indexOf('GOOGLE_SEARCH_GROUNDING') < 0) {
+        secretValueByKey[cleanK] = r[2];
+      }
+      if (r[1].indexOf('DAILY_SPEND_CAP_USD') >= 0) {
+        numericFormatByKey[cleanK] = '0.00';
+      } else if (r[1].indexOf('MIN_VERIFIER_CREDITS') >= 0) {
+        numericFormatByKey[cleanK] = '0';
+      }
+    });
+  });
+
+  const allTargetRows = localRows.concat(clientRows);
+
   if (sheet.getLastRow() <= 1) {
-    sheet.getRange(2, 1, agentRows.length, 4).setValues(agentRows);
+    sheet.getRange(2, 1, allTargetRows.length, 4).setValues(allTargetRows);
   } else {
     const lastR = sheet.getLastRow();
     const existingData = sheet.getRange(2, 1, lastR - 1, 4).getValues();
+    const existingKeyList = [];
 
     for (let i = 0; i < existingData.length; i++) {
       const rowNum = i + 2;
-      const key = String(existingData[i][1] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const cleanKey = String(existingData[i][1] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      existingKeyList.push(cleanKey);
 
-      if (key === 'GEMINIAPIKEY') {
-        sheet.getRange(rowNum, 3).setValue(hasGemini ? protectedMsg : '');
-      } else if (key === 'OPENAIAPIKEY') {
-        sheet.getRange(rowNum, 3).setValue(hasOpenAi ? protectedMsg : '');
-      } else if (key === 'VERIFIERAPIKEY' || key === 'EMAILVERIFICATIONAPIKEY') {
-        sheet.getRange(rowNum, 3).setValue(hasVerifier ? protectedMsg : '');
-      } else if (key === 'SMARTLEADAPIKEY') {
-        sheet.getRange(rowNum, 3).setValue(hasSmartlead ? protectedMsg : '');
-      } else if (key === 'INSTANTLYAPIKEY') {
-        sheet.getRange(rowNum, 3).setValue(hasInstantly ? protectedMsg : '');
+      if (categorySyncByKey[cleanKey]) {
+        sheet.getRange(rowNum, 1).setValue(categorySyncByKey[cleanKey]);
+      }
+      if (Object.prototype.hasOwnProperty.call(secretValueByKey, cleanKey)) {
+        sheet.getRange(rowNum, 3).setValue(secretValueByKey[cleanKey]);
+      }
+      if (descriptionSyncByKey[cleanKey]) {
+        sheet.getRange(rowNum, 4).setValue(descriptionSyncByKey[cleanKey]);
       }
     }
 
-    const existingKeyList = existingData.map(function(r) {
-      return String(r[1] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    });
-    agentRows.forEach(function(row) {
+    allTargetRows.forEach(function(row) {
       const cleanKey = row[1].toUpperCase().replace(/[^A-Z0-9]/g, '');
       if (existingKeyList.indexOf(cleanKey) < 0) {
         sheet.appendRow(row);
+        existingKeyList.push(cleanKey);
       }
     });
   }
 
+  // Apply dropdowns & clean number formats across all rows (preserving user-edited cap/credit values)
   const agentKeyDropdowns = {
     'PRIMARYAIPROVIDER': ['GEMINI', 'OPENAI'],
     'GEMINIMODEL': ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'],
@@ -470,17 +811,112 @@ function setupAgentSettingsTabDropdowns(ss) {
   if (finalLastR > 1) {
     const finalKeys = sheet.getRange(2, 2, finalLastR - 1, 1).getValues();
     for (let r = 0; r < finalKeys.length; r++) {
-      const cleanK = String(finalKeys[r][0] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const rawKey = String(finalKeys[r][0] || '').trim().toUpperCase();
+      const cleanK = rawKey.replace(/[^A-Z0-9]/g, '');
+      const valCell = sheet.getRange(r + 2, 3);
+
       if (agentKeyDropdowns[cleanK]) {
-        applyDropdownToRange(sheet.getRange(r + 2, 3), agentKeyDropdowns[cleanK], false);
+        applyDropdownToRange(valCell, agentKeyDropdowns[cleanK], false);
+      } else if (rawKey.indexOf('CLIENT_') === 0 && rawKey.indexOf('GOOGLESEARCHGROUNDING') >= 0 || cleanK.endsWith('GOOGLESEARCHGROUNDING')) {
+        applyDropdownToRange(valCell, ['TRUE', 'FALSE'], false);
+      }
+
+      if (numericFormatByKey[cleanK]) {
+        valCell.setNumberFormat(numericFormatByKey[cleanK]);
       }
     }
   }
 
-  sheet.setColumnWidth(1, 180);
-  sheet.setColumnWidth(2, 260);
+  sheet.setColumnWidth(1, 200);
+  sheet.setColumnWidth(2, 310);
   sheet.setColumnWidth(3, 300);
-  sheet.setColumnWidth(4, 420);
+  sheet.setColumnWidth(4, 440);
+
+  // Optional Bonus: Filter Agent Settings to show only the active Client / Owner's rows
+  filterAgentSettingsByClient_(spreadsheet, activeClientOverride);
+}
+
+/**
+ * Filters "Agent Settings" Column A (Category) to show only the active Client / Owner's block
+ * (or only Growth Target / Local defaults when Growth Target is active).
+ * Users can clear the Column A filter in Sheets at any time to compare all clients side by side.
+ */
+function filterAgentSettingsByClient_(ss, explicitClientName) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!spreadsheet) return;
+
+  const sheet = spreadsheet.getSheetByName('Agent Settings');
+  if (!sheet || sheet.getLastRow() <= 1 || sheet.getLastColumn() < 4) return;
+
+  let clientName = String(explicitClientName || '').trim();
+  if (!clientName) {
+    const cfgSheet = spreadsheet.getSheetByName('Campaign Configuration');
+    if (cfgSheet && cfgSheet.getLastRow() > 1) {
+      const cfgData = cfgSheet.getDataRange().getValues();
+      for (let r = 1; r < cfgData.length; r++) {
+        const k = String(cfgData[r][0] || '').trim().toUpperCase();
+        if (k === 'DEPARTMENT' && cfgData[r][1]) {
+          clientName = String(cfgData[r][1]).trim();
+          break;
+        }
+      }
+    }
+  }
+  if (!clientName) {
+    const dashSheet = spreadsheet.getSheetByName('Dashboard');
+    if (dashSheet && dashSheet.getLastRow() >= 6) {
+      const b6 = String(dashSheet.getRange('B6').getValue() || '').trim();
+      if (b6 && b6 !== 'None' && b6 !== 'Standby') clientName = b6;
+    }
+  }
+  clientName = clientName || 'Growth Target';
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+
+  let filter = sheet.getFilter();
+  if (filter) {
+    const fRange = filter.getRange();
+    if (fRange.getRow() !== 1 || fRange.getLastRow() < lastRow || fRange.getLastColumn() < lastCol) {
+      filter.remove();
+      filter = null;
+    }
+  }
+  if (!filter) {
+    filter = sheet.getRange(1, 1, lastRow, lastCol).createFilter();
+  }
+
+  const catValues = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  const isLocal = isSetupLocalBrand_(clientName);
+  const targetClientCat = ('Client: ' + clientName).toLowerCase();
+
+  let hasMatchingRows = false;
+  const hiddenValues = [];
+  const seenHidden = {};
+
+  for (let i = 0; i < catValues.length; i++) {
+    const cat = String(catValues[i][0] || '').trim();
+    if (!cat) continue;
+    const lowerCat = cat.toLowerCase();
+    const isClientCat = lowerCat.indexOf('client:') === 0;
+
+    const shouldShow = isLocal ? !isClientCat : (lowerCat === targetClientCat);
+    if (shouldShow) {
+      hasMatchingRows = true;
+    } else if (!seenHidden[cat]) {
+      hiddenValues.push(cat);
+      seenHidden[cat] = true;
+    }
+  }
+
+  if (hasMatchingRows && hiddenValues.length > 0) {
+    const criteria = SpreadsheetApp.newFilterCriteria()
+      .setHiddenValues(hiddenValues)
+      .build();
+    filter.setColumnFilterCriteria(1, criteria);
+  } else {
+    filter.removeColumnFilterCriteria(1);
+  }
 }
 
 /**

@@ -3,7 +3,7 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * MASTER CONTROLLER & UNIFIED TOP MENU
+ * MASTER CONTROLLER, CLIENT ISOLATION ENGINE & UNIFIED TOP MENU
  * ============================================================================
  * File: Code.js / Code.gs
  * ============================================================================
@@ -107,6 +107,316 @@ function isStudioValidSecretValue_(val) {
   if (upper.indexOf('CONFIGURED IN SCRIPT PROPERTIES') >= 0) return false;
   if (upper.indexOf('PROTECTED') >= 0 && s.length < 35) return false;
   return true;
+}
+
+/**
+ * Identifies whether a Client / Owner name refers to the local/agency brand ("Growth Target").
+ * Local brand runs use default Script Properties; any other client enforces strict CLIENT_{NAME}_ isolation.
+ */
+function isLocalAgencyClient_(clientName) {
+  const clean = String(clientName || '').trim();
+  if (!clean) return true;
+  const norm = normalizeStudioKey(clean);
+  return (
+    norm === 'GROWTHTARGET' ||
+    norm === 'LOCAL' ||
+    norm === 'AGENCY' ||
+    norm === 'DEFAULT'
+  );
+}
+
+/**
+ * Builds canonical Script Property prefix for an external client: e.g. "Pilot Acme" -> "CLIENT_PILOT_ACME_".
+ */
+function normalizeClientPropertyPrefix_(clientName) {
+  const clean = String(clientName || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return clean ? ('CLIENT_' + clean + '_') : '';
+}
+
+/**
+ * Resolves the exact Client / Owner name associated with a Campaign ID.
+ * Priority: explicit clientName -> Campaigns tab (Col C) -> Campaign Configuration (if ID matches) -> Growth Target.
+ */
+function resolveCampaignClientName_(campaignId, explicitClientName, spreadsheet) {
+  if (explicitClientName && String(explicitClientName).trim()) {
+    return String(explicitClientName).trim();
+  }
+
+  const ss = spreadsheet || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  const cid = String(campaignId || '').trim();
+
+  if (ss && cid) {
+    const campSheet = ss.getSheetByName('Campaigns');
+    if (campSheet && campSheet.getLastRow() > 1) {
+      const cData = campSheet.getDataRange().getValues();
+      const headers = cData[0].map(function(h) { return normalizeStudioKey(h); });
+      const idIdx = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
+      const deptIdx = headers.indexOf('DEPARTMENT') >= 0 ? headers.indexOf('DEPARTMENT') : 2;
+      const jsonIdx = headers.indexOf('CAMPAIGNCONFIGJSON');
+
+      for (let r = 1; r < cData.length; r++) {
+        if (String(cData[r][idIdx] || '').trim().toLowerCase() === cid.toLowerCase()) {
+          if (cData[r][deptIdx] && String(cData[r][deptIdx]).trim()) {
+            return String(cData[r][deptIdx]).trim();
+          }
+          if (jsonIdx >= 0 && cData[r][jsonIdx]) {
+            try {
+              const parsed = JSON.parse(cData[r][jsonIdx]);
+              if (parsed && parsed.department) return String(parsed.department).trim();
+            } catch (e) {}
+          }
+        }
+      }
+    }
+
+    const cfgSheet = ss.getSheetByName('Campaign Configuration');
+    if (cfgSheet && cfgSheet.getLastRow() > 1) {
+      const cfgData = cfgSheet.getDataRange().getValues();
+      const dict = {};
+      for (let r = 1; r < cfgData.length; r++) {
+        const k = normalizeStudioKey(cfgData[r][0]);
+        if (k) dict[k] = cfgData[r][1];
+      }
+      const cfgId = String(dict['CAMPAIGNID'] || '').trim();
+      if (cfgId && cfgId.toLowerCase() === cid.toLowerCase()) {
+        const cfgDept = String(dict['DEPARTMENT'] || dict['CLIENTOWNER'] || dict['CLIENT'] || '').trim();
+        if (cfgDept) return cfgDept;
+      }
+    }
+  }
+
+  if (cid && cid.toUpperCase().indexOf('PILOT') === 0) {
+    return 'Pilot Acme';
+  }
+
+  return 'Growth Target';
+}
+
+/**
+ * Universal Strict Credential Resolver (ZERO fallback for external client campaigns).
+ *
+ * @param {Array<string>|string} basePropertyNames Candidate Script Property base names (e.g. ['GEMINI_API_KEY'])
+ * @param {Object|string} context Campaign/client context ({ campaignId, clientName }) or campaignId string
+ * @param {Object} [options] Optional controls: { serviceLabel, throwOnMissing, allowAgentSettingsForLocal }
+ * @return {Object} { key, clientName, isLocal, propertyUsed, expectedProperty }
+ */
+function resolveClientScopedSecret_(basePropertyNames, context, options) {
+  const bases = Array.isArray(basePropertyNames) ? basePropertyNames : [basePropertyNames];
+  const opts = options || {};
+  const ctx = (context && typeof context === 'object')
+    ? context
+    : { campaignId: context ? String(context) : '' };
+
+  const ss = opts.spreadsheet || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  const resolvedCampaignId = ctx.campaignId || getStudioActiveCampaignId_();
+  const clientName = resolveCampaignClientName_(resolvedCampaignId, ctx.clientName, ss);
+  const isLocal = isLocalAgencyClient_(clientName);
+
+  const scriptProps = PropertiesService.getScriptProperties().getProperties();
+  const userProps = PropertiesService.getUserProperties().getProperties();
+
+  if (!isLocal) {
+    // STRICT EXTERNAL CLIENT MODE: Only CLIENT_{CLIENT_NAME}_{BASE_KEY} is allowed. Zero local fallback!
+    const prefix = normalizeClientPropertyPrefix_(clientName);
+    const expectedProperty = prefix + bases[0];
+    const normTargets = bases.map(function(b) {
+      return normalizeStudioKey(prefix + b);
+    });
+
+    // 1. Check Script Properties (preferred encrypted store)
+    for (let k in scriptProps) {
+      if (normTargets.indexOf(normalizeStudioKey(k)) >= 0 && isStudioValidSecretValue_(scriptProps[k])) {
+        return {
+          key: String(scriptProps[k]).trim(),
+          clientName: clientName,
+          isLocal: false,
+          propertyUsed: k,
+          expectedProperty: expectedProperty
+        };
+      }
+    }
+
+    // 2. Check User Properties (client-prefixed only)
+    for (let k in userProps) {
+      if (normTargets.indexOf(normalizeStudioKey(k)) >= 0 && isStudioValidSecretValue_(userProps[k])) {
+        return {
+          key: String(userProps[k]).trim(),
+          clientName: clientName,
+          isLocal: false,
+          propertyUsed: k,
+          expectedProperty: expectedProperty
+        };
+      }
+    }
+
+    if (opts.throwOnMissing) {
+      const label = opts.serviceLabel || bases[0];
+      throw new Error(
+        'Missing client credential for "' + clientName + '" (' + label + '). ' +
+        'Set Script Property "' + expectedProperty + '" in Project Settings > Script Properties. ' +
+        '(Strict client isolation is active — local keys are never used as fallback.)'
+      );
+    }
+
+    return {
+      key: '',
+      clientName: clientName,
+      isLocal: false,
+      propertyUsed: '',
+      expectedProperty: expectedProperty
+    };
+  }
+
+  // LOCAL AGENCY MODE ("Growth Target"): Check default keys, explicitly ignoring any CLIENT_* keys
+  const normBases = bases.map(function(b) { return normalizeStudioKey(b); });
+
+  for (let k in scriptProps) {
+    if (String(k).toUpperCase().indexOf('CLIENT_') === 0) continue;
+    if (normBases.indexOf(normalizeStudioKey(k)) >= 0 && isStudioValidSecretValue_(scriptProps[k])) {
+      return {
+        key: String(scriptProps[k]).trim(),
+        clientName: clientName,
+        isLocal: true,
+        propertyUsed: k,
+        expectedProperty: bases[0]
+      };
+    }
+  }
+
+  for (let k in userProps) {
+    if (String(k).toUpperCase().indexOf('CLIENT_') === 0) continue;
+    if (normBases.indexOf(normalizeStudioKey(k)) >= 0 && isStudioValidSecretValue_(userProps[k])) {
+      return {
+        key: String(userProps[k]).trim(),
+        clientName: clientName,
+        isLocal: true,
+        propertyUsed: k,
+        expectedProperty: bases[0]
+      };
+    }
+  }
+
+  if (opts.allowAgentSettingsForLocal !== false && ss) {
+    const agentSheet = ss.getSheetByName('Agent Settings');
+    if (agentSheet && agentSheet.getLastRow() > 1) {
+      const data = agentSheet.getDataRange().getValues();
+      for (let r = 1; r < data.length; r++) {
+        const settingKey = normalizeStudioKey(data[r][1] || data[r][0]);
+        if (normBases.indexOf(settingKey) >= 0) {
+          const val = String(data[r][2] !== undefined ? data[r][2] : '').trim();
+          if (isStudioValidSecretValue_(val)) {
+            return {
+              key: val,
+              clientName: clientName,
+              isLocal: true,
+              propertyUsed: 'Agent Settings:' + String(data[r][1] || data[r][0]),
+              expectedProperty: bases[0]
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    key: '',
+    clientName: clientName,
+    isLocal: true,
+    propertyUsed: '',
+    expectedProperty: bases[0]
+  };
+}
+
+/**
+ * Returns active registered clients from Tab 13 ("Lists & Settings").
+ */
+function getRegisteredClientsList_(ss) {
+  if (typeof getRegisteredClientsFromSettings_ === 'function') {
+    return getRegisteredClientsFromSettings_(ss);
+  }
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  const clients = [];
+  const seen = {};
+  if (spreadsheet) {
+    const sheet = spreadsheet.getSheetByName('Lists & Settings');
+    if (sheet && sheet.getLastRow() > 1) {
+      const data = sheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        const listName = String(data[i][0] || '').trim().toLowerCase();
+        const val = String(data[i][1] || '').trim();
+        const status = String(data[i][2] || '').trim().toLowerCase();
+        const isActive = (status === 'active' || status === 'true' || status === '');
+        if (isActive && val && (listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
+          if (!seen[val.toLowerCase()]) {
+            clients.push(val);
+            seen[val.toLowerCase()] = true;
+          }
+        }
+      }
+    }
+  }
+  return clients.length > 0 ? clients : ['Growth Target', 'Pilot Acme'];
+}
+
+/**
+ * Adds or reactivates a Client / Account in "Lists & Settings", refreshes sheet dropdowns,
+ * and provisions the client's row block in "Agent Settings".
+ * Callable directly from the Sidebar Control Panel "[ + Add New Client... ]".
+ */
+function addClientAccountToSettings(clientName) {
+  const cleanName = String(clientName || '').trim();
+  if (!cleanName) {
+    throw new Error('Client name cannot be empty.');
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) throw new Error('No active spreadsheet found.');
+
+  let sheet = ss.getSheetByName('Lists & Settings');
+  if (!sheet) {
+    sheet = ss.insertSheet('Lists & Settings');
+    sheet.appendRow(['List name', 'Value', 'Active status']);
+  }
+
+  let foundRow = -1;
+  if (sheet.getLastRow() > 1) {
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      const listType = String(data[i][0] || '').trim().toLowerCase();
+      const val = String(data[i][1] || '').trim();
+      if ((listType === 'client - account' || listType === 'client / owner' || listType === 'client') &&
+          val.toLowerCase() === cleanName.toLowerCase()) {
+        foundRow = i + 1;
+        break;
+      }
+    }
+  }
+
+  if (foundRow > 1) {
+    sheet.getRange(foundRow, 2).setValue(cleanName);
+    sheet.getRange(foundRow, 3).setValue('Active');
+  } else {
+    sheet.appendRow(['Client - Account', cleanName, 'Active']);
+  }
+
+  if (typeof refreshClientDropdownValidations_ === 'function') {
+    refreshClientDropdownValidations_(ss);
+  }
+  if (typeof setupAgentSettingsTabDropdowns === 'function') {
+    setupAgentSettingsTabDropdowns(ss, cleanName);
+  }
+  SpreadsheetApp.flush();
+
+  return {
+    success: true,
+    clientName: cleanName,
+    clients: getRegisteredClientsList_(ss),
+    message: 'Added client "' + cleanName + '" to Lists & Settings, updated dropdowns, and created Agent Settings rows.'
+  };
 }
 
 /**
@@ -327,63 +637,29 @@ function findPersonaMapperSettingsSheet(ss) {
 }
 
 /**
- * Universal API Key resolver checking Script Properties, User Properties, & Agent Settings
- * while safely rejecting sheet protected status indicators and PASTE_ placeholders.
+ * Client-scoped API Key resolver.
+ * Delegates to resolveClientScopedSecret_ so external clients strictly require
+ * CLIENT_{NAME}_{KEY} and Growth Target safely uses default keys (never CLIENT_*).
  */
-function getStudioApiKey(provider) {
+function getStudioApiKey(provider, context) {
   const norm = String(provider || '').toUpperCase();
-  const scriptProps = PropertiesService.getScriptProperties().getProperties();
-  const userProps = PropertiesService.getUserProperties().getProperties();
+  const baseKey = (norm.indexOf('OPENAI') >= 0 || norm.indexOf('GPT') >= 0)
+    ? 'OPENAI_API_KEY'
+    : 'GEMINI_API_KEY';
 
-  for (let k in scriptProps) {
-    const uk = k.toUpperCase();
-    if ((norm.includes('OPENAI') || norm.includes('GPT')) && uk.includes('OPENAI')) {
-      if (isStudioValidSecretValue_(scriptProps[k])) return String(scriptProps[k]).trim();
-    }
-    if (norm.includes('GEMINI') && uk.includes('GEMINI')) {
-      if (isStudioValidSecretValue_(scriptProps[k])) return String(scriptProps[k]).trim();
-    }
-  }
-
-  for (let k in userProps) {
-    const uk = k.toUpperCase();
-    if ((norm.includes('OPENAI') || norm.includes('GPT')) && uk.includes('OPENAI')) {
-      if (isStudioValidSecretValue_(userProps[k])) return String(userProps[k]).trim();
-    }
-    if (norm.includes('GEMINI') && uk.includes('GEMINI')) {
-      if (isStudioValidSecretValue_(userProps[k])) return String(userProps[k]).trim();
-    }
-  }
-
-  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
-  if (ss) {
-    const sheet = ss.getSheetByName('Agent Settings');
-    if (sheet && sheet.getLastRow() > 1) {
-      const data = sheet.getDataRange().getValues();
-      for (let r = 1; r < data.length; r++) {
-        for (let c = 0; c < data[r].length; c++) {
-          const cell = String(data[r][c] || '').trim().toUpperCase();
-          if ((norm.includes('OPENAI') || norm.includes('GPT')) && cell === 'OPENAI_API_KEY') {
-            const val = String(data[r][c + 1] !== undefined ? data[r][c + 1] : (data[r][2] || '')).trim();
-            if (isStudioValidSecretValue_(val)) return val;
-          }
-          if (norm.includes('GEMINI') && cell === 'GEMINI_API_KEY') {
-            const val = String(data[r][c + 1] !== undefined ? data[r][c + 1] : (data[r][2] || '')).trim();
-            if (isStudioValidSecretValue_(val)) return val;
-          }
-        }
-      }
-    }
-  }
-  return '';
+  const res = resolveClientScopedSecret_([baseKey], context || {}, {
+    throwOnMissing: false,
+    allowAgentSettingsForLocal: true
+  });
+  return res.key || '';
 }
 
-function getApiKey(provider) {
-  return getStudioApiKey(provider);
+function getApiKey(provider, context) {
+  return getStudioApiKey(provider, context);
 }
 
 /**
- * Opens the Campaign Control Panel sidebar and pre-loads campaigns and configuration.
+ * Opens the Campaign Control Panel sidebar and pre-loads campaigns, clients, and configuration.
  */
 function showPersonaMapperControlPanel() {
   const template = HtmlService.createTemplateFromFile('ControlPanel');
@@ -391,6 +667,7 @@ function showPersonaMapperControlPanel() {
   template.initialCampaigns = sidebarData.campaigns;
   template.initialConfigsMap = sidebarData.configsMap;
   template.activeCampaignId = sidebarData.activeCampaignId || '';
+  template.initialClients = sidebarData.clients || ['Growth Target', 'Pilot Acme'];
 
   const html = template.evaluate().setTitle('🎯 Campaign Control Panel').setWidth(380);
   try {
@@ -401,7 +678,7 @@ function showPersonaMapperControlPanel() {
 }
 
 /**
- * Returns available campaigns and configuration maps for sidebar initialization.
+ * Returns available campaigns, registered clients, and configuration maps for sidebar initialization.
  */
 function getSidebarInitialData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -586,7 +863,8 @@ function getSidebarInitialData() {
   return {
     campaigns: campaignsList,
     configsMap: configsMap,
-    activeCampaignId: activeCampaignId || (campaignsList.length > 0 ? campaignsList[0].id : 'CMP-005')
+    activeCampaignId: activeCampaignId || (campaignsList.length > 0 ? campaignsList[0].id : 'CMP-005'),
+    clients: getRegisteredClientsList_(ss)
   };
 }
 
@@ -611,13 +889,12 @@ function selectAndActivateCampaign(cid) {
     : { id: cid, name: cid };
 
   studioDirectSaveCampaignPipeline(config, true);
-  filterOperationalSheetsByCampaign_(cid);
 
   return {
     success: true,
     campaignId: cid,
     config: config,
-    message: 'Active campaign set to ' + cid + ' and synced to Dashboard!'
+    message: 'Active campaign set to ' + cid + ' and synced to Dashboard & Agent Settings!'
   };
 }
 
@@ -637,6 +914,16 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
 
   const campId = payload.id;
   const campName = payload.name || campId;
+  const clientOwner = String(payload.department || '').trim() || 'Growth Target';
+
+  // Ensure new Client / Owner is registered in Lists & Settings before writing to strict-validated cells
+  const registeredClients = getRegisteredClientsList_(ss);
+  const clientExists = registeredClients.some(function(c) {
+    return c.toLowerCase() === clientOwner.toLowerCase();
+  });
+  if (!clientExists && !isActivationOnly) {
+    addClientAccountToSettings(clientOwner);
+  }
 
   let status = payload.status || 'Active';
   const campSheetExisting = ss.getSheetByName('Campaigns');
@@ -657,7 +944,7 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     ['Parameter', 'Configured Value', 'Description'],
     ['CAMPAIGN_ID', campId, 'Active Campaign Identifier'],
     ['CAMPAIGN_NAME', campName, 'Active Campaign Name'],
-    ['DEPARTMENT', payload.department || 'ESG Advisory', 'Operating Department / Business Unit'],
+    ['DEPARTMENT', clientOwner, 'Client / Account Owner'],
     ['TARGET_COUNTRIES', payload.country || '', 'Target Geographies / Regions'],
     ['TARGET_INDUSTRIES', payload.industry || '', 'Target Industry Verticals'],
     ['COMPANY_SIZE_RANGE', payload.size || '', 'Target Employee Size Range'],
@@ -670,7 +957,7 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     ['TARGET_TITLES', payload.titles || '', 'Semicolon-delimited target job titles'],
     ['CAMPAIGN_FOCUS', payload.campaignFocus || '', 'Primary value proposition hook'],
     ['SEARCH_KEYWORDS', payload.searchKeywords || '', 'Search discovery query keywords'],
-    ['CUSTOM_BUSINESS_NEEDS', payload.customBusinessNeeds || '', 'Manual department business needs & buying triggers'],
+    ['CUSTOM_BUSINESS_NEEDS', payload.customBusinessNeeds || '', 'Manual client business needs & buying triggers'],
     ['AI_PROVIDER', payload.aiProvider || 'GEMINI', 'Selected AI engine (GEMINI or OPENAI)'],
     ['PRIMARY_AI_PROVIDER', payload.aiProvider || 'GEMINI', 'Selected AI engine (legacy alias)'],
     ['AI_MODEL', payload.aiModel || 'gemini-3.8-flash', 'AI Model version name'],
@@ -736,10 +1023,11 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   }
 
   if (!isActivationOnly || !cFound) {
+    const normalizedPayload = Object.assign({}, payload, { department: clientOwner });
     const campMasterRow = [
       campId,
       campName,
-      payload.department || 'ESG Advisory',
+      clientOwner,
       status,
       payload.country || '',
       payload.industry || '',
@@ -763,7 +1051,7 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
       payload.senderName || '',
       payload.senderTitle || '',
       payload.senderCompany || '',
-      JSON.stringify(payload),
+      JSON.stringify(normalizedPayload),
       new Date().toLocaleString()
     ];
 
@@ -851,8 +1139,13 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     SpreadsheetApp.flush();
   }
 
-  const dashboardPayload = Object.assign({}, payload, { status: status });
+  const dashboardPayload = Object.assign({}, payload, { department: clientOwner, status: status });
   updateDashboardForActiveCampaign(dashboardPayload);
+
+  // Sync Agent Settings key protection badges & filter to active Client / Owner (preserves edited spend caps)
+  if (typeof setupAgentSettingsTabDropdowns === 'function') {
+    setupAgentSettingsTabDropdowns(ss, clientOwner);
+  }
 
   filterOperationalSheetsByCampaign_(campId);
 
@@ -860,12 +1153,12 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     success: true,
     campaignId: campId,
     campaignName: campName,
-    message: 'Campaign ' + campId + ' synchronized across all tabs and activated on Dashboard!'
+    message: 'Campaign ' + campId + ' (' + clientOwner + ') synchronized across all tabs and activated on Dashboard!'
   };
 }
 
 /**
- * EXACT 4-COLUMN DASHBOARD UPDATER
+ * EXACT 4-COLUMN DASHBOARD UPDATER (Client-Aware API Key Check)
  */
 function updateDashboardForActiveCampaign(payloadOrId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -909,15 +1202,24 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   const cfgSheet = ss.getSheetByName('Campaign Configuration');
   if (cfgSheet && cfgSheet.getLastRow() > 1) {
     const cfgData = cfgSheet.getDataRange().getValues();
+    let cfgCid = '';
     for (let cr = 1; cr < cfgData.length; cr++) {
-      const k = normalizeStudioKey(cfgData[cr][0]);
-      if (!dept && (k === 'DEPARTMENT' || k === 'OPERATINGDEPARTMENT')) dept = String(cfgData[cr][1]).trim();
-      if (!limit && (k === 'MAXCOMPANIES' || k === 'DISCOVERYLIMIT')) limit = cfgData[cr][1];
-      if (!dispatchChannel && (k === 'EMAILSENDERPROVIDER' || k === 'DISPATCHMODE')) dispatchChannel = String(cfgData[cr][1]).trim();
+      if (normalizeStudioKey(cfgData[cr][0]) === 'CAMPAIGNID') {
+        cfgCid = String(cfgData[cr][1]).trim();
+        break;
+      }
+    }
+    if (!cfgCid || cfgCid.toLowerCase() === cid.toLowerCase()) {
+      for (let cr = 1; cr < cfgData.length; cr++) {
+        const k = normalizeStudioKey(cfgData[cr][0]);
+        if (!dept && (k === 'DEPARTMENT' || k === 'OPERATINGDEPARTMENT')) dept = String(cfgData[cr][1]).trim();
+        if (!limit && (k === 'MAXCOMPANIES' || k === 'DISCOVERYLIMIT')) limit = cfgData[cr][1];
+        if (!dispatchChannel && (k === 'EMAILSENDERPROVIDER' || k === 'DISPATCHMODE')) dispatchChannel = String(cfgData[cr][1]).trim();
+      }
     }
   }
 
-  dept = dept || 'ESG Advisory';
+  dept = dept || resolveCampaignClientName_(cid, '', ss);
   limit = limit || 5;
   dispatchChannel = dispatchChannel || 'Workspace Gmail (Drafts Only)';
   const limitDisplay = String(limit).includes('Companies') ? limit : (limit + ' Companies');
@@ -933,8 +1235,15 @@ function updateDashboardForActiveCampaign(payloadOrId) {
     aiLabel = 'OpenAI ' + model;
   }
 
-  const key = getStudioApiKey(prov);
-  const keyStatus = key ? 'Connected' : 'Key Not Configured';
+  const keyInfo = resolveClientScopedSecret_(
+    [prov.includes('OPENAI') ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY'],
+    { campaignId: cid, clientName: dept },
+    { throwOnMissing: false, allowAgentSettingsForLocal: true, spreadsheet: ss }
+  );
+  const keyStatus = keyInfo.key
+    ? 'Connected'
+    : (keyInfo.isLocal ? 'Key Not Configured' : 'Missing: ' + keyInfo.expectedProperty);
+
   const nowTimestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
 
   let discoveredCount = 0;
@@ -1011,9 +1320,9 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         dashSheet.getRange(rowNum, 2).setValue(cid);
         dashSheet.getRange(rowNum, 3).setValue(cid.includes('PILOT') ? 'Pilot Mode' : 'Production Mode');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      } else if (label.includes('OPERATINGDEPARTMENT') || label.includes('DEPARTMENT')) {
+      } else if (label.includes('OPERATINGDEPARTMENT') || label.includes('DEPARTMENT') || label.includes('CLIENTOWNER') || label.includes('CLIENTACCOUNT')) {
         dashSheet.getRange(rowNum, 2).setValue(dept);
-        dashSheet.getRange(rowNum, 3).setValue('Active Owner');
+        dashSheet.getRange(rowNum, 3).setValue(keyInfo.isLocal ? 'Local Owner' : 'Client Owner');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       } else if (label.includes('COMPANYDISCOVERYLIMIT') || label.includes('DISCOVERYLIMIT')) {
         dashSheet.getRange(rowNum, 2).setValue(limitDisplay);
@@ -1137,7 +1446,7 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
 /**
  * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log) so
  * rows from other campaigns are hidden, displaying exclusively the active campaign.
- * Automatically recreates filter ranges when new rows are added below prior filter boundaries.
+ * Also filters "Agent Settings" to the active Client / Owner block.
  */
 function filterOperationalSheetsByCampaign_(activeCampaignId) {
   if (!activeCampaignId) return;
@@ -1242,11 +1551,16 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
     }
   });
 
+  if (typeof filterAgentSettingsByClient_ === 'function') {
+    const activeClient = resolveCampaignClientName_(activeCampaignId, '', ss);
+    filterAgentSettingsByClient_(ss, activeClient);
+  }
+
   SpreadsheetApp.flush();
 }
 
 /**
- * Menu action to trigger tab re-filtering manually.
+ * Menu action to trigger tab re-filtering manually (also refreshes Agent Settings status & filter).
  */
 function filterSheetsForActiveCampaignMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1260,12 +1574,17 @@ function filterSheetsForActiveCampaignMenu() {
     }
   }
 
+  const activeClient = resolveCampaignClientName_(activeId, '', ss);
+  if (typeof setupAgentSettingsTabDropdowns === 'function') {
+    setupAgentSettingsTabDropdowns(ss, activeClient);
+  }
+
   filterOperationalSheetsByCampaign_(activeId);
 
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
-    ui.alert('Tabs Filtered', 'Operational tabs (including API_Usage_Log) filtered to active campaign: ' + activeId, ui.ButtonSet.OK);
+    ui.alert('Tabs Filtered', 'Operational tabs (including API_Usage_Log & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
   } catch (e) {
     Logger.log('Operational tabs filtered to active campaign: ' + activeId);
   }
@@ -1291,7 +1610,7 @@ function executeMasterPersonaMapperSync() {
   const payload = {
     id: cid,
     name: String(dict['CAMPAIGNNAME'] || dict['NAME'] || cid),
-    department: String(dict['DEPARTMENT'] || 'ESG Advisory'),
+    department: String(dict['DEPARTMENT'] || 'Growth Target'),
     country: String(dict['TARGETCOUNTRIES'] || ''),
     industry: String(dict['TARGETINDUSTRIES'] || ''),
     size: String(dict['COMPANYSIZERANGE'] || ''),
@@ -1354,6 +1673,13 @@ function runStudioSpreadsheetAudit() {
     ui = SpreadsheetApp.getUi();
   } catch (e) {}
 
+  const activeId = getStudioActiveCampaignId_();
+  const activeClient = resolveCampaignClientName_(activeId, '', ss);
+
+  if (typeof setupAgentSettingsTabDropdowns === 'function') {
+    setupAgentSettingsTabDropdowns(ss, activeClient);
+  }
+
   const requiredTabs = [
     'Dashboard',
     'API_Usage_Log',
@@ -1385,26 +1711,26 @@ function runStudioSpreadsheetAudit() {
 
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
   const userProps = PropertiesService.getUserProperties().getProperties();
-  const detectedKeys = [];
+  const detectedLocalKeys = [];
+  const detectedClientKeys = [];
 
   for (let k in scriptProps) {
     const uk = k.toUpperCase();
-    if (uk.includes('OPENAI') && isStudioValidSecretValue_(scriptProps[k])) {
-      detectedKeys.push('OpenAI (Project Settings)');
-    }
-    if (uk.includes('GEMINI') && isStudioValidSecretValue_(scriptProps[k])) {
-      detectedKeys.push('Gemini (Project Settings)');
+    if (!isStudioValidSecretValue_(scriptProps[k])) continue;
+    if (uk.indexOf('CLIENT_') === 0) {
+      detectedClientKeys.push(k);
+    } else {
+      if (uk.includes('OPENAI')) detectedLocalKeys.push('OpenAI (Project Settings)');
+      if (uk.includes('GEMINI')) detectedLocalKeys.push('Gemini (Project Settings)');
     }
   }
 
   for (let k in userProps) {
     const uk = k.toUpperCase();
-    if (uk.includes('OPENAI') && isStudioValidSecretValue_(userProps[k])) {
-      detectedKeys.push('OpenAI (User Properties)');
-    }
-    if (uk.includes('GEMINI') && isStudioValidSecretValue_(userProps[k])) {
-      detectedKeys.push('Gemini (User Properties)');
-    }
+    if (!isStudioValidSecretValue_(userProps[k])) continue;
+    if (uk.indexOf('CLIENT_') === 0) continue;
+    if (uk.includes('OPENAI')) detectedLocalKeys.push('OpenAI (User Properties)');
+    if (uk.includes('GEMINI')) detectedLocalKeys.push('Gemini (User Properties)');
   }
 
   const agentSheet = ss.getSheetByName('Agent Settings');
@@ -1415,11 +1741,11 @@ function runStudioSpreadsheetAudit() {
         const val = String(data[i][j] || '').trim().toUpperCase();
         if (val === 'OPENAI_API_KEY') {
           const keyVal = String(data[i][j + 1] !== undefined ? data[i][j + 1] : (data[i][2] || '')).trim();
-          if (isStudioValidSecretValue_(keyVal)) detectedKeys.push('OpenAI (Agent Settings)');
+          if (isStudioValidSecretValue_(keyVal)) detectedLocalKeys.push('OpenAI (Agent Settings)');
         }
         if (val === 'GEMINI_API_KEY') {
           const keyVal = String(data[i][j + 1] !== undefined ? data[i][j + 1] : (data[i][2] || '')).trim();
-          if (isStudioValidSecretValue_(keyVal)) detectedKeys.push('Gemini (Agent Settings)');
+          if (isStudioValidSecretValue_(keyVal)) detectedLocalKeys.push('Gemini (Agent Settings)');
         }
       }
     }
@@ -1438,14 +1764,16 @@ function runStudioSpreadsheetAudit() {
     }
   }
 
-  const activeId = getStudioActiveCampaignId_();
+  const registeredClients = getRegisteredClientsList_(ss);
+
   let apiKeyInfo = 'Not Configured (Add key in Project Settings > Script Properties)';
-  if (detectedKeys.length > 0) {
-    apiKeyInfo = 'Connected: ' + Array.from(new Set(detectedKeys)).join(', ');
+  if (detectedLocalKeys.length > 0) {
+    apiKeyInfo = 'Local Connected: ' + Array.from(new Set(detectedLocalKeys)).join(', ');
   }
 
   let message = '📊 SPREADSHEET SYSTEM HEALTH CHECK:\n\n';
-  message += '• Active Campaign: ' + activeId + '\n';
+  message += '• Active Campaign: ' + activeId + ' (Client / Owner: ' + activeClient + ')\n';
+  message += '• Registered Clients: ' + registeredClients.join(', ') + '\n';
   message += '• Project Tabs Verified: ' + present.length + ' of ' + requiredTabs.length + ' Tabs Active\n';
   if (missing.length > 0) {
     message += '⚠️ Missing Tabs: ' + missing.join(', ') + '\n\n';
@@ -1453,7 +1781,8 @@ function runStudioSpreadsheetAudit() {
     message += '✅ All 13 project tabs exist and match system schema.\n\n';
   }
 
-  message += '• AI Engine Status: ' + apiKeyInfo + '\n';
+  message += '• Local Agency AI Status: ' + apiKeyInfo + '\n';
+  message += '• Client-Isolated Properties Detected: ' + detectedClientKeys.length + ' key(s)\n';
   message += '• Email Dispatch Channel: ' + dispatchChannel + '\n';
   message += '• Suppression Engine: Active (checking Lists & Settings)\n';
   message += '• Human Review Queue: Operational\n\n';

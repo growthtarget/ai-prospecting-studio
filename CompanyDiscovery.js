@@ -1,20 +1,20 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * AGENT 1: COMPANY DISCOVERY & RESEARCH AGENT (MULTI-AI PROVIDER ENGINE)
+ * AGENT 1: COMPANY DISCOVERY & RESEARCH AGENT (CLIENT-ISOLATED MULTI-AI ENGINE)
  * ============================================================================
  * File: CompanyDiscovery.gs / CompanyDiscovery.js
  * 
  * CAPABILITIES:
  * 1. Multi-AI Support: Dynamically routes to GEMINI (with Grounding + Free-Tier Fallback)
- *    or OPENAI (GPT-4o) reading API keys from Script Properties or Agent Settings.
- * 2. Multi-Department Intelligence: Normalizes and reads DEPARTMENT, CUSTOM_BUSINESS_NEEDS,
+ *    or OPENAI (GPT-4o) using strict Client-Scoped API keys.
+ * 2. Multi-Client Intelligence: Resolves Client / Owner, CUSTOM_BUSINESS_NEEDS,
  *    CAMPAIGN_FOCUS, SEARCH_KEYWORDS, and targeting parameters reliably.
  * 3. Dual-Tab Population: Writes master entries to "Company Database" (stamped with Col J Campaign ID)
  *    AND populates all 25 columns of "Company Intelligence".
  * 4. Scenario B Deduplication: Isolates deduplication by Campaign ID.
  * 5. Grounding Evidence Logging: Stores audit citation URLs in Tab 10 "Research Evidence" (9 canonical columns).
- * 6. API Usage Tracking: Passes campaign ID and operation context to ApiTracker.
+ * 6. API Usage Tracking: Passes campaign ID, client context, and operation to ApiTracker.
  * 7. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
  * ============================================================================
  */
@@ -45,10 +45,11 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
     const model = resolveAiModel_(provider, config.aiModel);
     const providerLabel = provider === 'OPENAI' ? 'OpenAI (' + model + ')' : 'Google Gemini (' + model + ')';
 
-    Logger.log('Launching Agent 1 with ' + providerLabel + ' for campaign: ' + config.id);
+    Logger.log('Launching Agent 1 with ' + providerLabel + ' for campaign: ' + config.id + ' (Client: ' + config.department + ')');
 
     const aiResponse = executeAiDiscoveryCall_({
       campaignId: config.id,
+      clientName: config.department,
       provider: provider,
       model: model,
       prompt: prompt,
@@ -128,7 +129,7 @@ function runCompanyDiscoveryForSelectedCampaign() {
       ui.alert(
         'Starting Company Discovery (Agent 1)',
         'Searching for up to ' + companyLimit + ' companies using ' + providerLabel + ' (Campaign: ' + config.id + '):\n' +
-        '• Department: ' + config.department + '\n' +
+        '• Client / Owner: ' + config.department + '\n' +
         '• Industry: ' + (config.industry || 'Any') + '\n' +
         '• Geography: ' + (config.country || 'Any') + '\n' +
         '• Needs/Triggers: ' + (config.customBusinessNeeds.slice(0, 100) || config.campaignFocus || 'General') + '\n\n' +
@@ -140,6 +141,7 @@ function runCompanyDiscoveryForSelectedCampaign() {
     const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
     const aiResponse = executeAiDiscoveryCall_({
       campaignId: config.id,
+      clientName: config.department,
       provider: provider,
       model: model,
       prompt: prompt,
@@ -170,7 +172,7 @@ function runCompanyDiscoveryForSelectedCampaign() {
     if (ui) {
       ui.alert(
         'Company Discovery Complete',
-        'Discovered and added ' + addedCount + ' company record(s) to "Company Database", "Company Intelligence", and "Research Evidence" using ' + providerLabel + '.\n\n' +
+        'Discovered and added ' + addedCount + ' company record(s) to "Company Database", "Company Intelligence", and "Research Evidence" using ' + providerLabel + ' for ' + config.department + '.\n\n' +
         'Next Step: Run "Agent 2: Persona Mapping" from the sidebar to find decision-makers and draft outreach.',
         ui.ButtonSet.OK
       );
@@ -217,7 +219,7 @@ function buildCompanyDiscoveryPrompt_(config, limit) {
     'Your goal is to identify REAL, active, operating enterprise or mid-market companies matching the campaign profile below.',
     '',
     'CAMPAIGN PARAMETERS:',
-    '• Operating Department: ' + config.department,
+    '• Client / Account Owner: ' + config.department,
     '• Target Geographies / Countries: ' + (config.country || 'United States & Canada'),
     '• Target Industry Verticals: ' + (config.industry || 'Freight & Logistics, Manufacturing'),
     '• Target Company Size (Headcount): ' + (config.size || '50 - 250 employees'),
@@ -261,7 +263,7 @@ function buildCompanyDiscoveryPrompt_(config, limit) {
 }
 
 /**
- * Resilient AI Router honoring ApiTracker budget guardrails and usage logging
+ * Resilient AI Router honoring ApiTracker budget guardrails and strict client key routing
  */
 function executeAiDiscoveryCall_(options) {
   if (typeof callAI === 'function') {
@@ -365,7 +367,15 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   let addedCount = 0;
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0];
-  const isEsg = String(config.department || '').toLowerCase().includes('esg');
+
+  const esgSignalText = [
+    config.name,
+    config.campaignFocus,
+    config.searchKeywords,
+    config.customBusinessNeeds,
+    config.industry
+  ].join(' ').toLowerCase();
+  const isEsg = /\b(esg|scope\s*3|csrd|sustainability|emissions|ghg|clean\s*energy|cleantech|gri)\b/.test(esgSignalText);
 
   discoveredCompanies.forEach(function(item) {
     if (!item || typeof item !== 'object') return;
@@ -484,7 +494,7 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
   const config = {
     id: targetId,
     name: '',
-    department: 'ESG Advisory',
+    department: '',
     industry: 'Freight & Logistics, Manufacturing',
     country: 'United States & Canada',
     size: '50 - 250 employees',
@@ -538,7 +548,9 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
     if (!hydratedFromCampaigns || !activeCfgId || activeCfgId.toLowerCase() === targetId.toLowerCase()) {
       if (!targetId && activeCfgId) config.id = activeCfgId;
       if (dict['CAMPAIGNNAME'] || dict['NAME']) config.name = String(dict['CAMPAIGNNAME'] || dict['NAME']).trim();
-      if (dict['DEPARTMENT'] || dict['DEPARTMENTOWNER']) config.department = String(dict['DEPARTMENT'] || dict['DEPARTMENTOWNER']).trim();
+      if (dict['DEPARTMENT'] || dict['DEPARTMENTOWNER'] || dict['CLIENTOWNER'] || dict['CLIENT']) {
+        config.department = String(dict['DEPARTMENT'] || dict['DEPARTMENTOWNER'] || dict['CLIENTOWNER'] || dict['CLIENT']).trim();
+      }
       if (dict['TARGETCOUNTRIES'] || dict['TARGETGEOGRAPHY'] || dict['COUNTRIESREGIONS'] || dict['COUNTRY']) config.country = String(dict['TARGETCOUNTRIES'] || dict['TARGETGEOGRAPHY'] || dict['COUNTRIESREGIONS'] || dict['COUNTRY']).trim();
       if (dict['TARGETINDUSTRIES'] || dict['INDUSTRIES'] || dict['INDUSTRY']) config.industry = String(dict['TARGETINDUSTRIES'] || dict['INDUSTRIES'] || dict['INDUSTRY']).trim();
       if (dict['COMPANYSIZERANGE'] || dict['COMPANYSIZE'] || dict['SIZE']) config.size = String(dict['COMPANYSIZERANGE'] || dict['COMPANYSIZE'] || dict['SIZE']).trim();
@@ -553,6 +565,12 @@ function getCampaignConfigurationRecord_(spreadsheet, campaignId) {
       if (dict['AIPROVIDER'] || dict['PRIMARYAIPROVIDER']) config.aiProvider = String(dict['AIPROVIDER'] || dict['PRIMARYAIPROVIDER']).trim().toUpperCase();
       if (dict['AIMODEL'] || dict['OPENAIMODEL'] || dict['GEMINIMODEL']) config.aiModel = String(dict['AIMODEL'] || dict['OPENAIMODEL'] || dict['GEMINIMODEL']).trim();
     }
+  }
+
+  if (!config.department) {
+    config.department = typeof resolveCampaignClientName_ === 'function'
+      ? resolveCampaignClientName_(config.id, '', spreadsheet)
+      : 'Growth Target';
   }
 
   if (agentSheet && agentSheet.getLastRow() > 1) {

@@ -1,14 +1,15 @@
 /**
  * ============================================================================
  * AI PROSPECTING STUDIO + PERSONA MAPPER (v2.0)
- * AGENT 2: PERSONA IDENTIFICATION, RESEARCH & EMAIL CURATION (MULTI-AI ENGINE)
+ * AGENT 2: PERSONA IDENTIFICATION, RESEARCH & EMAIL CURATION (CLIENT-ISOLATED)
  * ============================================================================
  * File: PersonaMapper.gs / PersonaMapper.js
  * 
  * CAPABILITIES:
- * 1. Multi-AI Support: Routes dynamically to GEMINI (Grounding) or OPENAI (GPT-4o).
- * 2. Multi-Department Intelligence: Leverages DEPARTMENT & CUSTOM_BUSINESS_NEEDS
- *    to generate tailored peer-to-peer outreach with configured sender identity.
+ * 1. Multi-AI Support: Routes dynamically to GEMINI (Grounding) or OPENAI (GPT-4o)
+ *    using strict Client-Scoped API keys (zero local fallback for clients).
+ * 2. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
+ *    Custom HTTPS keys strictly per Client / Owner.
  * 3. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
  *    opt-out emails, and role-based accounts before queuing.
  * 4. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 cols).
@@ -50,6 +51,7 @@ function runPersonaMapperFromSidebar(campaignId) {
       return { success: false, message: 'Persona Mapper is disabled for campaign ' + activeId + '. Enable it in settings.' };
     }
 
+    const clientName = settings['Department'] || 'Growth Target';
     const providerChoice = String(settings['AI Provider'] || 'GEMINI').toUpperCase();
     const modelChoice = resolvePersonaAiModel_(providerChoice, settings['AI Model']);
     const providerLabel = providerChoice === 'OPENAI' ? 'OpenAI (' + modelChoice + ')' : 'Google Gemini (' + modelChoice + ')';
@@ -78,6 +80,7 @@ function runPersonaMapperFromSidebar(campaignId) {
 
       const aiResponse = executeAiCall_({
         campaignId: activeId,
+        clientName: clientName,
         provider: providerChoice,
         model: modelChoice,
         prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets),
@@ -128,7 +131,7 @@ function runPersonaMapperFromSidebar(campaignId) {
     }
 
     if (typeof checkVerifierBalanceAndAlert_ === 'function') {
-      checkVerifierBalanceAndAlert_();
+      checkVerifierBalanceAndAlert_(activeId, clientName);
     }
 
     if (typeof updateDashboardForActiveCampaign === 'function' &&
@@ -141,14 +144,14 @@ function runPersonaMapperFromSidebar(campaignId) {
       return {
         success: true,
         count: processed,
-        message: 'Persona Mapper completed ' + processed + ' company record(s) using ' + providerLabel + '! Leads staged in Review Queue & citations logged in Research Evidence.'
+        message: 'Persona Mapper completed ' + processed + ' company record(s) for "' + clientName + '" using ' + providerLabel + '! Leads staged in Review Queue & citations logged in Research Evidence.'
       };
     } else {
       properties.setProperty(cursorKey, String(end));
       return {
         success: true,
         count: processed,
-        message: 'Processed ' + processed + ' companies with ' + providerLabel + '. Click Step 2 again to run next batch.'
+        message: 'Processed ' + processed + ' companies for "' + clientName + '" with ' + providerLabel + '. Click Step 2 again to run next batch.'
       };
     }
   } catch (err) {
@@ -185,6 +188,7 @@ function runPersonaMapperForSelectedCampaign() {
       return;
     }
 
+    const clientName = settings['Department'] || 'Growth Target';
     const providerChoice = String(settings['AI Provider'] || 'GEMINI').toUpperCase();
     const modelChoice = resolvePersonaAiModel_(providerChoice, settings['AI Model']);
     const providerLabel = providerChoice === 'OPENAI' ? 'OpenAI (' + modelChoice + ')' : 'Google Gemini (' + modelChoice + ')';
@@ -216,6 +220,7 @@ function runPersonaMapperForSelectedCampaign() {
       try {
         const aiResponse = executeAiCall_({
           campaignId: campaignId,
+          clientName: clientName,
           provider: providerChoice,
           model: modelChoice,
           prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets),
@@ -271,7 +276,7 @@ function runPersonaMapperForSelectedCampaign() {
     }
 
     if (typeof checkVerifierBalanceAndAlert_ === 'function') {
-      checkVerifierBalanceAndAlert_();
+      checkVerifierBalanceAndAlert_(campaignId, clientName);
     }
 
     if (typeof updateDashboardForActiveCampaign === 'function' &&
@@ -281,10 +286,10 @@ function runPersonaMapperForSelectedCampaign() {
 
     if (end >= companies.length) {
       properties.deleteProperty(cursorKey);
-      if (ui) ui.alert('Persona Mapper completed ' + processed + ' company record(s) using ' + providerLabel + '. Leads staged in Prospect Review Queue & Grounding Evidence recorded.');
+      if (ui) ui.alert('Persona Mapper completed ' + processed + ' company record(s) for "' + clientName + '" using ' + providerLabel + '. Leads staged in Prospect Review Queue & Grounding Evidence recorded.');
     } else {
       properties.setProperty(cursorKey, String(end));
-      if (ui) ui.alert('Persona Mapper processed ' + processed + ' company record(s). Run it again to continue next batch.');
+      if (ui) ui.alert('Persona Mapper processed ' + processed + ' company record(s) for "' + clientName + '". Run it again to continue next batch.');
     }
   } finally {
     lock.releaseLock();
@@ -318,10 +323,10 @@ function getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName) {
 }
 
 /**
- * Builds the Multi-Department Persona Research & Outreach Prompt
+ * Builds the Multi-Client Persona Research & Outreach Prompt
  */
 function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
-  const department = settings['Department'] || 'Procurement';
+  const clientOwner = settings['Department'] || 'Growth Target';
   const senderName = settings['Sender Name'] || 'Alex Mercer';
   const senderTitle = settings['Sender Title'] || 'Solutions Consultant';
   const senderCompany = settings['Sender Company'] || 'eValuater Solutions';
@@ -335,7 +340,7 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
     'Research ONLY the single existing company supplied below. Do not invent or discover other companies.',
     '',
     'OPERATIONAL CONTEXT & SENDER IDENTITY:',
-    '• Operating Department: ' + department,
+    '• Client / Account Owner: ' + clientOwner,
     '• Sender Name: ' + senderName,
     '• Sender Title: ' + senderTitle,
     '• Sender Company: ' + senderCompany,
@@ -428,6 +433,7 @@ function resolvePersonaAiModel_(provider, configuredModel) {
 function getPersonaMapperSettings_(spreadsheet, campaignId) {
   const settingsSheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.settings);
   const configSheet = spreadsheet.getSheetByName('Campaign Configuration');
+  const campaignsSheet = spreadsheet.getSheetByName('Campaigns');
   const agentSheet = spreadsheet.getSheetByName('Agent Settings');
 
   const merged = {
@@ -436,7 +442,7 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
     'Persona Mapper Enabled': true,
     'AI Provider': '',
     'AI Model': '',
-    'Department': 'Procurement',
+    'Department': '',
     'Persona Titles': '',
     'Search Keywords': '',
     'Campaign Focus': '',
@@ -471,6 +477,41 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
     'Weight eValuater Solution Fit': 10
   };
 
+  // 1. Read Client / Owner & Sender fields from Campaigns master table by Campaign ID
+  if (campaignsSheet && campaignsSheet.getLastRow() > 1) {
+    const campRecords = getPersonaMapperSheetRecords_(campaignsSheet);
+    const campMatch = campRecords.find(function(row) {
+      return String(row['Campaign ID'] || '').trim().toLowerCase() === String(campaignId).trim().toLowerCase();
+    });
+    if (campMatch) {
+      if (campMatch['Campaign Config JSON']) {
+        try {
+          const parsed = JSON.parse(campMatch['Campaign Config JSON']);
+          if (parsed && typeof parsed === 'object') {
+            if (parsed.department) merged['Department'] = String(parsed.department).trim();
+            if (parsed.customBusinessNeeds) merged['Custom Business Needs'] = String(parsed.customBusinessNeeds).trim();
+            if (parsed.senderName) merged['Sender Name'] = String(parsed.senderName).trim();
+            if (parsed.senderTitle) merged['Sender Title'] = String(parsed.senderTitle).trim();
+            if (parsed.senderCompany) merged['Sender Company'] = String(parsed.senderCompany).trim();
+          }
+        } catch (e) {}
+      }
+      if (campMatch['Campaign Name']) merged['Campaign Name'] = String(campMatch['Campaign Name']).trim();
+      if (campMatch['Department']) merged['Department'] = String(campMatch['Department']).trim();
+      if (campMatch['Custom Business Needs']) merged['Custom Business Needs'] = String(campMatch['Custom Business Needs']).trim();
+      if (campMatch['Sender Name']) merged['Sender Name'] = String(campMatch['Sender Name']).trim();
+      if (campMatch['Sender Title']) merged['Sender Title'] = String(campMatch['Sender Title']).trim();
+      if (campMatch['Sender Company']) merged['Sender Company'] = String(campMatch['Sender Company']).trim();
+      if (campMatch['AI Provider']) merged['AI Provider'] = String(campMatch['AI Provider']).trim().toUpperCase();
+      if (campMatch['AI Model']) merged['AI Model'] = String(campMatch['AI Model']).trim();
+      if (campMatch['Email Verifier Provider']) merged['Email Verification Provider'] = String(campMatch['Email Verifier Provider']).trim();
+      if (campMatch['Email Verifier Endpoint']) merged['Email Verification Endpoint'] = String(campMatch['Email Verifier Endpoint']).trim();
+      if (campMatch['Email Sender Provider']) merged['Email Sender Provider'] = String(campMatch['Email Sender Provider']).trim();
+      if (campMatch['Email Sender Endpoint']) merged['Email Sender Endpoint'] = String(campMatch['Email Sender Endpoint']).trim();
+    }
+  }
+
+  // 2. Read from Campaign Configuration when Campaign ID matches
   if (configSheet && configSheet.getLastRow() > 1) {
     const data = configSheet.getDataRange().getValues();
     const dict = {};
@@ -481,7 +522,9 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
     const activeConfigId = String(dict['CAMPAIGNID'] || '').trim();
     if (!activeConfigId || activeConfigId.toLowerCase() === String(campaignId).trim().toLowerCase()) {
       if (dict['CAMPAIGNNAME'] || dict['NAME']) merged['Campaign Name'] = String(dict['CAMPAIGNNAME'] || dict['NAME']);
-      if (dict['DEPARTMENT'] || dict['DEPARTMENTOWNER']) merged['Department'] = String(dict['DEPARTMENT'] || dict['DEPARTMENTOWNER']);
+      if (dict['DEPARTMENT'] || dict['DEPARTMENTOWNER'] || dict['CLIENTOWNER'] || dict['CLIENT']) {
+        merged['Department'] = String(dict['DEPARTMENT'] || dict['DEPARTMENTOWNER'] || dict['CLIENTOWNER'] || dict['CLIENT']).trim();
+      }
       if (dict['AIPROVIDER'] || dict['PRIMARYAIPROVIDER']) merged['AI Provider'] = String(dict['AIPROVIDER'] || dict['PRIMARYAIPROVIDER']).trim().toUpperCase();
       if (dict['AIMODEL'] || dict['OPENAIMODEL'] || dict['GEMINIMODEL']) merged['AI Model'] = String(dict['AIMODEL'] || dict['OPENAIMODEL'] || dict['GEMINIMODEL']).trim();
       if (dict['TARGETTITLES'] || dict['TARGETPERSONATITLES']) merged['Persona Titles'] = String(dict['TARGETTITLES'] || dict['TARGETPERSONATITLES']);
@@ -503,6 +546,7 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
     }
   }
 
+  // 3. Read from Persona Mapper Settings (39 cols)
   if (settingsSheet && settingsSheet.getLastRow() > 1) {
     const records = getPersonaMapperSheetRecords_(settingsSheet);
     const match = records.find(function(row) {
@@ -515,6 +559,12 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
         }
       });
     }
+  }
+
+  if (!merged['Department']) {
+    merged['Department'] = typeof resolveCampaignClientName_ === 'function'
+      ? resolveCampaignClientName_(campaignId, '', spreadsheet)
+      : 'Growth Target';
   }
 
   if (!merged['Custom Business Needs'] && merged['Notes']) {
@@ -922,11 +972,43 @@ function isValidVerifierKeyValue_(val) {
   return true;
 }
 
-function resolveVerifierApiKey_(spreadsheet) {
+/**
+ * Resolves the email verifier API key strictly scoped to the campaign's Client / Owner.
+ * For external clients, enforces strict CLIENT_{NAME}_{PROVIDER}_API_KEY / _VERIFIER_API_KEY
+ * with ZERO local fallback when verification is enabled.
+ */
+function resolveVerifierApiKey_(spreadsheet, settings) {
+  const provider = String((settings && settings['Email Verification Provider']) || 'ZeroBounce').trim();
+  if (provider === 'None') return '';
+
+  const pLower = provider.toLowerCase();
+  const candidateKeys = [];
+  if (pLower.indexOf('zerobounce') >= 0) candidateKeys.push('ZEROBOUNCE_API_KEY');
+  else if (pLower.indexOf('millionverifier') >= 0) candidateKeys.push('MILLIONVERIFIER_API_KEY');
+  else if (pLower.indexOf('neverbounce') >= 0) candidateKeys.push('NEVERBOUNCE_API_KEY');
+  else if (pLower.indexOf('custom') >= 0) candidateKeys.push('CUSTOM_VERIFIER_API_KEY');
+  candidateKeys.push('VERIFIER_API_KEY', 'EMAIL_VERIFICATION_API_KEY');
+
+  const campaignId = (settings && settings['Campaign ID']) || '';
+  const clientName = (settings && settings['Department']) || '';
+
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
+    const resolved = resolveClientScopedSecret_(
+      candidateKeys,
+      { campaignId: campaignId, clientName: clientName },
+      {
+        serviceLabel: provider + ' Email Verifier',
+        throwOnMissing: !isLocal,
+        allowAgentSettingsForLocal: isLocal,
+        spreadsheet: spreadsheet
+      }
+    );
+    return resolved.key || '';
+  }
+
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
   const userProps = PropertiesService.getUserProperties().getProperties();
-  const candidateKeys = ['VERIFIER_API_KEY', 'EMAIL_VERIFICATION_API_KEY'];
-
   for (let i = 0; i < candidateKeys.length; i++) {
     const val = scriptProps[candidateKeys[i]];
     if (isValidVerifierKeyValue_(val)) return String(val).trim();
@@ -935,44 +1017,39 @@ function resolveVerifierApiKey_(spreadsheet) {
     const val = userProps[candidateKeys[i]];
     if (isValidVerifierKeyValue_(val)) return String(val).trim();
   }
-
-  if (spreadsheet) {
-    const agentSheet = spreadsheet.getSheetByName('Agent Settings');
-    if (agentSheet && agentSheet.getLastRow() > 1) {
-      const data = agentSheet.getDataRange().getValues();
-      for (let i = 1; i < data.length; i++) {
-        const k = String(data[i][1] || data[i][0] || '').trim().toUpperCase();
-        if ((k === 'VERIFIER_API_KEY' || k === 'EMAIL_VERIFICATION_API_KEY') && data[i].length >= 3) {
-          const val = String(data[i][2] || '').trim();
-          if (isValidVerifierKeyValue_(val)) return val;
-        }
-      }
-    }
-  }
   return '';
 }
 
 /**
  * Verifies emails via ZeroBounce, MillionVerifier, NeverBounce, or Custom HTTPS
- * while safely handling unpaid/unconfigured keys and enforcing ApiTracker guardrails.
+ * with strict client key isolation and ApiTracker budget guardrails.
  */
 function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
   const provider = String(settings['Email Verification Provider'] || 'ZeroBounce').trim();
-  const apiKey = resolveVerifierApiKey_(spreadsheet);
-
-  if (!apiKey || provider === 'None') {
+  if (provider === 'None') {
     return {
       configured: false,
       status: 'unverified',
       provider: provider,
-      notes: 'Verifier key not set; passed syntax/domain check (unverified for free-tier testing).'
+      notes: 'Email verification set to None; passed syntax/domain check.'
+    };
+  }
+
+  const apiKey = resolveVerifierApiKey_(spreadsheet, settings);
+  if (!apiKey) {
+    return {
+      configured: false,
+      status: 'unverified',
+      provider: provider,
+      notes: 'Verifier key not set; passed syntax/domain check (unverified for local free-tier testing).'
     };
   }
 
   const campaignId = settings['Campaign ID'] || 'CMP-DEFAULT';
+  const clientName = settings['Department'] || 'Growth Target';
 
   if (typeof checkApiBudgetGuardrails_ === 'function') {
-    checkApiBudgetGuardrails_(campaignId);
+    checkApiBudgetGuardrails_(campaignId, clientName);
   }
 
   const p = provider.toLowerCase();
@@ -986,6 +1063,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
         if (typeof logApiUsage_ === 'function') {
           logApiUsage_({
             campaignId: campaignId,
+            clientName: clientName,
             serviceName: 'ZeroBounce',
             operation: 'EmailVerification',
             httpStatus: code,
@@ -1006,6 +1084,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
       if (typeof logApiUsage_ === 'function') {
         logApiUsage_({
           campaignId: campaignId,
+          clientName: clientName,
           serviceName: 'ZeroBounce',
           operation: 'EmailVerification',
           httpStatus: code,
@@ -1029,6 +1108,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
         if (typeof logApiUsage_ === 'function') {
           logApiUsage_({
             campaignId: campaignId,
+            clientName: clientName,
             serviceName: 'MillionVerifier',
             operation: 'EmailVerification',
             httpStatus: code,
@@ -1049,6 +1129,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
       if (typeof logApiUsage_ === 'function') {
         logApiUsage_({
           campaignId: campaignId,
+          clientName: clientName,
           serviceName: 'MillionVerifier',
           operation: 'EmailVerification',
           httpStatus: code,
@@ -1072,6 +1153,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
         if (typeof logApiUsage_ === 'function') {
           logApiUsage_({
             campaignId: campaignId,
+            clientName: clientName,
             serviceName: 'NeverBounce',
             operation: 'EmailVerification',
             httpStatus: code,
@@ -1092,6 +1174,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
       if (typeof logApiUsage_ === 'function') {
         logApiUsage_({
           campaignId: campaignId,
+          clientName: clientName,
           serviceName: 'NeverBounce',
           operation: 'EmailVerification',
           httpStatus: code,
@@ -1123,6 +1206,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
         if (typeof logApiUsage_ === 'function') {
           logApiUsage_({
             campaignId: campaignId,
+            clientName: clientName,
             serviceName: 'Custom HTTPS',
             operation: 'EmailVerification',
             httpStatus: code,
@@ -1141,6 +1225,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
       if (typeof logApiUsage_ === 'function') {
         logApiUsage_({
           campaignId: campaignId,
+          clientName: clientName,
           serviceName: 'Custom HTTPS',
           operation: 'EmailVerification',
           httpStatus: code,
@@ -1162,6 +1247,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
     if (typeof logApiUsage_ === 'function') {
       logApiUsage_({
         campaignId: campaignId,
+        clientName: clientName,
         serviceName: provider,
         operation: 'EmailVerification',
         httpStatus: 500,
