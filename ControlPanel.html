@@ -44,28 +44,13 @@
     </style>
   </head>
   <body>
-    <!-- Campaign Selection Header -->
+    <!-- Client-First Cascading Campaign Selection Header -->
     <div class="card">
       <div class="header-title">
         <span>Campaign Control</span>
         <button id="btnRefreshCampaigns" class="btn btn-secondary btn-icon" onclick="refreshCampaigns()" title="Reload campaigns & client list">🔄 Refresh</button>
       </div>
-      <div class="field">
-        <label for="campaignSelect">Active Campaign</label>
-        <select id="campaignSelect" onchange="onCampaignSelected()">
-          <option value="">-- Choose or Enter Campaign --</option>
-        </select>
-      </div>
-      <div class="row">
-        <div class="field">
-          <label for="campaignIdInput">Campaign ID</label>
-          <input type="text" id="campaignIdInput" placeholder="e.g. CMP-005">
-        </div>
-        <div class="field">
-          <label for="campaignNameInput">Campaign Name</label>
-          <input type="text" id="campaignNameInput" placeholder="e.g. Energy US">
-        </div>
-      </div>
+
       <div class="field">
         <label for="departmentOwner">Client / Owner</label>
         <select id="departmentOwner" onchange="onClientOwnerChanged()"></select>
@@ -78,6 +63,25 @@
           </div>
         </div>
         <div id="clientScopeBadge" class="client-badge local"></div>
+      </div>
+
+      <div class="field">
+        <label for="campaignSelect">Active Campaign</label>
+        <select id="campaignSelect" onchange="onCampaignSelected()">
+          <option value="__NEW_CAMPAIGN__">+ Create New Campaign...</option>
+        </select>
+        <div id="campaignFilterHint" class="hint"></div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="campaignIdInput">Campaign ID</label>
+          <input type="text" id="campaignIdInput" placeholder="e.g. CMP-005">
+        </div>
+        <div class="field">
+          <label for="campaignNameInput">Campaign Name</label>
+          <input type="text" id="campaignNameInput" placeholder="e.g. Energy US">
+        </div>
       </div>
     </div>
 
@@ -413,18 +417,26 @@
       var isPipelineBusy = false;
 
       window.onload = function() {
-        renderClientOptions(serverClients, 'Growth Target');
-        renderCampaignOptions(serverCampaigns, currentActiveId);
-        onSenderChanged();
         if (serverCampaigns && serverCampaigns.length > 0) {
-          const selectVal = currentActiveId || serverCampaigns[0].id;
-          document.getElementById('campaignSelect').value = selectVal;
-          onCampaignSelected(true);
+          const initialId = (currentActiveId && serverConfigsMap[currentActiveId])
+            ? currentActiveId
+            : serverCampaigns[0].id;
+          const initialClient = getCampaignClient_(initialId);
+          renderClientOptions(serverClients, initialClient);
+          const selectedCamp = renderCampaignOptionsForClient(initialClient, initialId);
+          if (selectedCamp && selectedCamp !== '__NEW_CAMPAIGN__') {
+            onCampaignSelected(true);
+          } else {
+            populateNewCampaignDefaults_(initialClient);
+          }
         } else {
+          const fallbackClient = (serverClients && serverClients.length > 0) ? serverClients[0] : 'Growth Target';
+          renderClientOptions(serverClients, fallbackClient);
+          renderCampaignOptionsForClient(fallbackClient, '__NEW_CAMPAIGN__');
+          populateNewCampaignDefaults_(fallbackClient);
           document.getElementById('campaignIdInput').value = 'CMP-001';
           document.getElementById('campaignNameInput').value = 'Enterprise Scope 3 & ESG Supply Chain Readiness';
           applyDepartmentPreset('procurement');
-          updateClientScopeBadge_();
         }
       };
 
@@ -435,6 +447,7 @@
         document.getElementById('btnRunPersonaMapper').disabled = isPipelineBusy;
         document.getElementById('btnRefreshCampaigns').disabled = isPipelineBusy;
         document.getElementById('campaignSelect').disabled = isPipelineBusy;
+        document.getElementById('departmentOwner').disabled = isPipelineBusy;
       }
 
       function normalizeClientPrefix_(clientName) {
@@ -451,11 +464,114 @@
         return !norm || norm === 'GROWTHTARGET' || norm === 'LOCAL' || norm === 'AGENCY' || norm === 'DEFAULT';
       }
 
+      function getCampaignClient_(cid) {
+        const id = String(cid || '').trim();
+        if (id && serverConfigsMap && serverConfigsMap[id] && serverConfigsMap[id].department) {
+          return String(serverConfigsMap[id].department).trim();
+        }
+        if (Array.isArray(serverCampaigns)) {
+          for (let i = 0; i < serverCampaigns.length; i++) {
+            if (serverCampaigns[i].id === id && serverCampaigns[i].department) {
+              return String(serverCampaigns[i].department).trim();
+            }
+          }
+        }
+        if (id && id.toUpperCase().indexOf('PILOT') === 0) {
+          return 'Pilot Acme';
+        }
+        return 'Growth Target';
+      }
+
+      function getAllKnownClients_(extraClients) {
+        const merged = [];
+        const seen = {};
+        function addClient(name) {
+          const clean = String(name || '').trim();
+          if (!clean || clean === '__ADD_NEW_CLIENT__') return;
+          const key = clean.toLowerCase();
+          if (!seen[key]) {
+            seen[key] = true;
+            merged.push(clean);
+          }
+        }
+        const base = (Array.isArray(extraClients) && extraClients.length > 0) ? extraClients : serverClients;
+        if (Array.isArray(base)) base.forEach(addClient);
+        if (Array.isArray(serverCampaigns)) {
+          serverCampaigns.forEach(function(c) {
+            addClient(getCampaignClient_(c.id));
+          });
+        }
+        return merged.length > 0 ? merged : ['Growth Target', 'Pilot Acme'];
+      }
+
+      function getCampaignsForClient_(clientName) {
+        const target = String(clientName || '').trim().toLowerCase();
+        if (!Array.isArray(serverCampaigns)) return [];
+        return serverCampaigns.filter(function(c) {
+          return getCampaignClient_(c.id).toLowerCase() === target;
+        });
+      }
+
+      function suggestNextCampaignId_(clientName) {
+        const clean = String(clientName || '').trim();
+        let prefix = 'CMP';
+
+        if (!isLocalBrand_(clean)) {
+          const words = clean.replace(/[^A-Za-z0-9\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
+          if (words.length >= 2) {
+            prefix = words.map(function(w) { return w.charAt(0).toUpperCase(); }).join('').slice(0, 4);
+          } else if (words.length === 1) {
+            prefix = words[0].toUpperCase().slice(0, 3);
+          }
+          // Avoid starting with PILOT so new production campaigns aren't treated as sandbox pilot runs
+          if (!prefix || prefix.indexOf('PILOT') === 0) {
+            prefix = 'CL';
+          }
+        }
+
+        const used = {};
+        let maxNum = 0;
+
+        function trackId(rawId) {
+          const idUpper = String(rawId || '').trim().toUpperCase();
+          if (!idUpper) return;
+          used[idUpper] = true;
+          if (idUpper.indexOf(prefix + '-') === 0) {
+            const tail = idUpper.slice(prefix.length + 1);
+            if (/^\d+$/.test(tail)) {
+              const n = parseInt(tail, 10);
+              if (n > maxNum) maxNum = n;
+            }
+          }
+        }
+
+        if (Array.isArray(serverCampaigns)) {
+          serverCampaigns.forEach(function(c) { trackId(c.id); });
+        }
+        for (let k in (serverConfigsMap || {})) {
+          trackId(k);
+        }
+
+        let nextNum = maxNum + 1;
+        let candidate = '';
+        do {
+          const padded = (nextNum < 10 ? '00' : (nextNum < 100 ? '0' : '')) + nextNum;
+          candidate = prefix + '-' + padded;
+          nextNum++;
+        } while (used[candidate.toUpperCase()]);
+
+        return candidate;
+      }
+
+      function suggestNextCampaignName_(clientName) {
+        const clean = String(clientName || '').trim() || 'Campaign';
+        const existingCount = getCampaignsForClient_(clean).length;
+        return clean + ' - Campaign ' + (existingCount + 1);
+      }
+
       function renderClientOptions(clients, selectedClient) {
         const select = document.getElementById('departmentOwner');
-        const list = (Array.isArray(clients) && clients.length > 0)
-          ? clients.slice()
-          : ['Growth Target', 'Pilot Acme'];
+        const list = getAllKnownClients_(clients);
 
         select.innerHTML = '';
         let matched = false;
@@ -492,6 +608,48 @@
         onSenderChanged();
       }
 
+      function renderCampaignOptionsForClient(clientName, preferredCampaignId) {
+        const select = document.getElementById('campaignSelect');
+        const hintEl = document.getElementById('campaignFilterHint');
+        const filtered = getCampaignsForClient_(clientName);
+
+        select.innerHTML = '';
+
+        filtered.forEach(function(c) {
+          const opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = c.id + ' - ' + (c.name || 'Untitled');
+          select.appendChild(opt);
+        });
+
+        const newOpt = document.createElement('option');
+        newOpt.value = '__NEW_CAMPAIGN__';
+        newOpt.textContent = filtered.length > 0
+          ? '+ Create New Campaign...'
+          : '+ Create New Campaign (No saved campaigns yet)';
+        select.appendChild(newOpt);
+
+        if (preferredCampaignId === '__NEW_CAMPAIGN__') {
+          select.value = '__NEW_CAMPAIGN__';
+        } else if (preferredCampaignId && filtered.some(function(c) { return c.id === preferredCampaignId; })) {
+          select.value = preferredCampaignId;
+        } else if (filtered.length > 0) {
+          select.value = filtered[0].id;
+        } else {
+          select.value = '__NEW_CAMPAIGN__';
+        }
+
+        if (hintEl) {
+          if (filtered.length === 0) {
+            hintEl.textContent = 'No saved campaigns for "' + clientName + '" yet. Suggested ID below — edit & click Save.';
+          } else {
+            hintEl.textContent = 'Showing ' + filtered.length + ' campaign' + (filtered.length === 1 ? '' : 's') + ' for ' + clientName + '.';
+          }
+        }
+
+        return select.value;
+      }
+
       function onClientOwnerChanged() {
         const select = document.getElementById('departmentOwner');
         const box = document.getElementById('newClientBox');
@@ -503,9 +661,37 @@
           return;
         }
         box.style.display = 'none';
-        if (select.value) lastValidClientOwner = select.value;
+
+        const selectedClient = select.value || 'Growth Target';
+        lastValidClientOwner = selectedClient;
         updateClientScopeBadge_();
         onSenderChanged();
+
+        const selectedCamp = renderCampaignOptionsForClient(selectedClient);
+        if (selectedCamp && selectedCamp !== '__NEW_CAMPAIGN__') {
+          onCampaignSelected(false, 'Switched to ' + selectedClient + ': ');
+        } else {
+          populateNewCampaignDefaults_(selectedClient);
+          const suggestedId = document.getElementById('campaignIdInput').value;
+          setPipelineBusy_(true);
+          showStatus('🔄 Switching workspace to "' + selectedClient + '" and filtering Agent Settings...', 'info');
+          google.script.run
+            .withSuccessHandler(function(res) {
+              setPipelineBusy_(false);
+              showStatus(
+                '✅ Switched to "' + selectedClient + '" (Agent Settings filtered). Suggested ID "' + suggestedId + '" is ready — customize settings and click Save.',
+                'success'
+              );
+            })
+            .withFailureHandler(function(err) {
+              setPipelineBusy_(false);
+              showStatus(
+                '🆕 Switched to "' + selectedClient + '" (suggested ID: "' + suggestedId + '"). Agent Settings filter note: ' + err.message,
+                'info'
+              );
+            })
+            .filterAgentSettingsForClientWorkspace(selectedClient);
+        }
       }
 
       function cancelAddNewClient() {
@@ -517,7 +703,7 @@
         const input = document.getElementById('newClientNameInput');
         const newName = input.value.trim();
         if (!newName) {
-          alert('Please enter a Client / Brand name.');
+          showStatus('⚠️ Please enter a Client / Brand name before saving.', 'error');
           input.focus();
           return;
         }
@@ -526,12 +712,14 @@
         const btnCancel = document.getElementById('btnAddClientCancel');
         btnSave.disabled = true;
         btnCancel.disabled = true;
+        setPipelineBusy_(true);
         showStatus('Registering client "' + newName + '" in Lists & Settings...', 'info');
 
         google.script.run
           .withSuccessHandler(function(res) {
             btnSave.disabled = false;
             btnCancel.disabled = false;
+            setPipelineBusy_(false);
             document.getElementById('newClientBox').style.display = 'none';
             if (res && res.clients) {
               serverClients = res.clients;
@@ -539,12 +727,21 @@
               serverClients.push(newName);
             }
             const addedName = (res && res.clientName) ? res.clientName : newName;
+            lastValidClientOwner = addedName;
             renderClientOptions(serverClients, addedName);
-            showStatus('✅ ' + (res && res.message ? res.message : 'Client added!'), 'success');
+            const selectedCamp = renderCampaignOptionsForClient(addedName, '__NEW_CAMPAIGN__');
+            if (selectedCamp === '__NEW_CAMPAIGN__') {
+              populateNewCampaignDefaults_(addedName);
+            } else {
+              onCampaignSelected(true);
+            }
+            const suggestedId = document.getElementById('campaignIdInput').value;
+            showStatus('✅ ' + (res && res.message ? res.message : 'Client added!') + ' Suggested Campaign ID "' + suggestedId + '" is ready to save.', 'success');
           })
           .withFailureHandler(function(err) {
             btnSave.disabled = false;
             btnCancel.disabled = false;
+            setPipelineBusy_(false);
             showStatus('Failed to add client: ' + err.message, 'error');
           })
           .addClientAccountToSettings(newName);
@@ -562,20 +759,6 @@
           const prefix = normalizeClientPrefix_(val);
           badge.className = 'client-badge external';
           badge.textContent = '🔒 Strict Client Isolation — Requires ' + prefix + '* keys in Script Properties (no local fallback).';
-        }
-      }
-
-      function renderCampaignOptions(campaigns, selectedId) {
-        const select = document.getElementById('campaignSelect');
-        select.innerHTML = '<option value="">-- Choose or Enter Campaign --</option>';
-        if (campaigns && campaigns.length) {
-          campaigns.forEach(function(c) {
-            const opt = document.createElement('option');
-            opt.value = c.id;
-            opt.textContent = c.id + ' - ' + (c.name || 'Untitled');
-            select.appendChild(opt);
-          });
-          if (selectedId) select.value = selectedId;
         }
       }
 
@@ -599,6 +782,12 @@
 
       function refreshCampaigns(quiet, preferredId) {
         if (!quiet) showStatus('Refreshing campaigns & client list from spreadsheet...', 'info');
+        const currentOwnerVal = document.getElementById('departmentOwner').value;
+        const previousClient = (currentOwnerVal && currentOwnerVal !== '__ADD_NEW_CLIENT__')
+          ? currentOwnerVal
+          : (lastValidClientOwner || 'Growth Target');
+        const previousCampaignVal = document.getElementById('campaignSelect').value;
+
         google.script.run
           .withSuccessHandler(function(res) {
             if (res) {
@@ -606,15 +795,41 @@
               if (res.campaigns) {
                 serverCampaigns = res.campaigns;
                 serverConfigsMap = res.configsMap || {};
-                const curId = preferredId || document.getElementById('campaignSelect').value.trim() || res.activeCampaignId;
-                renderCampaignOptions(serverCampaigns, curId);
-                if (curId && serverConfigsMap[curId]) {
-                  document.getElementById('campaignSelect').value = curId;
-                  populateFormWithData(serverConfigsMap[curId]);
+
+                let targetClient = previousClient || 'Growth Target';
+                let targetCampaignId = '';
+
+                if (preferredId && serverConfigsMap[preferredId]) {
+                  targetCampaignId = preferredId;
+                  targetClient = getCampaignClient_(preferredId);
+                } else if (!quiet && res.activeCampaignId && serverConfigsMap[res.activeCampaignId]) {
+                  targetCampaignId = res.activeCampaignId;
+                  targetClient = getCampaignClient_(targetCampaignId);
+                } else if (previousCampaignVal && previousCampaignVal !== '__NEW_CAMPAIGN__' && serverConfigsMap[previousCampaignVal]) {
+                  targetCampaignId = previousCampaignVal;
+                  targetClient = getCampaignClient_(targetCampaignId);
                 } else {
-                  renderClientOptions(serverClients, document.getElementById('departmentOwner').value || 'Growth Target');
+                  const clientCampaigns = getCampaignsForClient_(targetClient);
+                  targetCampaignId = clientCampaigns.length > 0 ? clientCampaigns[0].id : '__NEW_CAMPAIGN__';
                 }
-                if (!quiet) showStatus('Loaded ' + serverCampaigns.length + ' campaign(s) & ' + serverClients.length + ' client(s).', 'success');
+
+                renderClientOptions(serverClients, targetClient);
+                const selectedCamp = renderCampaignOptionsForClient(targetClient, targetCampaignId);
+
+                if (selectedCamp && selectedCamp !== '__NEW_CAMPAIGN__' && serverConfigsMap[selectedCamp]) {
+                  populateFormWithData(serverConfigsMap[selectedCamp]);
+                } else if (!preferredId && previousCampaignVal === '__NEW_CAMPAIGN__') {
+                  updateClientScopeBadge_();
+                } else {
+                  populateNewCampaignDefaults_(targetClient);
+                }
+
+                if (!quiet) {
+                  showStatus(
+                    'Loaded ' + serverCampaigns.length + ' campaign(s) & ' + getAllKnownClients_().length + ' client(s).',
+                    'success'
+                  );
+                }
               }
             }
           })
@@ -661,6 +876,72 @@
         return s || 'Workspace Gmail (Drafts Only)';
       }
 
+      function populateNewCampaignDefaults_(clientName) {
+        const targetClient = String(clientName || lastValidClientOwner || 'Growth Target').trim();
+        document.getElementById('campaignIdInput').value = suggestNextCampaignId_(targetClient);
+        document.getElementById('campaignNameInput').value = suggestNextCampaignName_(targetClient);
+        document.getElementById('presetNeedSelect').value = '';
+        document.getElementById('newClientBox').style.display = 'none';
+
+        if (clientName) {
+          renderClientOptions(serverClients, targetClient);
+        }
+
+        document.getElementById('targetCountries').value = '';
+        document.getElementById('targetIndustries').value = '';
+        document.getElementById('companySize').value = '';
+        document.getElementById('companyLimit').value = 5;
+
+        document.getElementById('researchDepth').value = 'Deep Persona';
+        document.getElementById('evidencePeriodMonths').value = '12';
+        document.getElementById('minCompanyScore').value = '80';
+        document.getElementById('minPersonaScore').value = '85';
+
+        document.getElementById('targetTitles').value = '';
+        document.getElementById('campaignFocus').value = '';
+        document.getElementById('searchKeywords').value = '';
+        document.getElementById('customBusinessNeeds').value = '';
+
+        document.getElementById('incEsgObligations').checked = true;
+        document.getElementById('incEsgMaturity').checked = true;
+        document.getElementById('incSupplyChain').checked = true;
+        document.getElementById('incScope3').checked = true;
+        document.getElementById('incDataChallenges').checked = true;
+        document.getElementById('incDigital').checked = true;
+        document.getElementById('incEsgGovernance').checked = true;
+        document.getElementById('incTriggers').checked = true;
+        document.getElementById('incEvaluater').checked = true;
+
+        document.getElementById('weightEsgReporting').value = '20%';
+        document.getElementById('weightSupplyChain').value = '15%';
+        document.getElementById('weightDataChallenges').value = '15%';
+        document.getElementById('weightDigital').value = '15%';
+        document.getElementById('weightTriggers').value = '20%';
+        document.getElementById('weightEvaluaterFit').value = '15%';
+
+        document.getElementById('minEmailPriorityScore').value = 80;
+        document.getElementById('weightEmailCompanyScore').value = '40%';
+        document.getElementById('weightEmailPersonaFit').value = '35%';
+        document.getElementById('weightEmailBuyingSignal').value = '25%';
+        document.getElementById('humanApprovalRequired').checked = true;
+        document.getElementById('autoSendEnabled').checked = false;
+
+        document.getElementById('aiProviderSelect').value = 'GEMINI';
+        document.getElementById('aiModelInput').value = 'gemini-3.8-flash';
+
+        document.getElementById('emailVerifierSelect').value = 'ZeroBounce';
+        document.getElementById('emailEndpoint').value = '';
+        document.getElementById('senderProviderSelect').value = 'Workspace Gmail (Drafts Only)';
+        document.getElementById('senderEndpointInput').value = '';
+
+        document.getElementById('senderName').value = '';
+        document.getElementById('senderTitle').value = '';
+        document.getElementById('senderCompany').value = '';
+
+        onSenderChanged();
+        onVerifierChanged();
+      }
+
       function populateFormWithData(data) {
         if (!data) return;
         const cid = data.id || '';
@@ -669,7 +950,7 @@
         document.getElementById('presetNeedSelect').value = '';
         document.getElementById('newClientBox').style.display = 'none';
 
-        const targetClient = data.department || 'Growth Target';
+        const targetClient = data.department || getCampaignClient_(cid);
         renderClientOptions(serverClients, targetClient);
 
         document.getElementById('targetCountries').value = data.country || '';
@@ -736,13 +1017,26 @@
         onVerifierChanged();
       }
 
-      function onCampaignSelected(skipSync) {
+      function onCampaignSelected(skipSync, statusPrefix) {
         const cid = document.getElementById('campaignSelect').value;
         if (!cid) return;
 
+        if (cid === '__NEW_CAMPAIGN__') {
+          const selectedVal = document.getElementById('departmentOwner').value;
+          const clientName = (selectedVal && selectedVal !== '__ADD_NEW_CLIENT__')
+            ? selectedVal
+            : (lastValidClientOwner || 'Growth Target');
+          populateNewCampaignDefaults_(clientName);
+          const suggestedId = document.getElementById('campaignIdInput').value;
+          showStatus('🆕 Ready to create a new campaign for "' + clientName + '" (suggested ID: "' + suggestedId + '"). Customize fields and click Save.', 'info');
+          const idInput = document.getElementById('campaignIdInput');
+          if (idInput) idInput.focus();
+          return;
+        }
+
         const localData = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : { id: cid };
         populateFormWithData(localData);
-        showStatus('Loaded configuration for ' + cid, 'info');
+        showStatus((statusPrefix || '') + 'Loaded configuration for ' + cid, 'info');
 
         if (!skipSync) {
           setPipelineBusy_(true);
@@ -753,8 +1047,9 @@
                 if (res.config) {
                   serverConfigsMap[cid] = res.config;
                   populateFormWithData(res.config);
+                  renderCampaignOptionsForClient(getCampaignClient_(cid), cid);
                 }
-                showStatus('✅ ' + cid + ' is now active on Dashboard and across all tabs!', 'success');
+                showStatus('✅ ' + (statusPrefix || '') + cid + ' is now active on Dashboard and across all tabs!', 'success');
               }
             })
             .withFailureHandler(function(err) {
@@ -824,12 +1119,14 @@
         const cname = document.getElementById('campaignNameInput').value.trim();
         const clientOwner = document.getElementById('departmentOwner').value;
 
-        if (!cid) {
-          alert('Please enter a Campaign ID (e.g. CMP-001)');
+        if (!clientOwner || clientOwner === '__ADD_NEW_CLIENT__') {
+          showStatus('⚠️ Please select a Client / Owner or finish saving your new client name first.', 'error');
           return;
         }
-        if (!clientOwner || clientOwner === '__ADD_NEW_CLIENT__') {
-          alert('Please select a Client / Owner or finish saving your new client name first.');
+        if (!cid) {
+          const suggested = suggestNextCampaignId_(clientOwner);
+          showStatus('⚠️ Please enter a Campaign ID (e.g. ' + suggested + ') before saving.', 'error');
+          document.getElementById('campaignIdInput').focus();
           return;
         }
 
@@ -907,7 +1204,15 @@
       function runDiscovery() {
         if (isPipelineBusy) return;
         const cid = document.getElementById('campaignIdInput').value.trim();
-        if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
+        if (!cid) {
+          showStatus('⚠️ Please select or enter a Campaign ID first.', 'error');
+          document.getElementById('campaignIdInput').focus();
+          return;
+        }
+        if (document.getElementById('campaignSelect').value === '__NEW_CAMPAIGN__' && !serverConfigsMap[cid]) {
+          showStatus('⚠️ Please click "💾 Save Campaign Settings" first so "' + cid + '" is saved before running Discovery.', 'error');
+          return;
+        }
 
         setPipelineBusy_(true);
         showStatus('🔍 Agent 1 is discovering target companies... Please wait (buttons locked until complete).', 'info');
@@ -931,7 +1236,15 @@
       function runPersonaMapper() {
         if (isPipelineBusy) return;
         const cid = document.getElementById('campaignIdInput').value.trim();
-        if (!cid) { alert('Please select or enter a Campaign ID first.'); return; }
+        if (!cid) {
+          showStatus('⚠️ Please select or enter a Campaign ID first.', 'error');
+          document.getElementById('campaignIdInput').focus();
+          return;
+        }
+        if (document.getElementById('campaignSelect').value === '__NEW_CAMPAIGN__' && !serverConfigsMap[cid]) {
+          showStatus('⚠️ Please click "💾 Save Campaign Settings" first so "' + cid + '" is saved before running Persona Mapper.', 'error');
+          return;
+        }
 
         setPipelineBusy_(true);
         showStatus('👤 Agent 2 is mapping decision-makers and emails... Please wait (buttons locked until complete).', 'info');

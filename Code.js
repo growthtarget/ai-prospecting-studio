@@ -363,8 +363,82 @@ function getRegisteredClientsList_(ss) {
 }
 
 /**
+ * Filters the "Campaigns" tab (Column C = Department / Client Owner) using native
+ * Google Sheets FilterCriteria so only campaigns belonging to clientName are shown.
+ * Preserves the locked 28-column schema and leaves blank template rows untouched.
+ */
+function filterCampaignsSheetByClient_(ss, clientName) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!spreadsheet) return;
+
+  const campSheet = spreadsheet.getSheetByName('Campaigns');
+  if (!campSheet) return;
+
+  const expectedLastRow = campSheet.getLastRow();
+  const expectedLastCol = campSheet.getLastColumn();
+  if (expectedLastRow <= 1 || expectedLastCol < 1) {
+    const staleFilter = campSheet.getFilter();
+    if (staleFilter) staleFilter.remove();
+    return;
+  }
+
+  const headers = campSheet.getRange(1, 1, 1, expectedLastCol).getValues()[0];
+  let deptColIndex = -1;
+  for (let c = 0; c < headers.length; c++) {
+    const h = normalizeStudioKey(headers[c]);
+    if (h === 'DEPARTMENT' || h === 'CLIENTOWNER' || h === 'CLIENTACCOUNT' || h === 'CLIENT') {
+      deptColIndex = c + 1;
+      break;
+    }
+  }
+  if (deptColIndex === -1 && expectedLastCol >= 3) {
+    deptColIndex = 3;
+  }
+  if (deptColIndex === -1) return;
+
+  const cleanClient = String(clientName || '').trim() || 'Growth Target';
+  const targetLower = cleanClient.toLowerCase();
+  const numDataRows = expectedLastRow - 1;
+
+  let filter = campSheet.getFilter();
+  if (filter) {
+    const fRange = filter.getRange();
+    if (fRange.getRow() !== 1 || fRange.getLastRow() !== expectedLastRow || fRange.getLastColumn() < expectedLastCol) {
+      filter.remove();
+      filter = null;
+    }
+  }
+
+  if (!filter) {
+    filter = campSheet.getRange(1, 1, expectedLastRow, expectedLastCol).createFilter();
+  }
+
+  const colValues = campSheet.getRange(2, deptColIndex, numDataRows, 1).getValues();
+  const hiddenValues = [];
+  const seen = {};
+
+  for (let i = 0; i < colValues.length; i++) {
+    const rawVal = String(colValues[i][0] === null || colValues[i][0] === undefined ? '' : colValues[i][0]);
+    const trimmedLower = rawVal.trim().toLowerCase();
+    if (trimmedLower && trimmedLower !== targetLower && !seen[rawVal]) {
+      hiddenValues.push(rawVal);
+      seen[rawVal] = true;
+    }
+  }
+
+  if (hiddenValues.length > 0) {
+    const criteria = SpreadsheetApp.newFilterCriteria()
+      .setHiddenValues(hiddenValues)
+      .build();
+    filter.setColumnFilterCriteria(deptColIndex, criteria);
+  } else {
+    filter.removeColumnFilterCriteria(deptColIndex);
+  }
+}
+
+/**
  * Adds or reactivates a Client / Account in "Lists & Settings", refreshes sheet dropdowns,
- * and provisions the client's row block in "Agent Settings".
+ * provisions the client's row block in "Agent Settings", and filters Agent Settings & Campaigns.
  * Callable directly from the Sidebar Control Panel "[ + Add New Client... ]".
  */
 function addClientAccountToSettings(clientName) {
@@ -409,6 +483,10 @@ function addClientAccountToSettings(clientName) {
   if (typeof setupAgentSettingsTabDropdowns === 'function') {
     setupAgentSettingsTabDropdowns(ss, cleanName);
   }
+  if (typeof filterAgentSettingsByClient_ === 'function') {
+    filterAgentSettingsByClient_(ss, cleanName);
+  }
+  filterCampaignsSheetByClient_(ss, cleanName);
   SpreadsheetApp.flush();
 
   return {
@@ -416,6 +494,33 @@ function addClientAccountToSettings(clientName) {
     clientName: cleanName,
     clients: getRegisteredClientsList_(ss),
     message: 'Added client "' + cleanName + '" to Lists & Settings, updated dropdowns, and created Agent Settings rows.'
+  };
+}
+
+/**
+ * Refreshes Agent Settings protection status indicators and filters Tab 11 ("Agent Settings")
+ * and Tab 3 ("Campaigns") to the specified Client / Owner — including 0-campaign clients.
+ */
+function filterAgentSettingsForClientWorkspace(clientName) {
+  const cleanClient = String(clientName || '').trim() || 'Growth Target';
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) {
+    return { success: false, message: 'No active spreadsheet found.' };
+  }
+
+  if (typeof setupAgentSettingsTabDropdowns === 'function') {
+    setupAgentSettingsTabDropdowns(ss, cleanClient);
+  }
+  if (typeof filterAgentSettingsByClient_ === 'function') {
+    filterAgentSettingsByClient_(ss, cleanClient);
+  }
+  filterCampaignsSheetByClient_(ss, cleanClient);
+  SpreadsheetApp.flush();
+
+  return {
+    success: true,
+    clientName: cleanClient,
+    message: 'Campaigns and Agent Settings filtered to client "' + cleanClient + '".'
   };
 }
 
@@ -856,8 +961,17 @@ function getSidebarInitialData() {
     if (activeConfigDict['EMAILSENDERPROVIDER']) c.emailSenderProvider = String(activeConfigDict['EMAILSENDERPROVIDER']);
   }
 
+  for (let cid in configsMap) {
+    if (!configsMap[cid].department) {
+      configsMap[cid].department = resolveCampaignClientName_(cid, '', ss);
+    }
+  }
+
   for (let cid in campaignsMap) {
-    campaignsList.push({ id: cid, name: campaignsMap[cid] });
+    const dept = (configsMap[cid] && configsMap[cid].department)
+      ? configsMap[cid].department
+      : resolveCampaignClientName_(cid, '', ss);
+    campaignsList.push({ id: cid, name: campaignsMap[cid], department: dept });
   }
 
   return {
@@ -894,7 +1008,7 @@ function selectAndActivateCampaign(cid) {
     success: true,
     campaignId: cid,
     config: config,
-    message: 'Active campaign set to ' + cid + ' and synced to Dashboard & Agent Settings!'
+    message: 'Active campaign set to ' + cid + ' and synced to Dashboard, Campaigns & Agent Settings!'
   };
 }
 
@@ -1147,7 +1261,7 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     setupAgentSettingsTabDropdowns(ss, clientOwner);
   }
 
-  filterOperationalSheetsByCampaign_(campId);
+  filterOperationalSheetsByCampaign_(campId, clientOwner);
 
   return {
     success: true,
@@ -1446,9 +1560,9 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
 /**
  * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log) so
  * rows from other campaigns are hidden, displaying exclusively the active campaign.
- * Also filters "Agent Settings" to the active Client / Owner block.
+ * Also filters "Campaigns" and "Agent Settings" to the active Client / Owner.
  */
-function filterOperationalSheetsByCampaign_(activeCampaignId) {
+function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName) {
   if (!activeCampaignId) return;
 
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1551,8 +1665,10 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
     }
   });
 
+  const activeClient = resolveCampaignClientName_(activeCampaignId, explicitClientName || '', ss);
+  filterCampaignsSheetByClient_(ss, activeClient);
+
   if (typeof filterAgentSettingsByClient_ === 'function') {
-    const activeClient = resolveCampaignClientName_(activeCampaignId, '', ss);
     filterAgentSettingsByClient_(ss, activeClient);
   }
 
@@ -1560,7 +1676,7 @@ function filterOperationalSheetsByCampaign_(activeCampaignId) {
 }
 
 /**
- * Menu action to trigger tab re-filtering manually (also refreshes Agent Settings status & filter).
+ * Menu action to trigger tab re-filtering manually (also refreshes Campaigns & Agent Settings filters).
  */
 function filterSheetsForActiveCampaignMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1579,12 +1695,12 @@ function filterSheetsForActiveCampaignMenu() {
     setupAgentSettingsTabDropdowns(ss, activeClient);
   }
 
-  filterOperationalSheetsByCampaign_(activeId);
+  filterOperationalSheetsByCampaign_(activeId, activeClient);
 
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
-    ui.alert('Tabs Filtered', 'Operational tabs (including API_Usage_Log & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
+    ui.alert('Tabs Filtered', 'Operational tabs (including Campaigns, API_Usage_Log & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
   } catch (e) {
     Logger.log('Operational tabs filtered to active campaign: ' + activeId);
   }
