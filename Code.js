@@ -479,6 +479,111 @@ function filterCampaignsSheetByClient_(ss, clientName) {
 }
 
 /**
+ * Filters the "Dashboard" tab's Campaign Performance Rollup table (Row 17+, Col C = Department)
+ * using native Google Sheets FilterCriteria so only campaigns belonging to clientName are shown.
+ * Leaves Dashboard KPI rows (Rows 1-16) completely untouched.
+ */
+function filterDashboardRollupByClient_(ss, clientName) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!spreadsheet) return;
+
+  const dashSheet = spreadsheet.getSheetByName('Dashboard');
+  if (!dashSheet) return;
+
+  // Locate the Campaign Performance Rollup header row (default Row 17)
+  let headerRow = -1;
+  let deptColIndex = 3;
+  const scanMax = Math.min(dashSheet.getLastRow(), 25);
+  if (scanMax >= 15) {
+    const scanCols = Math.min(Math.max(dashSheet.getLastColumn(), 7), 10);
+    const scanVals = dashSheet.getRange(15, 1, scanMax - 14, scanCols).getValues();
+    for (let r = 0; r < scanVals.length; r++) {
+      const colA = normalizeStudioKey(scanVals[r][0]);
+      if (colA === 'CAMPAIGNID') {
+        headerRow = 15 + r;
+        for (let c = 0; c < scanVals[r].length; c++) {
+          const h = normalizeStudioKey(scanVals[r][c]);
+          if (h === 'DEPARTMENT' || h === 'CLIENTOWNER' || h === 'CLIENTACCOUNT' || h === 'CLIENT') {
+            deptColIndex = c + 1;
+            break;
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  if (headerRow === -1) {
+    const staleFilter = dashSheet.getFilter();
+    if (staleFilter) staleFilter.remove();
+    return;
+  }
+
+  const rollupCols = 7;
+  const expectedLastCol = Math.max(dashSheet.getLastColumn(), rollupCols);
+  const rawLastRow = dashSheet.getLastRow();
+  let dataLastRow = headerRow;
+
+  if (rawLastRow > headerRow) {
+    const bodyVals = dashSheet.getRange(headerRow + 1, 1, rawLastRow - headerRow, expectedLastCol).getValues();
+    for (let i = bodyVals.length - 1; i >= 0; i--) {
+      const hasContent = bodyVals[i].some(function(cell) {
+        return cell !== '' && cell !== null && cell !== undefined;
+      });
+      if (hasContent) {
+        dataLastRow = headerRow + 1 + i;
+        break;
+      }
+    }
+  }
+
+  if (dataLastRow <= headerRow) {
+    const staleFilter = dashSheet.getFilter();
+    if (staleFilter) staleFilter.remove();
+    return;
+  }
+
+  const cleanClient = String(clientName || '').trim() || 'Growth Target';
+  const targetLower = cleanClient.toLowerCase();
+  const numDataRows = dataLastRow - headerRow;
+
+  let filter = dashSheet.getFilter();
+  if (filter) {
+    const fRange = filter.getRange();
+    if (fRange.getRow() !== headerRow || fRange.getLastRow() !== dataLastRow || fRange.getLastColumn() < rollupCols) {
+      filter.remove();
+      filter = null;
+    }
+  }
+
+  if (!filter) {
+    filter = dashSheet.getRange(headerRow, 1, numDataRows + 1, rollupCols).createFilter();
+  }
+
+  const colValues = dashSheet.getRange(headerRow + 1, deptColIndex, numDataRows, 1).getValues();
+  const hiddenValues = [];
+  const seen = {};
+
+  for (let i = 0; i < colValues.length; i++) {
+    const rawVal = String(colValues[i][0] === null || colValues[i][0] === undefined ? '' : colValues[i][0]);
+    const trimmedLower = rawVal.trim().toLowerCase();
+    if (trimmedLower && trimmedLower !== targetLower && !seen[rawVal]) {
+      hiddenValues.push(rawVal);
+      seen[rawVal] = true;
+    }
+  }
+
+  if (hiddenValues.length > 0) {
+    const criteria = SpreadsheetApp.newFilterCriteria()
+      .setHiddenValues(hiddenValues)
+      .build();
+    filter.setColumnFilterCriteria(deptColIndex, criteria);
+  } else {
+    filter.removeColumnFilterCriteria(deptColIndex);
+  }
+}
+
+/**
  * Adds or reactivates a Client / Account in "Lists & Settings", pins Client - Account rows
  * at the top, refreshes sheet dropdowns, provisions "Agent Settings", and filters tabs.
  * Callable directly from the Sidebar Control Panel "[ + Add New Client... ]".
@@ -532,6 +637,7 @@ function addClientAccountToSettings(clientName) {
     filterAgentSettingsByClient_(ss, cleanName);
   }
   filterCampaignsSheetByClient_(ss, cleanName);
+  filterDashboardRollupByClient_(ss, cleanName);
   SpreadsheetApp.flush();
 
   return {
@@ -544,8 +650,8 @@ function addClientAccountToSettings(clientName) {
 }
 
 /**
- * Refreshes Agent Settings protection status indicators and filters Tab 11 ("Agent Settings")
- * and Tab 3 ("Campaigns") to the specified Client / Owner — including 0-campaign clients.
+ * Refreshes Agent Settings protection status indicators and filters Tab 11 ("Agent Settings"),
+ * Tab 3 ("Campaigns"), and Tab 1 ("Dashboard" Rollup) to the specified Client / Owner — including 0-campaign clients.
  */
 function filterAgentSettingsForClientWorkspace(clientName) {
   const cleanClient = String(clientName || '').trim() || 'Growth Target';
@@ -561,12 +667,13 @@ function filterAgentSettingsForClientWorkspace(clientName) {
     filterAgentSettingsByClient_(ss, cleanClient);
   }
   filterCampaignsSheetByClient_(ss, cleanClient);
+  filterDashboardRollupByClient_(ss, cleanClient);
   SpreadsheetApp.flush();
 
   return {
     success: true,
     clientName: cleanClient,
-    message: 'Campaigns and Agent Settings filtered to client "' + cleanClient + '".'
+    message: 'Dashboard Rollup, Campaigns, and Agent Settings filtered to client "' + cleanClient + '".'
   };
 }
 
@@ -1087,7 +1194,7 @@ function selectAndActivateCampaign(cid) {
     success: true,
     campaignId: cid,
     config: config,
-    message: 'Active campaign set to ' + cid + ' and synced to Dashboard, Campaigns & Agent Settings!'
+    message: 'Active campaign set to ' + cid + ' and synced to Dashboard, Campaigns, Persona Mapper Settings & Agent Settings!'
   };
 }
 
@@ -1599,6 +1706,8 @@ function updateDashboardForActiveCampaign(payloadOrId) {
       const insertAt = Math.max(18, currentMax + 1);
       dashSheet.getRange(insertAt, 1, 1, 7).setValues([campaignRowData]);
     }
+
+    filterDashboardRollupByClient_(ss, dept);
   }
 
   SpreadsheetApp.flush();
@@ -1642,9 +1751,10 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
 }
 
 /**
- * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log) so
- * rows from other campaigns are hidden, displaying exclusively the active campaign.
- * Also filters "Campaigns" and "Agent Settings" to the active Client / Owner.
+ * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log
+ * and Persona Mapper Settings) so rows from other campaigns are hidden, displaying exclusively
+ * the active campaign. Also filters "Campaigns", "Dashboard" Rollup, and "Agent Settings"
+ * to the active Client / Owner.
  */
 function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName) {
   if (!activeCampaignId) return;
@@ -1659,7 +1769,8 @@ function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName
     'Company Database',
     'Research Evidence',
     'Execution Logs',
-    'API_Usage_Log'
+    'API_Usage_Log',
+    'Persona Mapper Settings'
   ];
 
   targetSheetNames.forEach(function(targetName) {
@@ -1675,7 +1786,12 @@ function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName
       }
     }
 
-    if (!sheet || sheet.getLastRow() <= 1) return;
+    if (!sheet) return;
+    if (sheet.getLastRow() <= 1) {
+      const stale = sheet.getFilter();
+      if (stale) stale.remove();
+      return;
+    }
 
     if (sheet.getName().toLowerCase().replace(/[^a-z0-9]/g, '') === 'companydatabase') {
       ensureCompanyDatabaseCampaignIdColumn_(sheet);
@@ -1716,7 +1832,7 @@ function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName
     let filter = sheet.getFilter();
     if (filter) {
       const fRange = filter.getRange();
-      if (fRange.getRow() !== startRow || fRange.getLastRow() < expectedLastRow || fRange.getLastColumn() < expectedLastCol) {
+      if (fRange.getRow() !== startRow || fRange.getLastRow() !== expectedLastRow || fRange.getLastColumn() < expectedLastCol) {
         filter.remove();
         filter = null;
       }
@@ -1751,6 +1867,7 @@ function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName
 
   const activeClient = resolveCampaignClientName_(activeCampaignId, explicitClientName || '', ss);
   filterCampaignsSheetByClient_(ss, activeClient);
+  filterDashboardRollupByClient_(ss, activeClient);
 
   if (typeof filterAgentSettingsByClient_ === 'function') {
     filterAgentSettingsByClient_(ss, activeClient);
@@ -1760,7 +1877,7 @@ function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName
 }
 
 /**
- * Menu action to trigger tab re-filtering manually (also refreshes Campaigns & Agent Settings filters).
+ * Menu action to trigger tab re-filtering manually (also refreshes Campaigns, Dashboard Rollup & Agent Settings filters).
  */
 function filterSheetsForActiveCampaignMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1784,7 +1901,7 @@ function filterSheetsForActiveCampaignMenu() {
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
-    ui.alert('Tabs Filtered', 'Operational tabs (including Campaigns, API_Usage_Log & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
+    ui.alert('Tabs Filtered', 'Operational tabs (including Dashboard Rollup, Campaigns, Persona Mapper Settings, API_Usage_Log & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
   } catch (e) {
     Logger.log('Operational tabs filtered to active campaign: ' + activeId);
   }

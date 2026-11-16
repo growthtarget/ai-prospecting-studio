@@ -4,7 +4,7 @@
  * AUTHENTIC PIPELINE PILOT RUNNER (CLIENT-ISOLATED SANDBOX SIMULATION)
  * ============================================================================
  * File: PilotSandboxRunner.gs / PilotSandboxRunner.js
- * 
+ *
  * CAPABILITIES:
  * 1. Generates & Synchronizes ALL 13 Tabs for the Pilot Run (Client: "Pilot Acme"):
  *    - Cold-start safe: Automatically seeds canonical headers across all 13 tabs.
@@ -17,7 +17,9 @@
  *      and logs client-tagged token/credit usage to "API_Usage_Log".
  * 2. Creates Safe Gmail Drafts (via Pilot Acme Relay if configured, or local sandbox Gmail).
  * 3. Enforces real-time suppression rules and pins "Lists & Settings" client rows cleanly.
- * 4. Safe Purge: Removes pilot records from ALL tabs including API_Usage_Log and Execution Logs.
+ * 4. Option A Full Wipe Purge: Removes all pilot records (PILOT-* and Pilot Acme)
+ *    across all 13 tabs including Dashboard Rollup, Agent Settings, Lists & Settings,
+ *    Campaign Configuration, API_Usage_Log, and Execution Logs, then restores active state.
  * ============================================================================
  */
 
@@ -65,7 +67,7 @@ function runPilotOnRealSheets() {
     // Step 0: Ensure all 13 project tabs exist with canonical headers and high-contrast styling
     validateRequiredTabs(ss);
 
-    // Step 1: Clean previous pilot test rows from all tabs
+    // Step 1: Clean previous pilot test rows from all operational tabs
     purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
     Logger.log('Step 1: Purged previous pilot records.');
 
@@ -279,7 +281,9 @@ function updateCampaignConfigurationTab(ss, config) {
 }
 
 function generatePersonaMapperSettingsRow(ss, config) {
-  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.PERSONA_SETTINGS);
+  const sheet = (typeof findPersonaMapperSettingsSheet === 'function')
+    ? findPersonaMapperSettingsSheet(ss)
+    : ss.getSheetByName(PILOT_CONFIG.TABS.PERSONA_SETTINGS);
   if (!sheet) return;
 
   const headers = [
@@ -1040,7 +1044,23 @@ function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCoun
     draftsCount,
     now
   ];
-  sheet.getRange(18, 1, 1, 7).setValues([pilotRollupRow]);
+
+  // Update existing pilot rollup row if present, otherwise append without overwriting real campaigns
+  let targetRollupRow = -1;
+  const maxRow = sheet.getLastRow();
+  if (maxRow >= 18) {
+    const existingIds = sheet.getRange(18, 1, maxRow - 17, 1).getValues();
+    for (let i = 0; i < existingIds.length; i++) {
+      if (String(existingIds[i][0] || '').trim() === config.CAMPAIGN_ID) {
+        targetRollupRow = 18 + i;
+        break;
+      }
+    }
+  }
+  if (targetRollupRow === -1) {
+    targetRollupRow = Math.max(18, maxRow + 1);
+  }
+  sheet.getRange(targetRollupRow, 1, 1, 7).setValues([pilotRollupRow]);
 
   sheet.setColumnWidth(1, 260);
   sheet.setColumnWidth(2, 320);
@@ -1066,13 +1086,17 @@ function ensureSuppressionRulesInSettings(ss) {
 
   const data = sheet.getDataRange().getValues();
   let hasCompetitorRule = false;
+  let hasOptOutRule = false;
+  let hasInternalRule = false;
   let hasGrowthTarget = false;
   let hasPilotAcme = false;
 
   for (let i = 1; i < data.length; i++) {
     const listType = String(data[i][0] || '').trim().toLowerCase();
     const val = String(data[i][1] || '').trim().toLowerCase();
-    if (val.includes('competitor-esg.com')) hasCompetitorRule = true;
+    if (val === 'competitor-esg.com') hasCompetitorRule = true;
+    if (val === 'optout-lead@novusmfg.com') hasOptOutRule = true;
+    if (val === 'internal-test@growthtarget.com') hasInternalRule = true;
     if ((listType === 'client - account' || listType === 'client / owner' || listType === 'client')) {
       if (val === 'growth target') hasGrowthTarget = true;
       if (val === 'pilot acme') hasPilotAcme = true;
@@ -1087,11 +1111,14 @@ function ensureSuppressionRulesInSettings(ss) {
   }
   if (!hasCompetitorRule) {
     sheet.appendRow(['Suppression - Competitor Domain', 'competitor-esg.com', 'Active']);
+  }
+  if (!hasOptOutRule) {
     sheet.appendRow(['Suppression - Opt-Out Email', 'optout-lead@novusmfg.com', 'Active']);
+  }
+  if (!hasInternalRule) {
     sheet.appendRow(['Suppression - Internal Exclusion', 'internal-test@growthtarget.com', 'Active']);
   }
 
-  // Keep all Client - Account rows pinned cleanly at the top
   if (typeof sortListsAndSettingsTab_ === 'function') {
     sortListsAndSettingsTab_(ss);
   }
@@ -1133,10 +1160,95 @@ function buildRowFromHeaders(sheetHeaders, dataObject) {
 }
 
 /**
- * Universal Pilot Purge: Scans every row across operational tabs (including API_Usage_Log,
- * Company Database Col J, and Execution Logs) and deletes rows belonging to PILOT-CMP-001.
+ * Safely collects all Campaign IDs associated with the Pilot sandbox
+ * (PILOT-CMP-001, any PILOT-* ID, and any campaign owned by "Pilot Acme" such as PA-001).
  */
-function purgeExistingPilotRows(ss, campaignId) {
+function collectPilotCampaignIds_(ss, primaryCampaignId) {
+  const ids = {};
+  const pilotClientLower = PILOT_CONFIG.DEPARTMENT.toLowerCase();
+  if (primaryCampaignId) {
+    ids[String(primaryCampaignId).trim()] = true;
+  }
+
+  // 1. Scan Campaigns tab
+  const campSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGNS);
+  if (campSheet && campSheet.getLastRow() > 1) {
+    const cData = campSheet.getDataRange().getValues();
+    for (let r = 1; r < cData.length; r++) {
+      const cid = String(cData[r][0] || '').trim();
+      const dept = String(cData[r][2] || '').trim().toLowerCase();
+      if (cid && (cid.toUpperCase().indexOf('PILOT-') === 0 || dept === pilotClientLower)) {
+        ids[cid] = true;
+      }
+    }
+  }
+
+  // 2. Scan Persona Mapper Settings tab
+  const pSheet = (typeof findPersonaMapperSettingsSheet === 'function')
+    ? findPersonaMapperSettingsSheet(ss)
+    : ss.getSheetByName(PILOT_CONFIG.TABS.PERSONA_SETTINGS);
+  if (pSheet && pSheet.getLastRow() > 1) {
+    const pData = pSheet.getDataRange().getValues();
+    for (let r = 1; r < pData.length; r++) {
+      const cid = String(pData[r][0] || '').trim();
+      const cname = String(pData[r][1] || '').trim().toLowerCase();
+      if (cid && (cid.toUpperCase().indexOf('PILOT-') === 0 || cname.indexOf('pilot acme') >= 0)) {
+        ids[cid] = true;
+      }
+    }
+  }
+
+  // 3. Scan Dashboard B2/B6 and Campaign Performance Rollup (rows 18+)
+  const dashSheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
+  if (dashSheet) {
+    const b2 = String(dashSheet.getRange('B2').getValue() || '').trim();
+    const b6 = String(dashSheet.getRange('B6').getValue() || '').trim().toLowerCase();
+    if (b2 && (b2.toUpperCase().indexOf('PILOT-') === 0 || b6 === pilotClientLower)) {
+      ids[b2] = true;
+    }
+    const maxRow = dashSheet.getLastRow();
+    if (maxRow >= 18) {
+      const rollup = dashSheet.getRange(18, 1, maxRow - 17, 3).getValues();
+      for (let r = 0; r < rollup.length; r++) {
+        const cid = String(rollup[r][0] || '').trim();
+        const dept = String(rollup[r][2] || '').trim().toLowerCase();
+        if (cid && (cid.toUpperCase().indexOf('PILOT-') === 0 || dept === pilotClientLower)) {
+          ids[cid] = true;
+        }
+      }
+    }
+  }
+
+  // 4. Scan Campaign Configuration
+  const cfgSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGN_CONFIG);
+  if (cfgSheet && cfgSheet.getLastRow() > 1) {
+    const cfgData = cfgSheet.getDataRange().getValues();
+    let cfgCid = '';
+    let cfgDept = '';
+    for (let r = 1; r < cfgData.length; r++) {
+      const k = String(cfgData[r][0] || '').trim().toUpperCase();
+      if (k === 'CAMPAIGN_ID') cfgCid = String(cfgData[r][1] || '').trim();
+      if (k === 'DEPARTMENT') cfgDept = String(cfgData[r][1] || '').trim().toLowerCase();
+    }
+    if (cfgCid && (cfgCid.toUpperCase().indexOf('PILOT-') === 0 || cfgDept === pilotClientLower)) {
+      ids[cfgCid] = true;
+    }
+  }
+
+  return ids;
+}
+
+/**
+ * Universal Pilot Purge: Scans every row across operational & log tabs (including API_Usage_Log,
+ * Company Database Col J, Persona Mapper Settings, and Execution Logs) and deletes pilot rows.
+ * Removes stale sheet filters before deleting rows so filters never break or stay pinned.
+ */
+function purgeExistingPilotRows(ss, campaignIdOrMap) {
+  const isFullWipe = (typeof campaignIdOrMap === 'object' && campaignIdOrMap !== null);
+  const pilotIdsMap = isFullWipe ? campaignIdOrMap : {};
+  const singleId = !isFullWipe ? String(campaignIdOrMap || PILOT_CONFIG.CAMPAIGN_ID).trim() : '';
+  const pilotClientLower = PILOT_CONFIG.DEPARTMENT.toLowerCase();
+
   const tabsToClean = [
     PILOT_CONFIG.TABS.CAMPAIGNS,
     PILOT_CONFIG.TABS.COMPANY_INTELLIGENCE,
@@ -1150,14 +1262,38 @@ function purgeExistingPilotRows(ss, campaignId) {
   ];
 
   tabsToClean.forEach(function(tabName) {
-    const sheet = ss.getSheetByName(tabName);
+    let sheet = ss.getSheetByName(tabName);
+    if (!sheet && tabName === PILOT_CONFIG.TABS.PERSONA_SETTINGS && typeof findPersonaMapperSettingsSheet === 'function') {
+      sheet = findPersonaMapperSettingsSheet(ss);
+    }
     if (!sheet) return;
+
+    const existingFilter = sheet.getFilter();
+    if (existingFilter) {
+      existingFilter.remove();
+    }
+
     const data = sheet.getDataRange().getValues();
     if (data.length <= 1) return;
 
     for (let r = data.length - 1; r >= 1; r--) {
-      const rowValues = data[r].map(function(v) { return String(v || '').trim(); });
-      const isPilot = rowValues.some(function(val) { return val === campaignId || val.startsWith('PILOT-'); });
+      const isPilot = data[r].some(function(cell) {
+        const val = String(cell === null || cell === undefined ? '' : cell).trim();
+        if (!val) return false;
+        const upperVal = val.toUpperCase();
+        const lowerVal = val.toLowerCase();
+
+        if (!isFullWipe) {
+          return val === singleId || upperVal.indexOf('PILOT-') === 0;
+        }
+
+        if (pilotIdsMap[val] || upperVal.indexOf('PILOT-') === 0) return true;
+        if (lowerVal === pilotClientLower) return true;
+        if (lowerVal.indexOf('[client: ' + pilotClientLower + ']') >= 0) return true;
+        if (lowerVal.indexOf('pilot run (' + pilotClientLower + ')') >= 0) return true;
+        return false;
+      });
+
       if (isPilot) {
         sheet.deleteRow(r + 1);
       }
@@ -1165,18 +1301,198 @@ function purgeExistingPilotRows(ss, campaignId) {
   });
 }
 
+/**
+ * Option A Cleanup Helper: Removes "Pilot Acme" client entry and the 3 pilot suppression rules
+ * from "Lists & Settings", re-sorts the tab, and refreshes sheet client dropdown validations.
+ */
+function cleanupPilotEntriesFromListsAndSettings_(ss) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.LISTS_SETTINGS);
+  if (!sheet || sheet.getLastRow() <= 1) return;
+
+  const existingFilter = sheet.getFilter();
+  if (existingFilter) {
+    existingFilter.remove();
+  }
+
+  const pilotClientLower = PILOT_CONFIG.DEPARTMENT.toLowerCase();
+  const data = sheet.getDataRange().getValues();
+
+  for (let r = data.length - 1; r >= 1; r--) {
+    const listName = String(data[r][0] || '').trim().toLowerCase();
+    const val = String(data[r][1] || '').trim().toLowerCase();
+
+    const isPilotClient = (listName === 'client - account' || listName === 'client / owner' || listName === 'client') &&
+                          val === pilotClientLower;
+    const isPilotSuppression =
+      (listName === 'suppression - competitor domain' && val === 'competitor-esg.com') ||
+      (listName === 'suppression - opt-out email' && val === 'optout-lead@novusmfg.com') ||
+      (listName === 'suppression - internal exclusion' && val === 'internal-test@growthtarget.com');
+
+    if (isPilotClient || isPilotSuppression) {
+      sheet.deleteRow(r + 1);
+    }
+  }
+
+  if (typeof sortListsAndSettingsTab_ === 'function') {
+    sortListsAndSettingsTab_(ss);
+  }
+  if (typeof refreshClientDropdownValidations_ === 'function') {
+    refreshClientDropdownValidations_(ss);
+  }
+}
+
+/**
+ * Option A Cleanup Helper: Removes all "Client: Pilot Acme" / CLIENT_PILOT_ACME_* rows
+ * from Tab 11 ("Agent Settings") and clears any stale filter.
+ */
+function cleanupPilotEntriesFromAgentSettings_(ss) {
+  const sheet = ss.getSheetByName(PILOT_CONFIG.TABS.AGENT_SETTINGS);
+  if (!sheet || sheet.getLastRow() <= 1) return;
+
+  const existingFilter = sheet.getFilter();
+  if (existingFilter) {
+    existingFilter.remove();
+  }
+
+  const pilotCatLower = ('Client: ' + PILOT_CONFIG.DEPARTMENT).toLowerCase();
+  const data = sheet.getDataRange().getValues();
+
+  for (let r = data.length - 1; r >= 1; r--) {
+    const category = String(data[r][0] || '').trim().toLowerCase();
+    const settingKey = String(data[r][1] || '').trim().toUpperCase();
+
+    if (category === pilotCatLower || settingKey.indexOf('CLIENT_PILOT_ACME_') === 0) {
+      sheet.deleteRow(r + 1);
+    }
+  }
+}
+
+/**
+ * Option A Cleanup Helper: Deletes only pilot rows from "Dashboard" Campaign Performance Rollup (Row 18+)
+ * without wiping real production campaigns.
+ */
+function cleanupPilotEntriesFromDashboardRollup_(ss, pilotIdsMap) {
+  const dashSheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
+  if (!dashSheet) return;
+
+  const lastRow = dashSheet.getLastRow();
+  if (lastRow < 18) return;
+
+  const pilotClientLower = PILOT_CONFIG.DEPARTMENT.toLowerCase();
+  const rollupData = dashSheet.getRange(18, 1, lastRow - 17, 4).getValues();
+
+  for (let i = rollupData.length - 1; i >= 0; i--) {
+    const cid = String(rollupData[i][0] || '').trim();
+    const dept = String(rollupData[i][2] || '').trim().toLowerCase();
+    const isPilot = Boolean(pilotIdsMap[cid]) ||
+                    cid.toUpperCase().indexOf('PILOT-') === 0 ||
+                    dept === pilotClientLower;
+
+    if (isPilot) {
+      dashSheet.deleteRow(18 + i);
+    }
+  }
+}
+
+/**
+ * Resets "Campaign Configuration" Column B cleanly while strictly preserving all 38 locked parameter rows.
+ * Used only when zero real campaigns remain after pilot cleanup.
+ */
+function resetCampaignConfigurationToStandby_(cfgSheet) {
+  if (!cfgSheet || cfgSheet.getLastRow() <= 1) return;
+
+  const standbyValues = {
+    'CAMPAIGN_ID': '',
+    'CAMPAIGN_NAME': '',
+    'DEPARTMENT': 'Growth Target',
+    'TARGET_COUNTRIES': '',
+    'TARGET_INDUSTRIES': '',
+    'COMPANY_SIZE_RANGE': '',
+    'MAX_COMPANIES': 5,
+    'RESEARCH_DEPTH': 'Deep Persona',
+    'EVIDENCE_PERIOD_MONTHS': 12,
+    'MIN_COMPANY_SCORE': 80,
+    'MIN_PERSONA_SCORE': 85,
+    'MIN_EMAIL_PRIORITY_SCORE': 80,
+    'TARGET_TITLES': '',
+    'CAMPAIGN_FOCUS': '',
+    'SEARCH_KEYWORDS': '',
+    'CUSTOM_BUSINESS_NEEDS': '',
+    'AI_PROVIDER': 'GEMINI',
+    'PRIMARY_AI_PROVIDER': 'GEMINI',
+    'AI_MODEL': 'gemini-3.8-flash',
+    'EMAIL_VERIFICATION_PROVIDER': 'ZeroBounce',
+    'EMAIL_VERIFICATION_ENDPOINT': '',
+    'EMAIL_SENDER_PROVIDER': 'Workspace Gmail (Drafts Only)',
+    'DISPATCH_MODE': 'Workspace Gmail (Drafts Only)',
+    'EMAIL_SENDER_ENDPOINT': '',
+    'SENDER_NAME': '',
+    'SENDER_TITLE': '',
+    'SENDER_COMPANY': '',
+    'INCLUDE_ESG_OBLIGATIONS': 'TRUE',
+    'INCLUDE_ESG_MATURITY': 'TRUE',
+    'INCLUDE_SUPPLY_CHAIN': 'TRUE',
+    'INCLUDE_SCOPE3': 'TRUE',
+    'INCLUDE_DATA_CHALLENGES': 'TRUE',
+    'INCLUDE_DIGITAL': 'TRUE',
+    'INCLUDE_ESG_GOVERNANCE': 'TRUE',
+    'INCLUDE_TRIGGERS': 'TRUE',
+    'INCLUDE_EVALUATER': 'TRUE',
+    'HUMAN_APPROVAL_REQUIRED': 'TRUE',
+    'AUTO_SEND_ENABLED': 'FALSE'
+  };
+
+  const integerKeys = ['MAX_COMPANIES', 'EVIDENCE_PERIOD_MONTHS', 'MIN_COMPANY_SCORE', 'MIN_PERSONA_SCORE', 'MIN_EMAIL_PRIORITY_SCORE'];
+  const data = cfgSheet.getDataRange().getValues();
+
+  for (let r = 1; r < data.length; r++) {
+    const key = String(data[r][0] || '').trim().toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(standbyValues, key)) {
+      const cell = cfgSheet.getRange(r + 1, 2);
+      if (integerKeys.indexOf(key) >= 0) {
+        cell.setNumberFormat('0');
+      }
+      cell.setValue(standbyValues[key]);
+    }
+  }
+}
+
+/**
+ * OPTION A FULL WIPE CLEANUP:
+ * Removes zero-trace of all Pilot test data (PILOT-CMP-001, PILOT-*, and Pilot Acme)
+ * across all 13 tabs, preserves/restores active real campaigns, and resets to Standby only if none exist.
+ */
 function cleanupPilotDataFromRealSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
-  purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
+  if (!ss) return;
 
+  // Step 1: Discover all pilot campaign IDs (PILOT-CMP-001, PILOT-*, and any Pilot Acme campaigns like PA-001)
+  const pilotIdsMap = collectPilotCampaignIds_(ss, PILOT_CONFIG.CAMPAIGN_ID);
+
+  // Step 2: Purge all pilot rows from operational & log tabs and remove stale filters
+  purgeExistingPilotRows(ss, pilotIdsMap);
+
+  // Step 3: Clean stored DocumentProperties cursors for all purged pilot campaigns
   try {
-    PropertiesService.getDocumentProperties().deleteProperty('PERSONA_MAPPER_CURSOR_' + PILOT_CONFIG.CAMPAIGN_ID);
+    const docProps = PropertiesService.getDocumentProperties();
+    Object.keys(pilotIdsMap).forEach(function(pid) {
+      docProps.deleteProperty('PERSONA_MAPPER_CURSOR_' + pid);
+    });
   } catch (e) {}
 
-  // Remove any legacy stray GEMINI_MODEL/STATUS rows from Campaign Configuration & restore active state
-  const cfgSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGN_CONFIG);
-  let restoredRealCampaign = false;
+  // Step 4: Remove Pilot Acme & pilot suppression rules from Lists & Settings and refresh client dropdowns
+  cleanupPilotEntriesFromListsAndSettings_(ss);
 
+  // Step 5: Remove Client: Pilot Acme block from Agent Settings
+  cleanupPilotEntriesFromAgentSettings_(ss);
+
+  // Step 6: Remove only Pilot rows from Dashboard -> Campaign Performance Rollup (preserve real campaigns)
+  cleanupPilotEntriesFromDashboardRollup_(ss, pilotIdsMap);
+
+  // Step 7: Remove any legacy stray GEMINI_MODEL/STATUS rows if Campaign Configuration exceeded 38 params
+  const cfgSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGN_CONFIG);
+  let activeCfgId = '';
+  let activeCfgDept = '';
   if (cfgSheet && cfgSheet.getLastRow() > 1) {
     const cfgData = cfgSheet.getDataRange().getValues();
     for (let r = cfgData.length - 1; r >= 1; r--) {
@@ -1185,29 +1501,49 @@ function cleanupPilotDataFromRealSheets() {
         cfgSheet.deleteRow(r + 1);
       }
     }
+    const refreshedCfg = cfgSheet.getDataRange().getValues();
+    for (let r = 1; r < refreshedCfg.length; r++) {
+      const k = String(refreshedCfg[r][0] || '').trim().toUpperCase();
+      if (k === 'CAMPAIGN_ID') activeCfgId = String(refreshedCfg[r][1] || '').trim();
+      if (k === 'DEPARTMENT') activeCfgDept = String(refreshedCfg[r][1] || '').trim();
+    }
+  }
 
-    const activeCfgId = String(cfgSheet.getRange(2, 2).getValue() || '').trim();
-    if (activeCfgId === PILOT_CONFIG.CAMPAIGN_ID || activeCfgId.startsWith('PILOT-')) {
-      const campSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGNS);
-      if (campSheet && campSheet.getLastRow() > 1) {
-        const campRows = campSheet.getDataRange().getValues();
-        for (let r = 1; r < campRows.length; r++) {
-          const cid = String(campRows[r][0] || '').trim();
-          if (cid && !cid.startsWith('PILOT-') && typeof selectAndActivateCampaign === 'function') {
-            selectAndActivateCampaign(cid);
-            restoredRealCampaign = true;
-            break;
-          }
-        }
-      }
-      if (!restoredRealCampaign) {
-        cfgSheet.getRange(2, 2).setValue('');
-        if (cfgSheet.getLastRow() >= 3) cfgSheet.getRange(3, 2).setValue('');
+  // Step 8: Collect remaining real Campaign IDs from Campaigns tab
+  const realCampaignIds = [];
+  const campSheet = ss.getSheetByName(PILOT_CONFIG.TABS.CAMPAIGNS);
+  if (campSheet && campSheet.getLastRow() > 1) {
+    const campRows = campSheet.getDataRange().getValues();
+    for (let r = 1; r < campRows.length; r++) {
+      const cid = String(campRows[r][0] || '').trim();
+      const dept = String(campRows[r][2] || '').trim().toLowerCase();
+      if (cid && !pilotIdsMap[cid] && cid.toUpperCase().indexOf('PILOT-') !== 0 && dept !== PILOT_CONFIG.DEPARTMENT.toLowerCase()) {
+        realCampaignIds.push(cid);
       }
     }
   }
 
-  if (!restoredRealCampaign) {
+  // Step 9: Restore active real campaign cleanly (or reset to Standby if 0 real campaigns exist)
+  const pilotLower = PILOT_CONFIG.DEPARTMENT.toLowerCase();
+  const cfgPointsToValidReal = Boolean(
+    activeCfgId &&
+    !pilotIdsMap[activeCfgId] &&
+    activeCfgId.toUpperCase().indexOf('PILOT-') !== 0 &&
+    activeCfgDept.toLowerCase() !== pilotLower &&
+    realCampaignIds.indexOf(activeCfgId) >= 0
+  );
+
+  const targetRealId = cfgPointsToValidReal
+    ? activeCfgId
+    : (realCampaignIds.length > 0 ? realCampaignIds[0] : '');
+
+  if (targetRealId) {
+    if (typeof selectAndActivateCampaign === 'function') {
+      selectAndActivateCampaign(targetRealId);
+    }
+  } else {
+    resetCampaignConfigurationToStandby_(cfgSheet);
+
     const dashSheet = ss.getSheetByName(PILOT_CONFIG.TABS.DASHBOARD);
     if (dashSheet) {
       const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
@@ -1261,8 +1597,17 @@ function cleanupPilotDataFromRealSheets() {
         dashSheet.getRange(18, 1, dashSheet.getLastRow() - 17, 7).clearContent();
       }
     }
+
+    if (typeof setupAgentSettingsTabDropdowns === 'function') {
+      setupAgentSettingsTabDropdowns(ss, 'Growth Target');
+    }
   }
 
-  ss.toast('Pilot test data purged cleanly.', 'Cleaned', 6);
-  Logger.log('Pilot test data purged cleanly.');
+  SpreadsheetApp.flush();
+  ss.toast(
+    'Pilot data wiped cleanly. If the Campaign Control Panel sidebar is open, close and reopen it to refresh dropdowns.',
+    '🧹 Pilot Wipe Complete',
+    8
+  );
+  Logger.log('Pilot test data wiped cleanly (Option A Full Wipe).');
 }
