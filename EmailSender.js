@@ -11,7 +11,8 @@
  * 2. Strict Client Isolation: External clients strictly require CLIENT_{NAME}_*
  *    credentials in Script Properties (zero fallback to local keys or personal Gmail).
  * 3. Campaign Isolation: Resolves sender profile and provider dynamically per prospect Campaign ID.
- * 4. Sender Identity Stamping: Attaches configured Sender Display Name to Gmail drafts and emails.
+ * 4. Sender Identity & Mailbox Stamping: Attaches Sender Display Name, Sender Email/Alias,
+ *    and Reply-To Email address to drafts and outreach emails.
  * 5. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
  * ============================================================================
  */
@@ -58,8 +59,9 @@ function processOutreachQueue_(forceDrafts) {
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
   if (lastRow < 2) {
-    if (ui) ui.alert('No prospects found in Prospect Review Queue.');
-    else Logger.log('No prospects found in Prospect Review Queue.');
+    const emptyMsg = 'No prospects found in Prospect Review Queue.';
+    if (ui) ui.alert(emptyMsg);
+    else Logger.log(emptyMsg);
     return;
   }
 
@@ -224,6 +226,8 @@ function processOutreachQueue_(forceDrafts) {
 function dispatchOutreach_(item, provider, config, spreadsheet) {
   const p = String(provider || '').toLowerCase();
   const senderName = String(config.senderName || '').trim();
+  const senderEmail = String(config.senderEmail || '').trim();
+  const replyToEmail = String(config.replyToEmail || senderEmail || '').trim();
   const clientName = String(config.clientName || 'Growth Target').trim();
   const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
 
@@ -235,12 +239,41 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
       // Local Agency ("Growth Target"): Use your logged-in Google Workspace GmailApp
       const mailOptions = {};
       if (senderName) mailOptions.name = senderName;
+      if (replyToEmail && replyToEmail.indexOf('@') > 0) mailOptions.replyTo = replyToEmail;
+
+      if (senderEmail && senderEmail.indexOf('@') > 0) {
+        try {
+          const currentUser = Session.getActiveUser().getEmail();
+          if (currentUser && senderEmail.toLowerCase() !== currentUser.toLowerCase()) {
+            mailOptions.from = senderEmail;
+          }
+        } catch (e) {}
+      }
 
       if (isDraftMode) {
-        GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
+        try {
+          GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
+        } catch (aliasErr) {
+          if (mailOptions.from) {
+            delete mailOptions.from;
+            GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
+          } else {
+            throw aliasErr;
+          }
+        }
         return { status: 'draft_created' };
       }
-      GmailApp.sendEmail(item.email, item.subject, item.body, mailOptions);
+
+      try {
+        GmailApp.sendEmail(item.email, item.subject, item.body, mailOptions);
+      } catch (aliasErr) {
+        if (mailOptions.from) {
+          delete mailOptions.from;
+          GmailApp.sendEmail(item.email, item.subject, item.body, mailOptions);
+        } else {
+          throw aliasErr;
+        }
+      }
       return { status: 'sent' };
     }
 
@@ -259,6 +292,8 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
       subject: item.subject,
       body: item.body,
       senderName: senderName,
+      senderEmail: senderEmail,
+      replyTo: replyToEmail,
       campaignId: item.campaignId,
       clientName: clientName
     };
@@ -316,6 +351,8 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
           draft_subject: item.subject,
           draft_body: item.body,
           sender_name: senderName,
+          sender_email: senderEmail,
+          reply_to: replyToEmail,
           client_name: clientName
         }
       }]
@@ -357,6 +394,8 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
         draft_subject: item.subject,
         draft_body: item.body,
         sender_name: senderName,
+        sender_email: senderEmail,
+        reply_to: replyToEmail,
         client_name: clientName
       }
     };
@@ -413,6 +452,8 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
       senderName: senderName,
       senderTitle: config.senderTitle || '',
       senderCompany: config.senderCompany || '',
+      senderEmail: senderEmail,
+      replyToEmail: replyToEmail,
       timestamp: new Date().toISOString()
     };
 
@@ -449,7 +490,9 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
     emailSenderEndpoint: '',
     senderName: '',
     senderTitle: '',
-    senderCompany: ''
+    senderCompany: '',
+    senderEmail: '',
+    replyToEmail: ''
   };
 
   if (!spreadsheet || !campaignId) {
@@ -487,6 +530,8 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
               if (parsed.senderName) settings.senderName = parsed.senderName;
               if (parsed.senderTitle) settings.senderTitle = parsed.senderTitle;
               if (parsed.senderCompany) settings.senderCompany = parsed.senderCompany;
+              if (parsed.senderEmail) settings.senderEmail = String(parsed.senderEmail).trim();
+              if (parsed.replyToEmail) settings.replyToEmail = String(parsed.replyToEmail).trim();
             }
           } catch (e) {}
         }
@@ -535,6 +580,8 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
       if (!settings.senderName && cfgDict['SENDERNAME']) settings.senderName = String(cfgDict['SENDERNAME']).trim();
       if (!settings.senderTitle && cfgDict['SENDERTITLE']) settings.senderTitle = String(cfgDict['SENDERTITLE']).trim();
       if (!settings.senderCompany && cfgDict['SENDERCOMPANY']) settings.senderCompany = String(cfgDict['SENDERCOMPANY']).trim();
+      if (!settings.senderEmail && (cfgDict['SENDEREMAIL'] || cfgDict['SENDERMAILBOX'])) settings.senderEmail = String(cfgDict['SENDEREMAIL'] || cfgDict['SENDERMAILBOX']).trim();
+      if (!settings.replyToEmail && (cfgDict['REPLYTOEMAIL'] || cfgDict['REPLYTO'])) settings.replyToEmail = String(cfgDict['REPLYTOEMAIL'] || cfgDict['REPLYTO']).trim();
     }
   }
 

@@ -924,6 +924,8 @@ function getSidebarInitialData() {
           const parsed = JSON.parse(campData[i][jsonIdx]);
           if (parsed && typeof parsed === 'object') {
             campaignObj = Object.assign(campaignObj, parsed);
+            if (parsed.senderEmail) campaignObj.senderEmail = String(parsed.senderEmail).trim();
+            if (parsed.replyToEmail) campaignObj.replyToEmail = String(parsed.replyToEmail).trim();
           }
         } catch (e) {}
       }
@@ -1029,6 +1031,12 @@ function getSidebarInitialData() {
     if (activeConfigDict['DEPARTMENT']) c.department = String(activeConfigDict['DEPARTMENT']);
     if (activeConfigDict['MAXCOMPANIES']) c.limit = Number(activeConfigDict['MAXCOMPANIES']) || 5;
     if (activeConfigDict['EMAILSENDERPROVIDER']) c.emailSenderProvider = String(activeConfigDict['EMAILSENDERPROVIDER']);
+    if (!c.senderEmail && (activeConfigDict['SENDEREMAIL'] || activeConfigDict['SENDERMAILBOX'])) {
+      c.senderEmail = String(activeConfigDict['SENDEREMAIL'] || activeConfigDict['SENDERMAILBOX']).trim();
+    }
+    if (!c.replyToEmail && (activeConfigDict['REPLYTOEMAIL'] || activeConfigDict['REPLYTO'])) {
+      c.replyToEmail = String(activeConfigDict['REPLYTOEMAIL'] || activeConfigDict['REPLYTO']).trim();
+    }
   }
 
   for (let cid in configsMap) {
@@ -1208,7 +1216,12 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   }
 
   if (!isActivationOnly || !cFound) {
-    const normalizedPayload = Object.assign({}, payload, { department: clientOwner });
+    const normalizedPayload = Object.assign({}, payload, {
+      department: clientOwner,
+      senderEmail: String(payload.senderEmail || '').trim(),
+      replyToEmail: String(payload.replyToEmail || payload.senderEmail || '').trim()
+    });
+
     const campMasterRow = [
       campId,
       campName,
@@ -1819,7 +1832,9 @@ function executeMasterPersonaMapperSync() {
     emailSenderEndpoint: String(dict['EMAILSENDERENDPOINT'] || ''),
     senderName: String(dict['SENDERNAME'] || ''),
     senderTitle: String(dict['SENDERTITLE'] || ''),
-    senderCompany: String(dict['SENDERCOMPANY'] || '')
+    senderCompany: String(dict['SENDERCOMPANY'] || ''),
+    senderEmail: String(dict['SENDEREMAIL'] || dict['SENDERMAILBOX'] || ''),
+    replyToEmail: String(dict['REPLYTOEMAIL'] || dict['REPLYTO'] || '')
   };
 
   const res = studioDirectSaveCampaignPipeline(payload);

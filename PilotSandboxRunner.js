@@ -16,7 +16,7 @@
  *      "Research Evidence" (9 canonical cols), "Prospect Review Queue" (45 cols),
  *      and logs client-tagged token/credit usage to "API_Usage_Log".
  * 2. Creates Safe Gmail Drafts (via Pilot Acme Relay if configured, or local sandbox Gmail).
- * 3. Enforces real-time suppression rules from "Lists & Settings".
+ * 3. Enforces real-time suppression rules and pins "Lists & Settings" client rows cleanly.
  * 4. Safe Purge: Removes pilot records from ALL tabs including API_Usage_Log and Execution Logs.
  * ============================================================================
  */
@@ -32,6 +32,8 @@ const PILOT_CONFIG = {
   SENDER_NAME: 'Alex Mercer',
   SENDER_TITLE: 'Solutions Consultant',
   SENDER_COMPANY: 'eValuater Solutions',
+  SENDER_EMAIL: 'outreach@pilotacme.com',
+  REPLY_TO_EMAIL: 'outreach@pilotacme.com',
   CUSTOM_BUSINESS_NEEDS: 'Automated Scope 3 emissions reporting, supplier audit evidence collection, and CSRD compliance readiness',
   TABS: {
     DASHBOARD: 'Dashboard',
@@ -67,7 +69,7 @@ function runPilotOnRealSheets() {
     purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
     Logger.log('Step 1: Purged previous pilot records.');
 
-    // Step 2: Ensure client entries & load suppression rules from "Lists & Settings"
+    // Step 2: Ensure client entries, sort Lists & Settings, and load suppression rules
     ensureSuppressionRulesInSettings(ss);
     if (typeof refreshClientDropdownValidations_ === 'function') {
       refreshClientDropdownValidations_(ss);
@@ -83,7 +85,7 @@ function runPilotOnRealSheets() {
     generatePersonaMapperSettingsRow(ss, PILOT_CONFIG);
     Logger.log('Step 4: "Persona Mapper Settings" generated for ' + PILOT_CONFIG.CAMPAIGN_ID);
 
-    // Step 5: Write Pilot Campaign Record to "Campaigns" (28 Master Columns)
+    // Step 5: Write Pilot Campaign Record to "Campaigns" (28 Master Columns with embedded JSON)
     writePilotCampaign(ss, PILOT_CONFIG);
     Logger.log('Step 5: Master campaign record written to "Campaigns" with limit ' + PILOT_CONFIG.COMPANY_LIMIT);
 
@@ -375,7 +377,9 @@ function writePilotCampaign(ss, config) {
     emailSenderEndpoint: '',
     senderName: config.SENDER_NAME,
     senderTitle: config.SENDER_TITLE,
-    senderCompany: config.SENDER_COMPANY
+    senderCompany: config.SENDER_COMPANY,
+    senderEmail: config.SENDER_EMAIL || '',
+    replyToEmail: config.REPLY_TO_EMAIL || config.SENDER_EMAIL || ''
   };
 
   const master28Row = [
@@ -780,7 +784,7 @@ function writePilotPersonaLeads(ss, personas) {
 
 /**
  * Checks if Pilot Acme has a live Client Gmail Relay configured; if so, routes sandbox drafts through it.
- * Otherwise safely creates sandbox test drafts in local Gmail so Pilot testing works without a separate Workspace.
+ * Otherwise safely creates sandbox test drafts in local Gmail with sender options so testing works without a separate Workspace.
  */
 function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressionRules, config) {
   const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@'];
@@ -856,6 +860,8 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
                 subject: p['Draft Subject'],
                 body: p['Draft Email'],
                 senderName: config.SENDER_NAME,
+                senderEmail: config.SENDER_EMAIL || '',
+                replyTo: config.REPLY_TO_EMAIL || config.SENDER_EMAIL || '',
                 campaignId: config.CAMPAIGN_ID,
                 clientName: config.DEPARTMENT
               }),
@@ -868,11 +874,15 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
             draftId = parsed.draftId || 'Client-Relay-Draft';
             draftNote = 'Draft created via ' + config.DEPARTMENT + ' Relay ID: ' + draftId;
           } else {
+            const mailOptions = {};
+            if (config.SENDER_NAME) mailOptions.name = config.SENDER_NAME;
+            if (config.REPLY_TO_EMAIL) mailOptions.replyTo = config.REPLY_TO_EMAIL;
+
             const draft = GmailApp.createDraft(
               p['Business Email'],
               p['Draft Subject'],
               p['Draft Email'],
-              { name: config.SENDER_NAME }
+              mailOptions
             );
             draftId = draft.getId();
             draftNote = 'Sandbox draft created in local Gmail ID: ' + draftId + ' (Client: ' + config.DEPARTMENT + ')';
@@ -1079,6 +1089,11 @@ function ensureSuppressionRulesInSettings(ss) {
     sheet.appendRow(['Suppression - Competitor Domain', 'competitor-esg.com', 'Active']);
     sheet.appendRow(['Suppression - Opt-Out Email', 'optout-lead@novusmfg.com', 'Active']);
     sheet.appendRow(['Suppression - Internal Exclusion', 'internal-test@growthtarget.com', 'Active']);
+  }
+
+  // Keep all Client - Account rows pinned cleanly at the top
+  if (typeof sortListsAndSettingsTab_ === 'function') {
+    sortListsAndSettingsTab_(ss);
   }
 }
 

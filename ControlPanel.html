@@ -380,7 +380,7 @@
         <div class="row">
           <div class="field">
             <label for="senderName">Sender Display Name</label>
-            <input type="text" id="senderName" placeholder="e.g. Jordan Smith">
+            <input type="text" id="senderName" placeholder="e.g. Alex Mercer">
           </div>
           <div class="field">
             <label for="senderTitle">Sender Job Title</label>
@@ -389,7 +389,19 @@
         </div>
         <div class="field">
           <label for="senderCompany">Sender Company Name</label>
-          <input type="text" id="senderCompany" placeholder="e.g. eValuater Solutions">
+          <input type="text" id="senderCompany" placeholder="e.g. eValuater">
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="senderEmail">Sender Email / Mailbox</label>
+            <input type="text" id="senderEmail" placeholder="e.g. sales@evaluater.ai">
+            <div class="hint">For client Workspace Relay, this is their mailbox or alias.</div>
+          </div>
+          <div class="field">
+            <label for="replyToEmail">Reply-To Email Address</label>
+            <input type="text" id="replyToEmail" placeholder="e.g. sales@evaluater.ai">
+            <div class="hint">Where prospect replies will be delivered.</div>
+          </div>
         </div>
       </div>
     </div>
@@ -671,7 +683,6 @@
           } else if (words.length === 1) {
             prefix = words[0].toUpperCase().slice(0, 3);
           }
-          // Avoid starting with PILOT so new production campaigns aren't treated as sandbox pilot runs
           if (!prefix || prefix.indexOf('PILOT') === 0) {
             prefix = 'CL';
           }
@@ -1096,6 +1107,8 @@
         document.getElementById('senderName').value = '';
         document.getElementById('senderTitle').value = '';
         document.getElementById('senderCompany').value = '';
+        document.getElementById('senderEmail').value = '';
+        document.getElementById('replyToEmail').value = '';
 
         onSenderChanged();
         onVerifierChanged();
@@ -1173,6 +1186,8 @@
         document.getElementById('senderName').value = data.senderName || '';
         document.getElementById('senderTitle').value = data.senderTitle || '';
         document.getElementById('senderCompany').value = data.senderCompany || '';
+        document.getElementById('senderEmail').value = data.senderEmail || '';
+        document.getElementById('replyToEmail').value = data.replyToEmail || data.senderEmail || '';
 
         onSenderChanged();
         onVerifierChanged();
@@ -1252,7 +1267,7 @@
             hint.textContent = 'Your local Google Workspace email will be used automatically. No endpoint required.';
           } else {
             input.placeholder = 'Not required — routed via client Gmail Relay Script Properties';
-            hint.textContent = 'Requires ' + prefix + 'GMAIL_RELAY_URL and ' + prefix + 'GMAIL_RELAY_SECRET in Script Properties so emails go from the client\'s Google Workspace.';
+            hint.textContent = 'Requires ' + prefix + 'GMAIL_RELAY_URL and ' + prefix + 'GMAIL_RELAY_SECRET in Script Properties so emails go from the client\'s Google Workspace mailbox (e.g. sales@evaluater.ai).';
           }
         } else if (p === 'Smartlead') {
           label.textContent = 'Smartlead Campaign ID';
@@ -1348,7 +1363,9 @@
 
           senderName: document.getElementById('senderName').value.trim(),
           senderTitle: document.getElementById('senderTitle').value.trim(),
-          senderCompany: document.getElementById('senderCompany').value.trim()
+          senderCompany: document.getElementById('senderCompany').value.trim(),
+          senderEmail: document.getElementById('senderEmail').value.trim(),
+          replyToEmail: document.getElementById('replyToEmail').value.trim()
         };
 
         serverConfigsMap[cid] = payload;
