@@ -6,7 +6,8 @@
  * File: SheetSetup.gs / SheetSetup.js
  * 
  * PURPOSE:
- * 1. Manages "Lists & Settings" client registry ("Client - Account") & suppression dropdowns.
+ * 1. Manages "Lists & Settings" client registry ("Client - Account") & suppression dropdowns,
+ *    keeping Client - Account rows cleanly pinned at the top.
  * 2. Preserves locked 38 parameters in "Campaign Configuration" & 28 columns in "Campaigns".
  * 3. Dynamically binds Client / Owner dropdowns from active "Client - Account" rows.
  * 4. Enforces plain integer formatting (0) on limit/score columns to prevent date conversion.
@@ -24,7 +25,7 @@ function setupAllSheetsAndDropdowns() {
   // 1. Setup Dashboard if brand new (non-destructive if already populated)
   setupDashboardTabIfEmpty_(ss);
 
-  // 2. Setup Lists & Settings first so active "Client - Account" rows are seeded & ready
+  // 2. Setup Lists & Settings first so active "Client - Account" rows are seeded, sorted & ready
   setupListsAndSettingsTabDropdowns(ss);
 
   // 3. Migrate legacy department strings (e.g. "ESG Advisory") to real Client names before strict validations
@@ -89,7 +90,7 @@ function setupAllSheetsAndDropdowns() {
   ]);
 
   SpreadsheetApp.flush();
-  ss.toast('All 13 tabs formatted, per-client Agent Settings synced, and dropdowns applied!', '✅ Setup Complete', 10);
+  ss.toast('All 13 tabs formatted, Lists & Settings organized, and dropdowns applied!', '✅ Setup Complete', 10);
   Logger.log('>>> ALL 13 TABS & DROPDOWNS CONFIGURED SUCCESSFULLY <<<');
 }
 
@@ -115,12 +116,13 @@ function normalizeSetupClientPrefix_(clientName) {
 
 /**
  * Reads active Client / Account names from Tab 13 ("Lists & Settings").
- * Falls back to ['Growth Target', 'Pilot Acme'] if none are configured yet.
+ * Never resurrects a client explicitly marked Inactive in Lists & Settings.
  */
 function getRegisteredClientsFromSettings_(ss) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   const clients = [];
   const seen = {};
+  let hasAnyClientRow = false;
 
   if (spreadsheet) {
     const sheet = spreadsheet.getSheetByName('Lists & Settings');
@@ -132,11 +134,14 @@ function getRegisteredClientsFromSettings_(ss) {
         const status = String(data[i][2] || '').trim().toLowerCase();
         const isActive = (status === 'active' || status === 'true' || status === '');
 
-        if (isActive && val && (listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
-          const norm = val.toLowerCase();
-          if (!seen[norm]) {
-            clients.push(val);
-            seen[norm] = true;
+        if (val && (listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
+          hasAnyClientRow = true;
+          if (isActive) {
+            const norm = val.toLowerCase();
+            if (!seen[norm]) {
+              clients.push(val);
+              seen[norm] = true;
+            }
           }
         }
       }
@@ -144,9 +149,134 @@ function getRegisteredClientsFromSettings_(ss) {
   }
 
   if (clients.length === 0) {
-    return ['Growth Target', 'Pilot Acme'];
+    return hasAnyClientRow ? ['Growth Target'] : ['Growth Target', 'Pilot Acme'];
   }
   return clients;
+}
+
+/**
+ * Returns Client - Account names explicitly marked Inactive in Tab 13 ("Lists & Settings").
+ * Used by the Control Panel to archive Inactive clients out of the Client / Owner dropdown
+ * even if historical campaigns still exist in the "Campaigns" tab.
+ */
+function getInactiveClientsFromSettings_(ss) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  const inactive = [];
+  const activeSet = {};
+  const seenInactive = {};
+
+  if (spreadsheet) {
+    const sheet = spreadsheet.getSheetByName('Lists & Settings');
+    if (sheet && sheet.getLastRow() > 1) {
+      const data = sheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        const listName = String(data[i][0] || '').trim().toLowerCase();
+        const val = String(data[i][1] || '').trim();
+        const status = String(data[i][2] || '').trim().toLowerCase();
+
+        if (!val || !(listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
+          continue;
+        }
+        const isActive = (status === 'active' || status === 'true' || status === '');
+        if (isActive) {
+          activeSet[val.toLowerCase()] = true;
+        } else if (!seenInactive[val.toLowerCase()]) {
+          inactive.push(val);
+          seenInactive[val.toLowerCase()] = true;
+        }
+      }
+    }
+  }
+
+  return inactive.filter(function(name) {
+    return !activeSet[name.toLowerCase()];
+  });
+}
+
+/**
+ * Organizes Tab 13 ("Lists & Settings") cleanly so all "Client - Account" rows stay pinned
+ * at the top (Growth Target first, then Active clients A-Z, then Inactive clients A-Z),
+ * followed by Whitelist rules and Suppression rules grouped by List name.
+ */
+function sortListsAndSettingsTab_(ss) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!spreadsheet) return;
+
+  const sheet = spreadsheet.getSheetByName('Lists & Settings');
+  if (!sheet || sheet.getLastRow() <= 1) return;
+
+  const lastRow = sheet.getLastRow();
+  const rawRows = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+
+  const cleanRows = [];
+  const seenPairs = {};
+
+  for (let i = 0; i < rawRows.length; i++) {
+    const listName = String(rawRows[i][0] || '').trim();
+    const val = String(rawRows[i][1] || '').trim();
+    const status = String(rawRows[i][2] || '').trim();
+
+    if (!listName && !val && !status) continue;
+
+    // Deduplicate identical (List name + Value) rows if both exist
+    if (listName && val) {
+      const pairKey = listName.toLowerCase() + '||' + val.toLowerCase();
+      if (seenPairs[pairKey]) continue;
+      seenPairs[pairKey] = true;
+    }
+
+    cleanRows.push([listName, val, status]);
+  }
+
+  function getCategoryRank(listName) {
+    const l = String(listName || '').trim().toLowerCase();
+    if (l === 'client - account' || l === 'client / owner' || l === 'client') return 0;
+    if (l.indexOf('whitelist') >= 0) return 1;
+    if (l.indexOf('suppression') >= 0 || l.indexOf('blacklist') >= 0 || l.indexOf('opt-out') >= 0 || l.indexOf('competitor') >= 0) return 2;
+    return 3;
+  }
+
+  function isRowActive(status) {
+    const s = String(status || '').trim().toLowerCase();
+    return (s === 'active' || s === 'true' || s === '');
+  }
+
+  cleanRows.sort(function(a, b) {
+    const rankA = getCategoryRank(a[0]);
+    const rankB = getCategoryRank(b[0]);
+    if (rankA !== rankB) return rankA - rankB;
+
+    if (rankA === 0) {
+      // Client - Account block: Active first, then Growth Target pinned #1, then alphabetical
+      const actA = isRowActive(a[2]) ? 0 : 1;
+      const actB = isRowActive(b[2]) ? 0 : 1;
+      if (actA !== actB) return actA - actB;
+
+      const localA = isSetupLocalBrand_(a[1]) ? 0 : 1;
+      const localB = isSetupLocalBrand_(b[1]) ? 0 : 1;
+      if (localA !== localB) return localA - localB;
+
+      return String(a[1] || '').toLowerCase().localeCompare(String(b[1] || '').toLowerCase());
+    }
+
+    // Other blocks: group by List name, then Active first, then alphabetical by Value
+    const typeCmp = String(a[0] || '').toLowerCase().localeCompare(String(b[0] || '').toLowerCase());
+    if (typeCmp !== 0) return typeCmp;
+
+    const actA = isRowActive(a[2]) ? 0 : 1;
+    const actB = isRowActive(b[2]) ? 0 : 1;
+    if (actA !== actB) return actA - actB;
+
+    return String(a[1] || '').toLowerCase().localeCompare(String(b[1] || '').toLowerCase());
+  });
+
+  const clearCount = Math.max(lastRow - 1, cleanRows.length);
+  if (clearCount > 0) {
+    sheet.getRange(2, 1, clearCount, 3).clearContent();
+  }
+  if (cleanRows.length > 0) {
+    sheet.getRange(2, 1, cleanRows.length, 3).setValues(cleanRows);
+  }
 }
 
 /**
@@ -560,7 +690,8 @@ function setupPersonaLeadsTabDropdowns(ss) {
 }
 
 /**
- * Injects Dropdowns into "Lists & Settings" Tab and seeds active Client accounts if missing.
+ * Injects Dropdowns into "Lists & Settings" Tab, seeds active Client accounts if missing,
+ * and pins all "Client - Account" rows cleanly at the top.
  */
 function setupListsAndSettingsTabDropdowns(ss) {
   const sheet = getOrCreateSheet(ss, 'Lists & Settings');
@@ -598,6 +729,11 @@ function setupListsAndSettingsTabDropdowns(ss) {
     sheet.appendRow(['Client - Account', 'Growth Target', 'Active']);
     sheet.appendRow(['Client - Account', 'Pilot Acme', 'Active']);
   }
+
+  sortListsAndSettingsTab_(ss);
+  sheet.setColumnWidth(1, 240);
+  sheet.setColumnWidth(2, 280);
+  sheet.setColumnWidth(3, 140);
 }
 
 /**
@@ -817,7 +953,7 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
 
       if (agentKeyDropdowns[cleanK]) {
         applyDropdownToRange(valCell, agentKeyDropdowns[cleanK], false);
-      } else if (rawKey.indexOf('CLIENT_') === 0 && rawKey.indexOf('GOOGLESEARCHGROUNDING') >= 0 || cleanK.endsWith('GOOGLESEARCHGROUNDING')) {
+      } else if ((rawKey.indexOf('CLIENT_') === 0 && rawKey.indexOf('GOOGLESEARCHGROUNDING') >= 0) || cleanK.endsWith('GOOGLESEARCHGROUNDING')) {
         applyDropdownToRange(valCell, ['TRUE', 'FALSE'], false);
       }
 
@@ -832,7 +968,7 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
   sheet.setColumnWidth(3, 300);
   sheet.setColumnWidth(4, 440);
 
-  // Optional Bonus: Filter Agent Settings to show only the active Client / Owner's rows
+  // Filter Agent Settings to show only the active Client / Owner's rows
   filterAgentSettingsByClient_(spreadsheet, activeClientOverride);
 }
 

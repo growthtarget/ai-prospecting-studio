@@ -341,6 +341,8 @@ function getRegisteredClientsList_(ss) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   const clients = [];
   const seen = {};
+  let hasAnyClientRow = false;
+
   if (spreadsheet) {
     const sheet = spreadsheet.getSheetByName('Lists & Settings');
     if (sheet && sheet.getLastRow() > 1) {
@@ -350,8 +352,9 @@ function getRegisteredClientsList_(ss) {
         const val = String(data[i][1] || '').trim();
         const status = String(data[i][2] || '').trim().toLowerCase();
         const isActive = (status === 'active' || status === 'true' || status === '');
-        if (isActive && val && (listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
-          if (!seen[val.toLowerCase()]) {
+        if (val && (listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
+          hasAnyClientRow = true;
+          if (isActive && !seen[val.toLowerCase()]) {
             clients.push(val);
             seen[val.toLowerCase()] = true;
           }
@@ -359,7 +362,46 @@ function getRegisteredClientsList_(ss) {
       }
     }
   }
-  return clients.length > 0 ? clients : ['Growth Target', 'Pilot Acme'];
+  if (clients.length > 0) return clients;
+  return hasAnyClientRow ? ['Growth Target'] : ['Growth Target', 'Pilot Acme'];
+}
+
+/**
+ * Returns Client - Account names explicitly marked Inactive in Tab 13 ("Lists & Settings").
+ */
+function getInactiveClientsList_(ss) {
+  if (typeof getInactiveClientsFromSettings_ === 'function') {
+    return getInactiveClientsFromSettings_(ss);
+  }
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  const inactive = [];
+  const activeSet = {};
+  const seenInactive = {};
+
+  if (spreadsheet) {
+    const sheet = spreadsheet.getSheetByName('Lists & Settings');
+    if (sheet && sheet.getLastRow() > 1) {
+      const data = sheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        const listName = String(data[i][0] || '').trim().toLowerCase();
+        const val = String(data[i][1] || '').trim();
+        const status = String(data[i][2] || '').trim().toLowerCase();
+        if (!val || !(listName === 'client - account' || listName === 'client / owner' || listName === 'client')) {
+          continue;
+        }
+        const isActive = (status === 'active' || status === 'true' || status === '');
+        if (isActive) {
+          activeSet[val.toLowerCase()] = true;
+        } else if (!seenInactive[val.toLowerCase()]) {
+          inactive.push(val);
+          seenInactive[val.toLowerCase()] = true;
+        }
+      }
+    }
+  }
+  return inactive.filter(function(name) {
+    return !activeSet[name.toLowerCase()];
+  });
 }
 
 /**
@@ -437,8 +479,8 @@ function filterCampaignsSheetByClient_(ss, clientName) {
 }
 
 /**
- * Adds or reactivates a Client / Account in "Lists & Settings", refreshes sheet dropdowns,
- * provisions the client's row block in "Agent Settings", and filters Agent Settings & Campaigns.
+ * Adds or reactivates a Client / Account in "Lists & Settings", pins Client - Account rows
+ * at the top, refreshes sheet dropdowns, provisions "Agent Settings", and filters tabs.
  * Callable directly from the Sidebar Control Panel "[ + Add New Client... ]".
  */
 function addClientAccountToSettings(clientName) {
@@ -477,6 +519,9 @@ function addClientAccountToSettings(clientName) {
     sheet.appendRow(['Client - Account', cleanName, 'Active']);
   }
 
+  if (typeof sortListsAndSettingsTab_ === 'function') {
+    sortListsAndSettingsTab_(ss);
+  }
   if (typeof refreshClientDropdownValidations_ === 'function') {
     refreshClientDropdownValidations_(ss);
   }
@@ -493,6 +538,7 @@ function addClientAccountToSettings(clientName) {
     success: true,
     clientName: cleanName,
     clients: getRegisteredClientsList_(ss),
+    inactiveClients: getInactiveClientsList_(ss),
     message: 'Added client "' + cleanName + '" to Lists & Settings, updated dropdowns, and created Agent Settings rows.'
   };
 }
@@ -583,8 +629,10 @@ function onOpen() {
 }
 
 /**
- * Native onEdit Trigger: Listens for in-cell updates on Dashboard (D1 for Status,
- * C4 for Status, B2 for Campaign ID) and on Campaigns sheet Column 4 (Status).
+ * Native onEdit Trigger:
+ * 1. Syncs Dashboard (D1/C4 Status, B2 Campaign ID) and Campaigns Column 4 (Status).
+ * 2. Keeps "Lists & Settings" sorted with Client - Account rows pinned at the top
+ *    and refreshes Client dropdown validations whenever a completed row is edited.
  */
 function onEdit(e) {
   if (!e || !e.range) return;
@@ -608,6 +656,27 @@ function onEdit(e) {
       const activeCampId = getStudioActiveCampaignId_();
       if (editedCampId && editedCampId === activeCampId) {
         updateDashboardStatusOnly_(activeCampId, val);
+      }
+    } else if (sheetName === 'Lists & Settings' && row > 1 && col >= 1 && col <= 3) {
+      const rowVals = sheet.getRange(row, 1, 1, 3).getValues()[0];
+      const listType = String(rowVals[0] || '').trim();
+      const listVal = String(rowVals[1] || '').trim();
+      const lowerType = listType.toLowerCase();
+
+      // Wait until both List name and Value are filled so an in-progress new row doesn't jump mid-entry
+      if (listType && listVal) {
+        const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+        if (typeof sortListsAndSettingsTab_ === 'function') {
+          sortListsAndSettingsTab_(ss);
+        }
+        if (lowerType === 'client - account' || lowerType === 'client / owner' || lowerType === 'client') {
+          if (typeof refreshClientDropdownValidations_ === 'function') {
+            refreshClientDropdownValidations_(ss);
+          }
+          if (ss && ss.toast) {
+            ss.toast('Lists & Settings organized & Client dropdowns updated.', '✅ Registry Updated', 3);
+          }
+        }
       }
     }
   } catch (err) {
@@ -772,7 +841,8 @@ function showPersonaMapperControlPanel() {
   template.initialCampaigns = sidebarData.campaigns;
   template.initialConfigsMap = sidebarData.configsMap;
   template.activeCampaignId = sidebarData.activeCampaignId || '';
-  template.initialClients = sidebarData.clients || ['Growth Target', 'Pilot Acme'];
+  template.initialClients = sidebarData.clients || ['Growth Target'];
+  template.initialInactiveClients = sidebarData.inactiveClients || [];
 
   const html = template.evaluate().setTitle('🎯 Campaign Control Panel').setWidth(380);
   try {
@@ -783,7 +853,7 @@ function showPersonaMapperControlPanel() {
 }
 
 /**
- * Returns available campaigns, registered clients, and configuration maps for sidebar initialization.
+ * Returns available campaigns, registered active/inactive clients, and configuration maps.
  */
 function getSidebarInitialData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -978,7 +1048,8 @@ function getSidebarInitialData() {
     campaigns: campaignsList,
     configsMap: configsMap,
     activeCampaignId: activeCampaignId || (campaignsList.length > 0 ? campaignsList[0].id : 'CMP-005'),
-    clients: getRegisteredClientsList_(ss)
+    clients: getRegisteredClientsList_(ss),
+    inactiveClients: getInactiveClientsList_(ss)
   };
 }
 

@@ -232,7 +232,7 @@
             </select>
           </div>
 
-          <textarea id="customBusinessNeeds" rows="3" placeholder="e.g.
+          <textarea id="customBusinessNeeds" rows="3" oninput="onCustomBusinessNeedsInput()" placeholder="e.g.
 - High vendor questionnaire drop-off rate during procurement audits
 - Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency
 - Eliminating manual spreadsheet follow-ups with suppliers"></textarea>
@@ -321,17 +321,13 @@
           </select>
         </div>
         <div class="field">
-          <label for="aiModelInput">AI Model Name</label>
-          <input type="text" id="aiModelInput" list="aiModelPresets" value="gemini-3.8-flash">
-          <datalist id="aiModelPresets">
-            <option value="gemini-3.8-flash">
-            <option value="gemini-3.5-flash-lite">
-            <option value="gemini-2.5-flash">
-            <option value="gpt-4o">
-            <option value="gpt-4o-mini">
-            <option value="o1-mini">
-          </datalist>
-          <div class="hint">Tip: If gemini-3.8-flash is congested (503) on a free/unpaid key, auto-fallback uses gemini-3.5-flash-lite / gemini-2.5-flash automatically.</div>
+          <label for="aiModelSelect">AI Model Name</label>
+          <select id="aiModelSelect" onchange="onAiModelSelectChanged()"></select>
+          <div id="customAiModelBox" class="new-client-box">
+            <label for="aiModelCustomInput">Custom AI Model ID</label>
+            <input type="text" id="aiModelCustomInput" placeholder="e.g. gemini-2.5-pro or gpt-4.1">
+          </div>
+          <div id="aiModelHint" class="hint">Tip: If gemini-3.8-flash is congested (503) on a free/unpaid key, auto-fallback uses gemini-3.5-flash-lite / gemini-2.5-flash automatically.</div>
         </div>
       </div>
     </div>
@@ -411,17 +407,49 @@
     <script>
       var serverCampaigns = <?!= (typeof initialCampaigns !== 'undefined' && initialCampaigns) ? JSON.stringify(initialCampaigns) : '[]' ?>;
       var serverConfigsMap = <?!= (typeof initialConfigsMap !== 'undefined' && initialConfigsMap) ? JSON.stringify(initialConfigsMap) : '{}' ?>;
-      var serverClients = <?!= (typeof initialClients !== 'undefined' && initialClients) ? JSON.stringify(initialClients) : '["Growth Target","Pilot Acme"]' ?>;
+      var serverClients = <?!= (typeof initialClients !== 'undefined' && initialClients) ? JSON.stringify(initialClients) : '["Growth Target"]' ?>;
+      var serverInactiveClients = <?!= (typeof initialInactiveClients !== 'undefined' && initialInactiveClients) ? JSON.stringify(initialInactiveClients) : '[]' ?>;
       var currentActiveId = '<?= (typeof activeCampaignId !== 'undefined' && activeCampaignId) ? activeCampaignId : "" ?>';
       var lastValidClientOwner = 'Growth Target';
       var isPipelineBusy = false;
 
+      var PAIN_POINT_PRESETS_ = {
+        procurement: "- High vendor questionnaire drop-off rate during procurement audits\n- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency\n- Eliminating manual spreadsheet follow-ups with suppliers",
+        cybersecurity: "- Automating SOC 2 / ISO 27001 continuous compliance controls\n- Migrating legacy infrastructure to AWS/GCP with security guardrails\n- Eliminating developer bandwidth lost to manual audit evidence gathering",
+        enterprise_saas: "- Modernizing legacy ERP to cloud architecture\n- Streamlining engineering sprint velocity with banking partner API compliance\n- Reducing high technical debt in CI/CD pipeline",
+        fintech: "- Heavy regulatory scrutiny from Tier-1 banking partners\n- Automating continuous financial transaction reporting & AML compliance\n- Managing client capital under strict audit requirements",
+        hr_talent: "- Rapid engineering team expansion causing compliance onboarding bottlenecks\n- High attrition among senior developers burdened by compliance chores\n- Multi-region distributed payroll compliance"
+      };
+
+      var AI_MODELS_BY_PROVIDER_ = {
+        GEMINI: [
+          { value: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Default & Search Grounding)' },
+          { value: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite (Fast / Free-Tier Fallback)' },
+          { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Stable Grounding)' }
+        ],
+        OPENAI: [
+          { value: 'gpt-4o', label: 'gpt-4o (Recommended)' },
+          { value: 'gpt-4o-mini', label: 'gpt-4o-mini (Fast / Low Cost)' },
+          { value: 'o1-mini', label: 'o1-mini (Reasoning)' }
+        ]
+      };
+
       window.onload = function() {
+        const activeClientsList = getAllKnownClients_(serverClients);
         if (serverCampaigns && serverCampaigns.length > 0) {
-          const initialId = (currentActiveId && serverConfigsMap[currentActiveId])
+          let initialId = (currentActiveId && serverConfigsMap[currentActiveId])
             ? currentActiveId
             : serverCampaigns[0].id;
-          const initialClient = getCampaignClient_(initialId);
+          let initialClient = getCampaignClient_(initialId);
+          let archivedNotice = '';
+
+          if (isClientArchived_(initialClient)) {
+            archivedNotice = initialClient;
+            initialClient = activeClientsList[0] || 'Growth Target';
+            const fallbackCampaigns = getCampaignsForClient_(initialClient);
+            initialId = fallbackCampaigns.length > 0 ? fallbackCampaigns[0].id : '__NEW_CAMPAIGN__';
+          }
+
           renderClientOptions(serverClients, initialClient);
           const selectedCamp = renderCampaignOptionsForClient(initialClient, initialId);
           if (selectedCamp && selectedCamp !== '__NEW_CAMPAIGN__') {
@@ -429,13 +457,18 @@
           } else {
             populateNewCampaignDefaults_(initialClient);
           }
+
+          if (archivedNotice) {
+            showStatus('ℹ️ "' + archivedNotice + '" is marked Inactive in Lists & Settings. Showing active client "' + initialClient + '".', 'info');
+          }
         } else {
-          const fallbackClient = (serverClients && serverClients.length > 0) ? serverClients[0] : 'Growth Target';
+          const fallbackClient = activeClientsList[0] || 'Growth Target';
           renderClientOptions(serverClients, fallbackClient);
           renderCampaignOptionsForClient(fallbackClient, '__NEW_CAMPAIGN__');
           populateNewCampaignDefaults_(fallbackClient);
           document.getElementById('campaignIdInput').value = 'CMP-001';
           document.getElementById('campaignNameInput').value = 'Enterprise Scope 3 & ESG Supply Chain Readiness';
+          document.getElementById('presetNeedSelect').value = 'procurement';
           applyDepartmentPreset('procurement');
         }
       };
@@ -464,6 +497,121 @@
         return !norm || norm === 'GROWTHTARGET' || norm === 'LOCAL' || norm === 'AGENCY' || norm === 'DEFAULT';
       }
 
+      function isClientArchived_(clientName) {
+        const clean = String(clientName || '').trim().toLowerCase();
+        if (!clean || !Array.isArray(serverInactiveClients)) return false;
+        return serverInactiveClients.some(function(item) {
+          return String(item || '').trim().toLowerCase() === clean;
+        });
+      }
+
+      function normalizeMultilineText_(s) {
+        return String(s || '').replace(/\r\n/g, '\n').trim();
+      }
+
+      function detectMatchingPreset_(customNeedsText, savedPreset) {
+        const normText = normalizeMultilineText_(customNeedsText);
+        if (!normText) return '';
+
+        for (let key in PAIN_POINT_PRESETS_) {
+          if (normalizeMultilineText_(PAIN_POINT_PRESETS_[key]) === normText) {
+            return key;
+          }
+        }
+
+        if (savedPreset && PAIN_POINT_PRESETS_[savedPreset]) {
+          return savedPreset;
+        }
+        return '';
+      }
+
+      function onCustomBusinessNeedsInput() {
+        const currentText = normalizeMultilineText_(document.getElementById('customBusinessNeeds').value);
+        const presetSel = document.getElementById('presetNeedSelect');
+        let matched = '';
+        for (let key in PAIN_POINT_PRESETS_) {
+          if (normalizeMultilineText_(PAIN_POINT_PRESETS_[key]) === currentText) {
+            matched = key;
+            break;
+          }
+        }
+        presetSel.value = matched;
+      }
+
+      function renderAiModelOptions_(provider, desiredModel) {
+        const prov = (String(provider || 'GEMINI').toUpperCase().indexOf('OPENAI') >= 0) ? 'OPENAI' : 'GEMINI';
+        const select = document.getElementById('aiModelSelect');
+        const customBox = document.getElementById('customAiModelBox');
+        const customInput = document.getElementById('aiModelCustomInput');
+        const hintEl = document.getElementById('aiModelHint');
+        const models = AI_MODELS_BY_PROVIDER_[prov] || AI_MODELS_BY_PROVIDER_.GEMINI;
+
+        select.innerHTML = '';
+        models.forEach(function(m) {
+          const opt = document.createElement('option');
+          opt.value = m.value;
+          opt.textContent = m.label;
+          select.appendChild(opt);
+        });
+
+        const customOpt = document.createElement('option');
+        customOpt.value = '__CUSTOM_MODEL__';
+        customOpt.textContent = '+ Custom Model Name...';
+        select.appendChild(customOpt);
+
+        const targetModel = String(desiredModel || '').trim();
+        const matchesPreset = models.some(function(m) {
+          return m.value.toLowerCase() === targetModel.toLowerCase();
+        });
+
+        if (!targetModel) {
+          select.value = models[0].value;
+          customBox.style.display = 'none';
+          customInput.value = '';
+        } else if (matchesPreset) {
+          const exact = models.find(function(m) { return m.value.toLowerCase() === targetModel.toLowerCase(); });
+          select.value = exact.value;
+          customBox.style.display = 'none';
+          customInput.value = '';
+        } else {
+          select.value = '__CUSTOM_MODEL__';
+          customBox.style.display = 'block';
+          customInput.value = targetModel;
+        }
+
+        if (hintEl) {
+          if (prov === 'OPENAI') {
+            hintEl.textContent = 'Showing OpenAI models only. Requires OPENAI_API_KEY (or CLIENT_{NAME}_OPENAI_API_KEY for external clients).';
+          } else {
+            hintEl.textContent = 'Showing Gemini models only. If gemini-3.8-flash is congested (503) on a free/unpaid key, auto-fallback uses gemini-3.5-flash-lite / gemini-2.5-flash.';
+          }
+        }
+      }
+
+      function onAiModelSelectChanged() {
+        const sel = document.getElementById('aiModelSelect').value;
+        const customBox = document.getElementById('customAiModelBox');
+        const customInput = document.getElementById('aiModelCustomInput');
+        if (sel === '__CUSTOM_MODEL__') {
+          customBox.style.display = 'block';
+          customInput.focus();
+        } else {
+          customBox.style.display = 'none';
+        }
+      }
+
+      function getSelectedAiModel_() {
+        const sel = document.getElementById('aiModelSelect').value;
+        if (sel === '__CUSTOM_MODEL__') {
+          const customVal = document.getElementById('aiModelCustomInput').value.trim();
+          if (customVal) return customVal;
+        } else if (sel) {
+          return sel;
+        }
+        const prov = document.getElementById('aiProviderSelect').value;
+        return prov === 'OPENAI' ? 'gpt-4o' : 'gemini-3.8-flash';
+      }
+
       function getCampaignClient_(cid) {
         const id = String(cid || '').trim();
         if (id && serverConfigsMap && serverConfigsMap[id] && serverConfigsMap[id].department) {
@@ -487,7 +635,7 @@
         const seen = {};
         function addClient(name) {
           const clean = String(name || '').trim();
-          if (!clean || clean === '__ADD_NEW_CLIENT__') return;
+          if (!clean || clean === '__ADD_NEW_CLIENT__' || isClientArchived_(clean)) return;
           const key = clean.toLowerCase();
           if (!seen[key]) {
             seen[key] = true;
@@ -501,7 +649,7 @@
             addClient(getCampaignClient_(c.id));
           });
         }
-        return merged.length > 0 ? merged : ['Growth Target', 'Pilot Acme'];
+        return merged.length > 0 ? merged : ['Growth Target'];
       }
 
       function getCampaignsForClient_(clientName) {
@@ -588,7 +736,7 @@
           select.appendChild(opt);
         });
 
-        if (!matched && target && target !== '__ADD_NEW_CLIENT__') {
+        if (!matched && target && target !== '__ADD_NEW_CLIENT__' && !isClientArchived_(target)) {
           const legacyOpt = document.createElement('option');
           legacyOpt.value = target;
           legacyOpt.textContent = target;
@@ -674,19 +822,19 @@
           populateNewCampaignDefaults_(selectedClient);
           const suggestedId = document.getElementById('campaignIdInput').value;
           setPipelineBusy_(true);
-          showStatus('🔄 Switching workspace to "' + selectedClient + '" and filtering Agent Settings...', 'info');
+          showStatus('🔄 Switching workspace to "' + selectedClient + '" and filtering Campaigns & Agent Settings...', 'info');
           google.script.run
             .withSuccessHandler(function(res) {
               setPipelineBusy_(false);
               showStatus(
-                '✅ Switched to "' + selectedClient + '" (Agent Settings filtered). Suggested ID "' + suggestedId + '" is ready — customize settings and click Save.',
+                '✅ Switched to "' + selectedClient + '" (Campaigns & Agent Settings filtered). Suggested ID "' + suggestedId + '" is ready — customize settings and click Save.',
                 'success'
               );
             })
             .withFailureHandler(function(err) {
               setPipelineBusy_(false);
               showStatus(
-                '🆕 Switched to "' + selectedClient + '" (suggested ID: "' + suggestedId + '"). Agent Settings filter note: ' + err.message,
+                '🆕 Switched to "' + selectedClient + '" (suggested ID: "' + suggestedId + '"). Sheet filter note: ' + err.message,
                 'info'
               );
             })
@@ -721,6 +869,13 @@
             btnCancel.disabled = false;
             setPipelineBusy_(false);
             document.getElementById('newClientBox').style.display = 'none';
+            if (res && Array.isArray(res.inactiveClients)) {
+              serverInactiveClients = res.inactiveClients;
+            } else {
+              serverInactiveClients = (serverInactiveClients || []).filter(function(item) {
+                return String(item || '').trim().toLowerCase() !== newName.toLowerCase();
+              });
+            }
             if (res && res.clients) {
               serverClients = res.clients;
             } else if (serverClients.indexOf(newName) < 0) {
@@ -791,12 +946,14 @@
         google.script.run
           .withSuccessHandler(function(res) {
             if (res) {
+              serverInactiveClients = Array.isArray(res.inactiveClients) ? res.inactiveClients : [];
               if (res.clients) serverClients = res.clients;
               if (res.campaigns) {
                 serverCampaigns = res.campaigns;
                 serverConfigsMap = res.configsMap || {};
 
-                let targetClient = previousClient || 'Growth Target';
+                const activeClientsList = getAllKnownClients_(serverClients);
+                let targetClient = previousClient || activeClientsList[0] || 'Growth Target';
                 let targetCampaignId = '';
 
                 if (preferredId && serverConfigsMap[preferredId]) {
@@ -813,22 +970,31 @@
                   targetCampaignId = clientCampaigns.length > 0 ? clientCampaigns[0].id : '__NEW_CAMPAIGN__';
                 }
 
+                let archivedFallbackClient = '';
+                if (isClientArchived_(targetClient)) {
+                  archivedFallbackClient = targetClient;
+                  targetClient = activeClientsList[0] || 'Growth Target';
+                  const fallbackList = getCampaignsForClient_(targetClient);
+                  targetCampaignId = fallbackList.length > 0 ? fallbackList[0].id : '__NEW_CAMPAIGN__';
+                }
+
                 renderClientOptions(serverClients, targetClient);
                 const selectedCamp = renderCampaignOptionsForClient(targetClient, targetCampaignId);
 
                 if (selectedCamp && selectedCamp !== '__NEW_CAMPAIGN__' && serverConfigsMap[selectedCamp]) {
                   populateFormWithData(serverConfigsMap[selectedCamp]);
-                } else if (!preferredId && previousCampaignVal === '__NEW_CAMPAIGN__') {
+                } else if (!preferredId && !archivedFallbackClient && previousCampaignVal === '__NEW_CAMPAIGN__') {
                   updateClientScopeBadge_();
                 } else {
                   populateNewCampaignDefaults_(targetClient);
                 }
 
                 if (!quiet) {
-                  showStatus(
-                    'Loaded ' + serverCampaigns.length + ' campaign(s) & ' + getAllKnownClients_().length + ' client(s).',
-                    'success'
-                  );
+                  let msg = 'Loaded ' + serverCampaigns.length + ' campaign(s) & ' + activeClientsList.length + ' active client(s).';
+                  if (serverInactiveClients.length > 0) {
+                    msg += ' Archived (Inactive): ' + serverInactiveClients.join(', ') + '.';
+                  }
+                  showStatus(msg, 'success');
                 }
               }
             }
@@ -841,16 +1007,9 @@
 
       function applyDepartmentPreset(preset) {
         const area = document.getElementById('customBusinessNeeds');
-        if (preset === 'procurement') {
-          area.value = "- High vendor questionnaire drop-off rate during procurement audits\n- Managing Scope 3 vendor emissions and Tier-1 ESG supply chain transparency\n- Eliminating manual spreadsheet follow-ups with suppliers";
-        } else if (preset === 'cybersecurity') {
-          area.value = "- Automating SOC 2 / ISO 27001 continuous compliance controls\n- Migrating legacy infrastructure to AWS/GCP with security guardrails\n- Eliminating developer bandwidth lost to manual audit evidence gathering";
-        } else if (preset === 'enterprise_saas') {
-          area.value = "- Modernizing legacy ERP to cloud architecture\n- Streamlining engineering sprint velocity with banking partner API compliance\n- Reducing high technical debt in CI/CD pipeline";
-        } else if (preset === 'fintech') {
-          area.value = "- Heavy regulatory scrutiny from Tier-1 banking partners\n- Automating continuous financial transaction reporting & AML compliance\n- Managing client capital under strict audit requirements";
-        } else if (preset === 'hr_talent') {
-          area.value = "- Rapid engineering team expansion causing compliance onboarding bottlenecks\n- High attrition among senior developers burdened by compliance chores\n- Multi-region distributed payroll compliance";
+        if (preset && PAIN_POINT_PRESETS_[preset]) {
+          area.value = PAIN_POINT_PRESETS_[preset];
+          document.getElementById('presetNeedSelect').value = preset;
         }
       }
 
@@ -927,7 +1086,7 @@
         document.getElementById('autoSendEnabled').checked = false;
 
         document.getElementById('aiProviderSelect').value = 'GEMINI';
-        document.getElementById('aiModelInput').value = 'gemini-3.8-flash';
+        renderAiModelOptions_('GEMINI', 'gemini-3.8-flash');
 
         document.getElementById('emailVerifierSelect').value = 'ZeroBounce';
         document.getElementById('emailEndpoint').value = '';
@@ -947,7 +1106,6 @@
         const cid = data.id || '';
         document.getElementById('campaignIdInput').value = cid;
         document.getElementById('campaignNameInput').value = data.name || cid;
-        document.getElementById('presetNeedSelect').value = '';
         document.getElementById('newClientBox').style.display = 'none';
 
         const targetClient = data.department || getCampaignClient_(cid);
@@ -974,7 +1132,10 @@
         document.getElementById('targetTitles').value = data.titles || '';
         document.getElementById('campaignFocus').value = data.campaignFocus || '';
         document.getElementById('searchKeywords').value = data.searchKeywords || '';
-        document.getElementById('customBusinessNeeds').value = data.customBusinessNeeds || '';
+
+        const customNeedsText = data.customBusinessNeeds || '';
+        document.getElementById('customBusinessNeeds').value = customNeedsText;
+        document.getElementById('presetNeedSelect').value = detectMatchingPreset_(customNeedsText, data.presetNeed);
 
         document.getElementById('incEsgObligations').checked = data.incEsgObligations !== false;
         document.getElementById('incEsgMaturity').checked = data.incEsgMaturity !== false;
@@ -1000,9 +1161,9 @@
         document.getElementById('humanApprovalRequired').checked = data.humanApprovalRequired !== false;
         document.getElementById('autoSendEnabled').checked = data.autoSendEnabled === true;
 
-        const aiProv = data.aiProvider || 'GEMINI';
+        const aiProv = String(data.aiProvider || 'GEMINI').toUpperCase().indexOf('OPENAI') >= 0 ? 'OPENAI' : 'GEMINI';
         document.getElementById('aiProviderSelect').value = aiProv;
-        document.getElementById('aiModelInput').value = data.aiModel || (aiProv === 'GEMINI' ? 'gemini-3.8-flash' : 'gpt-4o');
+        renderAiModelOptions_(aiProv, data.aiModel || (aiProv === 'GEMINI' ? 'gemini-3.8-flash' : 'gpt-4o'));
 
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
@@ -1062,9 +1223,8 @@
 
       function onProviderChanged() {
         const p = document.getElementById('aiProviderSelect').value;
-        const m = document.getElementById('aiModelInput');
-        if (p === 'GEMINI') m.value = 'gemini-3.8-flash';
-        if (p === 'OPENAI') m.value = 'gpt-4o';
+        const defaultModel = (p === 'OPENAI') ? 'gpt-4o' : 'gemini-3.8-flash';
+        renderAiModelOptions_(p, defaultModel);
       }
 
       function onVerifierChanged() {
@@ -1129,6 +1289,12 @@
           document.getElementById('campaignIdInput').focus();
           return;
         }
+        if (document.getElementById('aiModelSelect').value === '__CUSTOM_MODEL__' &&
+            !document.getElementById('aiModelCustomInput').value.trim()) {
+          showStatus('⚠️ Please enter a Custom AI Model ID or select a preset model.', 'error');
+          document.getElementById('aiModelCustomInput').focus();
+          return;
+        }
 
         const payload = {
           id: cid,
@@ -1145,6 +1311,7 @@
           titles: document.getElementById('targetTitles').value.trim(),
           campaignFocus: document.getElementById('campaignFocus').value.trim(),
           searchKeywords: document.getElementById('searchKeywords').value.trim(),
+          presetNeed: document.getElementById('presetNeedSelect').value,
           customBusinessNeeds: document.getElementById('customBusinessNeeds').value.trim(),
 
           incEsgObligations: document.getElementById('incEsgObligations').checked,
@@ -1172,7 +1339,7 @@
           autoSendEnabled: document.getElementById('autoSendEnabled').checked,
 
           aiProvider: document.getElementById('aiProviderSelect').value,
-          aiModel: document.getElementById('aiModelInput').value.trim() || 'gemini-3.8-flash',
+          aiModel: getSelectedAiModel_(),
 
           emailVerifier: document.getElementById('emailVerifierSelect').value,
           emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
