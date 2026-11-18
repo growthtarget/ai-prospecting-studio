@@ -518,6 +518,18 @@ function setupCampaignConfigurationTab(ss) {
 
   styleHeaderRow(sheet);
 
+  const senderProviders = [
+    'Workspace Gmail (Drafts Only)',
+    'Workspace Gmail (Direct Send)',
+    'Google Workspace (Drafts Only)',
+    'Google Workspace (Direct Send)',
+    'Microsoft 365 (Drafts Only)',
+    'Microsoft 365 (Direct Send)',
+    'Smartlead',
+    'Instantly',
+    'Custom Webhook'
+  ];
+
   const strictRules = {
     'DEPARTMENT': activeClients,
     'RESEARCH_DEPTH': ['Standard', 'Deep Persona', 'Comprehensive / Forensic'],
@@ -527,8 +539,8 @@ function setupCampaignConfigurationTab(ss) {
     'AI_PROVIDER': ['GEMINI', 'OPENAI'],
     'PRIMARY_AI_PROVIDER': ['GEMINI', 'OPENAI'],
     'EMAIL_VERIFICATION_PROVIDER': ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None'],
-    'EMAIL_SENDER_PROVIDER': ['Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Google Workspace (Drafts Only)', 'Google Workspace (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'],
-    'DISPATCH_MODE': ['Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Google Workspace (Drafts Only)', 'Google Workspace (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'],
+    'EMAIL_SENDER_PROVIDER': senderProviders,
+    'DISPATCH_MODE': senderProviders,
     'INCLUDE_ESG_OBLIGATIONS': ['TRUE', 'FALSE'],
     'INCLUDE_ESG_MATURITY': ['TRUE', 'FALSE'],
     'INCLUDE_SUPPLY_CHAIN': ['TRUE', 'FALSE'],
@@ -605,7 +617,17 @@ function setupCampaignsTabDropdowns(ss) {
   applyDropdownToRange(sheet.getRange('I2:I500'), ['Standard', 'Deep Persona', 'Comprehensive / Forensic'], false);
   applyDropdownToRange(sheet.getRange('R2:R500'), ['GEMINI', 'OPENAI'], false);
   applyDropdownToRange(sheet.getRange('T2:T500'), ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None'], false);
-  applyDropdownToRange(sheet.getRange('V2:V500'), ['Workspace Gmail (Drafts Only)', 'Workspace Gmail (Direct Send)', 'Google Workspace (Drafts Only)', 'Google Workspace (Direct Send)', 'Smartlead', 'Instantly', 'Custom Webhook'], false);
+  applyDropdownToRange(sheet.getRange('V2:V500'), [
+    'Workspace Gmail (Drafts Only)',
+    'Workspace Gmail (Direct Send)',
+    'Google Workspace (Drafts Only)',
+    'Google Workspace (Direct Send)',
+    'Microsoft 365 (Drafts Only)',
+    'Microsoft 365 (Direct Send)',
+    'Smartlead',
+    'Instantly',
+    'Custom Webhook'
+  ], false);
 }
 
 /**
@@ -796,6 +818,9 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
   const hasOpenAi = checkLocalPropertyConfigured('OPENAI_API_KEY');
   const hasSmartlead = checkLocalPropertyConfigured('SMARTLEAD_API_KEY');
   const hasInstantly = checkLocalPropertyConfigured('INSTANTLY_API_KEY');
+  const hasMsTenantId = checkLocalPropertyConfigured('MS_TENANT_ID');
+  const hasMsClientId = checkLocalPropertyConfigured('MS_CLIENT_ID');
+  const hasMsClientSecret = checkLocalPropertyConfigured('MS_CLIENT_SECRET');
   const hasVerifier = checkLocalPropertyConfigured('VERIFIER_API_KEY', [
     'EMAIL_VERIFICATION_API_KEY',
     'ZEROBOUNCE_API_KEY',
@@ -817,6 +842,9 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     ['API Credentials', 'VERIFIER_API_KEY', hasVerifier ? protectedMsg : '', 'Growth Target verifier API key (encrypted in Script Properties)'],
     ['Outreach Sequencers', 'SMARTLEAD_API_KEY', hasSmartlead ? protectedMsg : '', 'Growth Target Smartlead key (encrypted in Script Properties)'],
     ['Outreach Sequencers', 'INSTANTLY_API_KEY', hasInstantly ? protectedMsg : '', 'Growth Target Instantly key (encrypted in Script Properties)'],
+    ['Outreach Microsoft 365', 'MS_TENANT_ID', hasMsTenantId ? protectedMsg : '', 'Growth Target Microsoft 365 Directory (Tenant) ID (encrypted in Script Properties)'],
+    ['Outreach Microsoft 365', 'MS_CLIENT_ID', hasMsClientId ? protectedMsg : '', 'Growth Target Microsoft 365 Application (Client) ID (encrypted in Script Properties)'],
+    ['Outreach Microsoft 365', 'MS_CLIENT_SECRET', hasMsClientSecret ? protectedMsg : '', 'Growth Target Microsoft 365 Client Secret (encrypted in Script Properties)'],
     ['Budget Guardrails', 'DAILY_SPEND_CAP_USD', '10.00', 'Growth Target daily API spend limit in USD (editable)'],
     ['Budget Guardrails', 'MIN_VERIFIER_CREDITS', '500', 'Growth Target min verifier credits before email alert (editable)']
   ];
@@ -828,7 +856,10 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     'VERIFIERAPIKEY': hasVerifier ? protectedMsg : '',
     'EMAILVERIFICATIONAPIKEY': hasVerifier ? protectedMsg : '',
     'SMARTLEADAPIKEY': hasSmartlead ? protectedMsg : '',
-    'INSTANTLYAPIKEY': hasInstantly ? protectedMsg : ''
+    'INSTANTLYAPIKEY': hasInstantly ? protectedMsg : '',
+    'MSTENANTID': hasMsTenantId ? protectedMsg : '',
+    'MSCLIENTID': hasMsClientId ? protectedMsg : '',
+    'MSCLIENTSECRET': hasMsClientSecret ? protectedMsg : ''
   };
   const categorySyncByKey = {};
   const descriptionSyncByKey = {};
@@ -869,6 +900,9 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     const relayStatus = (cRelayUrl && cRelaySec)
       ? protectedMsg
       : ((cRelayUrl || cRelaySec) ? 'Incomplete (Set both _URL and _SECRET in Script Properties)' : '');
+    const cMsTenantId = checkClientPropertyConfigured(prefix, ['MS_TENANT_ID']);
+    const cMsClientId = checkClientPropertyConfigured(prefix, ['MS_CLIENT_ID']);
+    const cMsClientSecret = checkClientPropertyConfigured(prefix, ['MS_CLIENT_SECRET']);
 
     const cRows = [
       [catLabel, prefix + 'GEMINI_API_KEY', cGemini ? protectedMsg : '', clientName + ' Gemini API key (add in Project Settings > Script Properties)'],
@@ -878,6 +912,9 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
       [catLabel, prefix + 'SMARTLEAD_API_KEY', cSmartlead ? protectedMsg : '', clientName + ' Smartlead API key (add in Script Properties)'],
       [catLabel, prefix + 'INSTANTLY_API_KEY', cInstantly ? protectedMsg : '', clientName + ' Instantly API key (add in Script Properties)'],
       [catLabel, prefix + 'GMAIL_RELAY_URL', relayStatus, clientName + ' Google Workspace Relay (_URL and _SECRET in Script Properties)'],
+      [catLabel, prefix + 'MS_TENANT_ID', cMsTenantId ? protectedMsg : '', clientName + ' Microsoft 365 Directory (Tenant) ID (add in Script Properties)'],
+      [catLabel, prefix + 'MS_CLIENT_ID', cMsClientId ? protectedMsg : '', clientName + ' Microsoft 365 Application (Client) ID (add in Script Properties)'],
+      [catLabel, prefix + 'MS_CLIENT_SECRET', cMsClientSecret ? protectedMsg : '', clientName + ' Microsoft 365 Client Secret (add in Script Properties)'],
       [catLabel, prefix + 'DAILY_SPEND_CAP_USD', '10.00', clientName + ' daily API spend limit in USD (editable)'],
       [catLabel, prefix + 'MIN_VERIFIER_CREDITS', '500', clientName + ' min verifier credits before alert (editable)']
     ];

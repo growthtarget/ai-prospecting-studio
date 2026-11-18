@@ -725,7 +725,7 @@ function onOpen() {
     .addItem('✏️ Mark Selected: Needs Editing', 'markSelectedProspectNeedsEditing')
     .addItem('❌ Reject Selected Prospect', 'rejectSelectedProspect')
     .addSeparator()
-    .addItem('📝 Create Gmail Drafts (Safe Review)', 'createGmailDraftsForApprovedProspects')
+    .addItem('📝 Create Outreach Drafts (Safe Review)', 'createGmailDraftsForApprovedProspects')
     .addItem('✉️ Send Approved Outreach Emails', 'sendApprovedOutreachEmails')
     .addSeparator()
     .addItem('❓ Check Spreadsheet Setup', 'runStudioSpreadsheetAudit')

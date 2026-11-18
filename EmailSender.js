@@ -6,12 +6,13 @@
  * File: EmailSender.gs / EmailSender.js
  * 
  * CAPABILITIES:
- * 1. Multi-Provider Dispatch: Google Workspace (Local & Client Relay), Smartlead,
- *    Instantly, Custom Webhooks.
+ * 1. Multi-Provider Dispatch: Google Workspace (Local & Client Relay),
+ *    Microsoft 365 / Exchange Online (Drafts Only & Direct Send via Graph API),
+ *    Smartlead, Instantly, Custom Webhooks.
  * 2. Strict Client Isolation: External clients strictly require CLIENT_{NAME}_*
  *    credentials in Script Properties (zero fallback to local keys or personal Gmail).
  * 3. Campaign Isolation: Resolves sender profile and provider dynamically per prospect Campaign ID.
- * 4. Sender Identity & Mailbox Stamping: Attaches Sender Display Name, Sender Email/Alias,
+ * 4. Sender Identity & Mailbox Stamping: Attaches Sender Display Name, Sender Email/Mailbox,
  *    and Reply-To Email address to drafts and outreach emails.
  * 5. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
  * ============================================================================
@@ -25,7 +26,8 @@ function sendApprovedOutreachEmails() {
 }
 
 /**
- * Force creates Gmail Drafts regardless of provider setting (Safe testing & review mode).
+ * Force creates Drafts regardless of provider Direct Send setting (Safe testing & review mode).
+ * Routes Microsoft 365 campaigns to Microsoft 365 Drafts and all other campaigns to Workspace Gmail Drafts.
  */
 function createGmailDraftsForApprovedProspects() {
   processOutreachQueue_(true);
@@ -35,7 +37,7 @@ function createGmailDraftsForApprovedProspects() {
  * Core outreach processor.
  * Resolves settings per prospect row, ensuring complete campaign and client isolation.
  * 
- * @param {boolean} forceDrafts When true, routes all approved prospects to Gmail Drafts
+ * @param {boolean} forceDrafts When true, routes all approved prospects to Drafts Only mode
  */
 function processOutreachQueue_(forceDrafts) {
   let ui = null;
@@ -124,7 +126,7 @@ function processOutreachQueue_(forceDrafts) {
     const msg = 'No approved prospects are pending outreach.\n\n' +
       'To approve a prospect:\n' +
       '1. Set Human Approval Status or Review Status to "Approved"\n' +
-      '2. Ensure Send Status is not already "Sent", "Draft Created in Gmail", or "Suppressed - Not Sent"\n' +
+      '2. Ensure Send Status is not already "Sent", "Draft Created", "Draft Created in Gmail", or "Suppressed - Not Sent"\n' +
       '3. Ensure Business Email, Draft Subject, and Draft Email are filled.';
     if (ui) ui.alert('No Prospects Ready', msg, ui.ButtonSet.OK);
     else Logger.log(msg);
@@ -145,7 +147,7 @@ function processOutreachQueue_(forceDrafts) {
   })));
 
   if (ui) {
-    const modeLabel = forceDrafts ? 'Safe Mode: Workspace Gmail (Drafts Only)' : 'Configured Providers';
+    const modeLabel = forceDrafts ? 'Safe Mode: Drafts Only' : 'Configured Providers';
     const confirm = ui.alert(
       'Confirm Outreach Execution',
       'Mode: ' + modeLabel + '\n' +
@@ -161,26 +163,38 @@ function processOutreachQueue_(forceDrafts) {
   let successCount = 0;
   let failCount = 0;
   const nowStr = new Date().toLocaleString();
+  const msTokenCache = {};
 
   queueToProcess.forEach(function(item) {
     const cId = item.campaignId || 'DEFAULT';
     const campaignConfig = campaignSettingsCache[cId] || getCampaignSenderSettings_(spreadsheet, cId);
 
-    const rawProvider = forceDrafts
-      ? 'Workspace Gmail (Drafts Only)'
-      : String(campaignConfig.emailSenderProvider || 'Workspace Gmail (Drafts Only)').trim();
+    const configuredProvider = String(campaignConfig.emailSenderProvider || 'Workspace Gmail (Drafts Only)').trim();
+    let rawProvider = configuredProvider;
+
+    if (forceDrafts) {
+      const cfgLower = configuredProvider.toLowerCase();
+      if (isMicrosoft365Provider_(cfgLower)) {
+        rawProvider = 'Microsoft 365 (Drafts Only)';
+      } else {
+        rawProvider = 'Workspace Gmail (Drafts Only)';
+      }
+    }
 
     try {
-      dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet);
+      dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet, msTokenCache);
 
+      const lowerProv = rawProvider.toLowerCase();
       let finalStatus = 'Sent';
-      if (rawProvider.toLowerCase().indexOf('draft') >= 0) {
+      if (isMicrosoft365Provider_(lowerProv)) {
+        finalStatus = lowerProv.indexOf('draft') >= 0 ? 'Draft Created' : 'Sent';
+      } else if (lowerProv.indexOf('draft') >= 0) {
         finalStatus = 'Draft Created in Gmail';
       } else if (
-        rawProvider.toLowerCase().indexOf('smartlead') >= 0 ||
-        rawProvider.toLowerCase().indexOf('instantly') >= 0 ||
-        rawProvider.toLowerCase().indexOf('webhook') >= 0 ||
-        rawProvider.toLowerCase().indexOf('custom') >= 0
+        lowerProv.indexOf('smartlead') >= 0 ||
+        lowerProv.indexOf('instantly') >= 0 ||
+        lowerProv.indexOf('webhook') >= 0 ||
+        lowerProv.indexOf('custom') >= 0
       ) {
         finalStatus = 'Pushed to Sequencer';
       }
@@ -221,9 +235,23 @@ function processOutreachQueue_(forceDrafts) {
 }
 
 /**
- * Universal Dispatcher: Routes to Google Workspace (local or client relay), Smartlead, Instantly, or Custom Webhook.
+ * Helper: Identifies Microsoft 365 / Exchange Online provider labels.
  */
-function dispatchOutreach_(item, provider, config, spreadsheet) {
+function isMicrosoft365Provider_(providerLower) {
+  const p = String(providerLower || '').toLowerCase();
+  return (
+    p.indexOf('microsoft') >= 0 ||
+    p.indexOf('m365') >= 0 ||
+    p.indexOf('exchange') >= 0 ||
+    p.indexOf('outlook') >= 0
+  );
+}
+
+/**
+ * Universal Dispatcher: Routes to Microsoft 365 (Graph API), Google Workspace (local or client relay),
+ * Smartlead, Instantly, or Custom Webhook.
+ */
+function dispatchOutreach_(item, provider, config, spreadsheet, msTokenCache) {
   const p = String(provider || '').toLowerCase();
   const senderName = String(config.senderName || '').trim();
   const senderEmail = String(config.senderEmail || '').trim();
@@ -231,7 +259,12 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
   const clientName = String(config.clientName || 'Growth Target').trim();
   const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
 
-  // 1. Google Workspace Drafts & Direct Send
+  // 1. Microsoft 365 / Exchange Online (Check BEFORE Workspace 'draft'/'direct' match)
+  if (isMicrosoft365Provider_(p)) {
+    return dispatchMicrosoft365Outreach_(item, p, config, spreadsheet, msTokenCache);
+  }
+
+  // 2. Google Workspace Drafts & Direct Send
   if (p.indexOf('draft') >= 0 || p.indexOf('gmail') >= 0 || p.indexOf('workspace') >= 0 || p.indexOf('direct') >= 0) {
     const isDraftMode = p.indexOf('draft') >= 0;
 
@@ -329,7 +362,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
     return { status: isDraftMode ? 'draft_created_client_relay' : 'sent_client_relay' };
   }
 
-  // 2. Smartlead Sequencer Integration (Option B)
+  // 3. Smartlead Sequencer Integration (Option B)
   if (p.indexOf('smartlead') >= 0) {
     const apiKey = getSenderApiKey_('SMARTLEAD_API_KEY', spreadsheet, config);
     const campaignId = String(config.emailSenderEndpoint || config['Smartlead Campaign ID'] || '').trim();
@@ -371,7 +404,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
     return { status: 'pushed_smartlead' };
   }
 
-  // 3. Instantly Sequencer Integration (Option B)
+  // 4. Instantly Sequencer Integration (Option B)
   if (p.indexOf('instantly') >= 0) {
     const apiKey = getSenderApiKey_('INSTANTLY_API_KEY', spreadsheet, config);
     const campaignId = String(config.emailSenderEndpoint || config['Instantly Campaign ID'] || '').trim();
@@ -413,7 +446,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
     return { status: 'pushed_instantly' };
   }
 
-  // 4. Custom HTTPS Webhook (Zapier, Make, n8n, CRM)
+  // 5. Custom HTTPS Webhook (Zapier, Make, n8n, CRM)
   if (p.indexOf('webhook') >= 0 || p.indexOf('custom') >= 0) {
     let webhookUrl = String(config.emailSenderEndpoint || '').trim();
     if (!webhookUrl && typeof resolveClientScopedSecret_ === 'function') {
@@ -472,6 +505,203 @@ function dispatchOutreach_(item, provider, config, spreadsheet) {
   }
 
   throw new Error('Unsupported email sender provider: ' + provider);
+}
+
+/**
+ * Microsoft 365 / Exchange Online Dispatcher (Microsoft Graph API v1.0).
+ * Strictly isolated per Client / Owner using MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET.
+ */
+function dispatchMicrosoft365Outreach_(item, providerLower, config, spreadsheet, msTokenCache) {
+  const clientName = String(config.clientName || 'Growth Target').trim();
+  const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
+  const prefix = (!isLocal && typeof normalizeClientPropertyPrefix_ === 'function')
+    ? normalizeClientPropertyPrefix_(clientName)
+    : '';
+
+  const tenantId = getSenderApiKey_('MS_TENANT_ID', spreadsheet, config);
+  const clientId = getSenderApiKey_('MS_CLIENT_ID', spreadsheet, config);
+  const clientSecret = getSenderApiKey_('MS_CLIENT_SECRET', spreadsheet, config);
+
+  if (!tenantId || !clientId || !clientSecret) {
+    throw new Error(
+      'Missing Microsoft 365 credentials for "' + clientName + '". ' +
+      'Set "' + prefix + 'MS_TENANT_ID", "' + prefix + 'MS_CLIENT_ID", and "' + prefix + 'MS_CLIENT_SECRET" ' +
+      'in Project Settings > Script Properties.'
+    );
+  }
+
+  let senderEmail = String(config.senderEmail || '').trim();
+  if (!senderEmail && typeof resolveClientScopedSecret_ === 'function') {
+    const emailFallback = resolveClientScopedSecret_(
+      ['MS_SENDER_EMAIL'],
+      { campaignId: config.campaignId, clientName: clientName },
+      { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: spreadsheet }
+    );
+    if (emailFallback && emailFallback.key) {
+      senderEmail = String(emailFallback.key).trim();
+    }
+  }
+
+  if (!senderEmail || senderEmail.indexOf('@') < 1) {
+    throw new Error(
+      'Microsoft 365 requires a valid "Sender Email / Mailbox" (Exchange Online mailbox address, e.g. sales@clientdomain.com) ' +
+      'in the Campaign Control Panel Sender Profile.'
+    );
+  }
+
+  const senderName = String(config.senderName || '').trim();
+  const replyToEmail = String(config.replyToEmail || senderEmail).trim();
+  const isDraftMode = String(providerLower || '').toLowerCase().indexOf('draft') >= 0;
+
+  const accessToken = getMicrosoftGraphAccessToken_(tenantId, clientId, clientSecret, clientName, msTokenCache);
+
+  const toRecipient = {
+    emailAddress: {
+      address: item.email
+    }
+  };
+  if (item.leadName) {
+    toRecipient.emailAddress.name = item.leadName;
+  }
+
+  const messageObj = {
+    subject: item.subject,
+    body: {
+      contentType: 'Text',
+      content: item.body
+    },
+    toRecipients: [toRecipient]
+  };
+
+  if (replyToEmail && replyToEmail.indexOf('@') > 0) {
+    const replyAddr = { address: replyToEmail };
+    if (senderName) replyAddr.name = senderName;
+    messageObj.replyTo = [{ emailAddress: replyAddr }];
+  }
+
+  if (isDraftMode) {
+    messageObj.isDraft = true;
+    const draftUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) + '/messages';
+    const draftRes = UrlFetchApp.fetch(draftUrl, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        Authorization: 'Bearer ' + accessToken
+      },
+      payload: JSON.stringify(messageObj),
+      muteHttpExceptions: true
+    });
+
+    const draftCode = draftRes.getResponseCode();
+    const draftText = draftRes.getContentText() || '';
+    if (draftCode < 200 || draftCode >= 300) {
+      throw new Error(parseMicrosoftGraphError_(draftCode, draftText, 'create draft', senderEmail));
+    }
+
+    let parsedDraft = {};
+    try {
+      parsedDraft = JSON.parse(draftText || '{}');
+    } catch (e) {}
+
+    return {
+      status: 'draft_created_microsoft365',
+      draftId: parsedDraft.id || ''
+    };
+  }
+
+  const sendUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) + '/sendMail';
+  const sendRes = UrlFetchApp.fetch(sendUrl, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      Authorization: 'Bearer ' + accessToken
+    },
+    payload: JSON.stringify({
+      message: messageObj,
+      saveToSentItems: true
+    }),
+    muteHttpExceptions: true
+  });
+
+  const sendCode = sendRes.getResponseCode();
+  const sendText = sendRes.getContentText() || '';
+  if (sendCode < 200 || sendCode >= 300) {
+    throw new Error(parseMicrosoftGraphError_(sendCode, sendText, 'send email', senderEmail));
+  }
+
+  return { status: 'sent_microsoft365' };
+}
+
+/**
+ * Retrieves and caches an App-Only Microsoft Graph OAuth2 token via client_credentials flow.
+ */
+function getMicrosoftGraphAccessToken_(tenantId, clientId, clientSecret, clientName, msTokenCache) {
+  const cache = msTokenCache || {};
+  const cacheKey = tenantId + '::' + clientId;
+  const cached = cache[cacheKey];
+
+  if (cached && cached.token && cached.expiresAt > Date.now() + 60000) {
+    return cached.token;
+  }
+
+  const tokenUrl = 'https://login.microsoftonline.com/' + encodeURIComponent(tenantId) + '/oauth2/v2.0/token';
+  const res = UrlFetchApp.fetch(tokenUrl, {
+    method: 'post',
+    payload: {
+      client_id: clientId,
+      client_secret: clientSecret,
+      scope: 'https://graph.microsoft.com/.default',
+      grant_type: 'client_credentials'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = res.getResponseCode();
+  const text = res.getContentText() || '';
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text || '{}');
+  } catch (e) {}
+
+  if (code < 200 || code >= 300 || !parsed.access_token) {
+    const oauthErr = parsed.error_description || parsed.error || text.slice(0, 220);
+    throw new Error(
+      'Microsoft 365 OAuth authentication failed for "' + clientName + '" (HTTP ' + code + '): ' +
+      String(oauthErr).replace(/\s+/g, ' ').trim()
+    );
+  }
+
+  const expiresInSec = Number(parsed.expires_in) || 3599;
+  cache[cacheKey] = {
+    token: parsed.access_token,
+    expiresAt: Date.now() + expiresInSec * 1000
+  };
+
+  return parsed.access_token;
+}
+
+/**
+ * Formats Microsoft Graph HTTP errors into clear operational messages without exposing secrets.
+ */
+function parseMicrosoftGraphError_(statusCode, bodyText, actionLabel, senderEmail) {
+  let errCode = '';
+  let errMsg = String(bodyText || '').slice(0, 250);
+  try {
+    const parsed = JSON.parse(bodyText || '{}');
+    if (parsed && parsed.error) {
+      errCode = String(parsed.error.code || '');
+      errMsg = String(parsed.error.message || errMsg);
+    }
+  } catch (e) {}
+
+  let hint = '';
+  if (statusCode === 403 || errCode === 'ErrorAccessDenied') {
+    hint = ' Ensure Microsoft Graph Application permissions (Mail.ReadWrite for drafts, Mail.Send for direct send) have Admin Consent in Entra ID.';
+  } else if (statusCode === 404 || errCode === 'ResourceNotFound' || errCode === 'ErrorInvalidUser' || errCode === 'MailboxNotEnabledForRESTAPI') {
+    hint = ' Verify "' + senderEmail + '" is an active Exchange Online primary mailbox / UPN.';
+  }
+
+  return 'Microsoft Graph failed to ' + actionLabel + ' (HTTP ' + statusCode + (errCode ? ' - ' + errCode : '') + '): ' + errMsg + hint;
 }
 
 /**
@@ -632,10 +862,27 @@ function getSenderApiKey_(keyName, spreadsheet, config) {
     return resolved.key || '';
   }
 
+  const clientName = ctx.clientName || 'Growth Target';
+  const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
+  if (!isLocal) {
+    const prefix = typeof normalizeClientPropertyPrefix_ === 'function'
+      ? normalizeClientPropertyPrefix_(clientName)
+      : ('CLIENT_' + clientName.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_');
+    const targetClientKey = (prefix + keyName).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const sp = PropertiesService.getScriptProperties().getProperties();
+    for (let k in sp) {
+      if (k.toUpperCase().replace(/[^A-Z0-9]/g, '') === targetClientKey && isValidSenderSecretValue_(sp[k])) {
+        return String(sp[k]).trim();
+      }
+    }
+    throw new Error('Missing client credential "' + prefix + keyName + '" in Project Settings > Script Properties.');
+  }
+
   const targetKey = String(keyName || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
   for (let k in scriptProps) {
+    if (String(k).toUpperCase().indexOf('CLIENT_') === 0) continue;
     if (k.toUpperCase().replace(/[^A-Z0-9]/g, '') === targetKey) {
       if (isValidSenderSecretValue_(scriptProps[k])) return String(scriptProps[k]).trim();
     }
@@ -643,6 +890,7 @@ function getSenderApiKey_(keyName, spreadsheet, config) {
 
   const userProps = PropertiesService.getUserProperties().getProperties();
   for (let k in userProps) {
+    if (String(k).toUpperCase().indexOf('CLIENT_') === 0) continue;
     if (k.toUpperCase().replace(/[^A-Z0-9]/g, '') === targetKey) {
       if (isValidSenderSecretValue_(userProps[k])) return String(userProps[k]).trim();
     }

@@ -363,6 +363,8 @@
           <select id="senderProviderSelect" onchange="onSenderChanged()">
             <option value="Workspace Gmail (Drafts Only)" selected>Workspace Gmail (Drafts Only)</option>
             <option value="Workspace Gmail (Direct Send)">Workspace Gmail (Direct Send)</option>
+            <option value="Microsoft 365 (Drafts Only)">Microsoft 365 (Drafts Only)</option>
+            <option value="Microsoft 365 (Direct Send)">Microsoft 365 (Direct Send)</option>
             <option value="Smartlead">Smartlead (enter campaign ID below)</option>
             <option value="Instantly">Instantly (enter campaign ID below)</option>
             <option value="Custom Webhook">Custom Webhook (enter webhook URL below)</option>
@@ -395,7 +397,7 @@
           <div class="field">
             <label for="senderEmail">Sender Email / Mailbox</label>
             <input type="text" id="senderEmail" placeholder="e.g. sales@evaluater.ai">
-            <div class="hint">For client Workspace Relay, this is their mailbox or alias.</div>
+            <div class="hint" id="senderEmailHint">For Microsoft 365, enter the exact primary mailbox / UPN. For Workspace Relay, enter mailbox or alias.</div>
           </div>
           <div class="field">
             <label for="replyToEmail">Reply-To Email Address</label>
@@ -1180,7 +1182,11 @@
 
         document.getElementById('emailVerifierSelect').value = data.emailVerifier || 'ZeroBounce';
         document.getElementById('emailEndpoint').value = data.emailEndpoint || '';
-        document.getElementById('senderProviderSelect').value = normalizeSenderProviderOption_(data.emailSenderProvider);
+
+        const senderSel = document.getElementById('senderProviderSelect');
+        senderSel.value = normalizeSenderProviderOption_(data.emailSenderProvider);
+        if (!senderSel.value) senderSel.value = 'Workspace Gmail (Drafts Only)';
+
         document.getElementById('senderEndpointInput').value = data.emailSenderEndpoint || '';
 
         document.getElementById('senderName').value = data.senderName || '';
@@ -1256,11 +1262,24 @@
         const label = document.getElementById('senderEndpointLabel');
         const input = document.getElementById('senderEndpointInput');
         const hint = document.getElementById('senderEndpointHint');
+        const emailHint = document.getElementById('senderEmailHint');
         const selectedClient = document.getElementById('departmentOwner') ? document.getElementById('departmentOwner').value : 'Growth Target';
         const isLocal = isLocalBrand_(selectedClient);
         const prefix = normalizeClientPrefix_(selectedClient);
 
-        if (p.indexOf('Gmail') >= 0) {
+        if (p.indexOf('Microsoft 365') >= 0) {
+          label.textContent = 'Email Sender Endpoint (Not Required for Microsoft 365)';
+          if (isLocal) {
+            input.placeholder = 'Not required — uses local MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET';
+            hint.textContent = 'Requires MS_TENANT_ID, MS_CLIENT_ID, and MS_CLIENT_SECRET in Script Properties, plus Sender Email / Mailbox below.';
+          } else {
+            input.placeholder = 'Not required — uses ' + prefix + 'MS_* Script Properties';
+            hint.textContent = 'Requires ' + prefix + 'MS_TENANT_ID, ' + prefix + 'MS_CLIENT_ID, and ' + prefix + 'MS_CLIENT_SECRET in Script Properties, plus the client\'s Microsoft 365 primary mailbox in Sender Email below.';
+          }
+          if (emailHint) {
+            emailHint.textContent = 'Required for Microsoft 365: enter the exact Exchange Online primary mailbox / UPN (e.g. sales@clientdomain.com).';
+          }
+        } else if (p.indexOf('Gmail') >= 0) {
           label.textContent = 'Email Sender Endpoint (Not Required for Gmail)';
           if (isLocal) {
             input.placeholder = 'Not required — sends via your local Google Workspace';
@@ -1269,22 +1288,34 @@
             input.placeholder = 'Not required — routed via client Gmail Relay Script Properties';
             hint.textContent = 'Requires ' + prefix + 'GMAIL_RELAY_URL and ' + prefix + 'GMAIL_RELAY_SECRET in Script Properties so emails go from the client\'s Google Workspace mailbox (e.g. sales@evaluater.ai).';
           }
+          if (emailHint) {
+            emailHint.textContent = 'For client Workspace Relay, this is their mailbox or alias.';
+          }
         } else if (p === 'Smartlead') {
           label.textContent = 'Smartlead Campaign ID';
           input.placeholder = 'e.g. 123456';
           hint.textContent = isLocal
             ? 'Enter Smartlead Campaign ID (uses SMARTLEAD_API_KEY).'
             : 'Enter Smartlead Campaign ID (uses ' + prefix + 'SMARTLEAD_API_KEY).';
+          if (emailHint) {
+            emailHint.textContent = 'Sender mailbox associated with your Smartlead campaign.';
+          }
         } else if (p === 'Instantly') {
           label.textContent = 'Instantly Campaign ID';
           input.placeholder = 'e.g. 987654-abcd-ef01';
           hint.textContent = isLocal
             ? 'Enter Instantly Campaign UUID (uses INSTANTLY_API_KEY).'
             : 'Enter Instantly Campaign UUID (uses ' + prefix + 'INSTANTLY_API_KEY).';
+          if (emailHint) {
+            emailHint.textContent = 'Sender mailbox associated with your Instantly campaign.';
+          }
         } else if (p === 'Custom Webhook') {
           label.textContent = 'Webhook URL (Make, Zapier, CRM)';
           input.placeholder = 'https://hook.eu1.make.com/...';
           hint.textContent = 'Enter the full HTTPS URL where approved leads will be posted.';
+          if (emailHint) {
+            emailHint.textContent = 'Sender email passed in the webhook JSON payload.';
+          }
         }
       }
 
@@ -1308,6 +1339,20 @@
             !document.getElementById('aiModelCustomInput').value.trim()) {
           showStatus('⚠️ Please enter a Custom AI Model ID or select a preset model.', 'error');
           document.getElementById('aiModelCustomInput').focus();
+          return;
+        }
+
+        const selectedSenderProvider = document.getElementById('senderProviderSelect').value;
+        const senderEmailVal = document.getElementById('senderEmail').value.trim();
+        if (selectedSenderProvider.indexOf('Microsoft 365') >= 0 && (!senderEmailVal || senderEmailVal.indexOf('@') < 1)) {
+          showStatus('⚠️ Microsoft 365 requires a valid Sender Email / Mailbox (e.g. sales@clientdomain.com) in Section 5 before saving.', 'error');
+          const secEmail = document.getElementById('secEmail');
+          const iconEmail = document.getElementById('iconEmail');
+          if (secEmail && secEmail.style.display === 'none') {
+            secEmail.style.display = 'block';
+            if (iconEmail) iconEmail.textContent = '▼';
+          }
+          document.getElementById('senderEmail').focus();
           return;
         }
 
@@ -1358,13 +1403,13 @@
 
           emailVerifier: document.getElementById('emailVerifierSelect').value,
           emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
-          emailSenderProvider: document.getElementById('senderProviderSelect').value,
+          emailSenderProvider: selectedSenderProvider,
           emailSenderEndpoint: document.getElementById('senderEndpointInput').value.trim(),
 
           senderName: document.getElementById('senderName').value.trim(),
           senderTitle: document.getElementById('senderTitle').value.trim(),
           senderCompany: document.getElementById('senderCompany').value.trim(),
-          senderEmail: document.getElementById('senderEmail').value.trim(),
+          senderEmail: senderEmailVal,
           replyToEmail: document.getElementById('replyToEmail').value.trim()
         };
 
