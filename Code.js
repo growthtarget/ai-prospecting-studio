@@ -2197,6 +2197,12 @@ function rejectSelectedProspect() {
   updateSelectedProspectStatus('Rejected');
 }
 
+/**
+ * Updates Review Status, Human Approval Status, Reviewer metadata, and Queue Status
+ * across ALL selected visible prospect rows in "Prospect Review Queue" (supporting
+ * both dragged selections and Ctrl/Cmd-clicked separate rows, while skipping rows
+ * hidden by active filters).
+ */
 function updateSelectedProspectStatus(statusText) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return;
@@ -2212,46 +2218,126 @@ function updateSelectedProspectStatus(statusText) {
     return;
   }
 
-  const row = sheet.getActiveCell().getRow();
-  if (row <= 1) {
+  const lastDataRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastDataRow <= 1 || lastCol < 1) {
     let ui;
     try {
       ui = SpreadsheetApp.getUi();
-      ui.alert('Please select a prospect row (row 2 or below).');
+      ui.alert('No prospect rows found in Prospect Review Queue.');
     } catch (e) {
-      Logger.log('Please select a prospect row (row 2 or below).');
+      Logger.log('No prospect rows found in Prospect Review Queue.');
+    }
+    return;
+  }
+
+  let ranges = [];
+  try {
+    const rangeList = sheet.getActiveRangeList ? sheet.getActiveRangeList() : null;
+    if (rangeList) {
+      ranges = rangeList.getRanges() || [];
+    }
+  } catch (e) {}
+
+  if (!ranges || ranges.length === 0) {
+    try {
+      const singleRange = sheet.getActiveRange ? sheet.getActiveRange() : null;
+      if (singleRange) ranges = [singleRange];
+    } catch (e) {}
+  }
+  if (!ranges || ranges.length === 0) {
+    try {
+      const activeCell = sheet.getActiveCell ? sheet.getActiveCell() : null;
+      if (activeCell) ranges = [activeCell];
+    } catch (e) {}
+  }
+
+  const previewCols = Math.min(lastCol, 18);
+  const previewRows = sheet.getRange(2, 1, lastDataRow - 1, previewCols).getValues();
+  const rowSet = {};
+
+  for (let i = 0; i < ranges.length; i++) {
+    const rng = ranges[i];
+    if (!rng) continue;
+    const startRow = Math.max(2, rng.getRow());
+    const endRow = Math.min(lastDataRow, rng.getRow() + rng.getNumRows() - 1);
+
+    for (let r = startRow; r <= endRow; r++) {
+      if (rowSet[r]) continue;
+      let isHidden = false;
+      try {
+        if ((typeof sheet.isRowHiddenByFilter === 'function' && sheet.isRowHiddenByFilter(r)) ||
+            (typeof sheet.isRowHiddenByUser === 'function' && sheet.isRowHiddenByUser(r))) {
+          isHidden = true;
+        }
+      } catch (e) {}
+      if (isHidden) continue;
+
+      const rowPreview = previewRows[r - 2] || [];
+      const hasData = rowPreview.some(function(cell) {
+        return cell !== '' && cell !== null && cell !== undefined;
+      });
+      if (hasData) {
+        rowSet[r] = true;
+      }
+    }
+  }
+
+  const targetRows = Object.keys(rowSet).map(Number).sort(function(a, b) { return a - b; });
+  if (targetRows.length === 0) {
+    let ui;
+    try {
+      ui = SpreadsheetApp.getUi();
+      ui.alert('Please select one or more visible prospect rows (row 2 or below).');
+    } catch (e) {
+      Logger.log('Please select one or more visible prospect rows (row 2 or below).');
     }
     return;
   }
 
   const user = getSafeReviewerEmail_();
   const now = new Date().toLocaleString();
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(function(h) {
+  const headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
     return String(h || '').trim();
   });
 
-  function setCol(headerName, fallbackCol, val) {
+  function resolveCol(headerName, fallbackCol) {
     const idx = headers.indexOf(headerName);
-    const col = idx >= 0 ? idx + 1 : fallbackCol;
-    sheet.getRange(row, col).setValue(val);
+    return idx >= 0 ? idx + 1 : fallbackCol;
   }
 
-  setCol('Review Status', 18, statusText);
-  setCol('Reviewer', 19, user);
-  setCol('Reviewed At', 21, now);
-  setCol('Human Approval Status', 22, statusText);
+  const reviewStatusCol = resolveCol('Review Status', 18);
+  const reviewerCol = resolveCol('Reviewer', 19);
+  const reviewedAtCol = resolveCol('Reviewed At', 21);
+  const approvalStatusCol = resolveCol('Human Approval Status', 22);
+  const approvedByCol = resolveCol('Approved By', 23);
+  const approvedAtCol = resolveCol('Approved At', 24);
+  const queueStatusCol = resolveCol('Queue Status', 41);
 
-  if (statusText === 'Approved') {
-    setCol('Approved By', 23, user);
-    setCol('Approved At', 24, now);
-  } else if (statusText === 'Rejected') {
-    setCol('Queue Status', 41, 'Rejected');
-  } else if (statusText === 'Needs Review') {
-    setCol('Queue Status', 41, 'Ready for Review');
-  }
+  targetRows.forEach(function(row) {
+    sheet.getRange(row, reviewStatusCol).setValue(statusText);
+    sheet.getRange(row, reviewerCol).setValue(user);
+    sheet.getRange(row, reviewedAtCol).setValue(now);
+    sheet.getRange(row, approvalStatusCol).setValue(statusText);
+
+    if (statusText === 'Approved') {
+      sheet.getRange(row, approvedByCol).setValue(user);
+      sheet.getRange(row, approvedAtCol).setValue(now);
+    } else if (statusText === 'Rejected') {
+      sheet.getRange(row, queueStatusCol).setValue('Rejected');
+    } else if (statusText === 'Needs Review') {
+      sheet.getRange(row, queueStatusCol).setValue('Ready for Review');
+    }
+  });
 
   SpreadsheetApp.flush();
-  ss.toast('Row ' + row + ' updated to: ' + statusText, 'Status Updated', 3);
+  const rowPreviewLabel = targetRows.length <= 8
+    ? targetRows.join(', ')
+    : (targetRows.slice(0, 5).join(', ') + '...');
+  const toastMsg = targetRows.length === 1
+    ? ('Row ' + targetRows[0] + ' updated to: ' + statusText)
+    : ('Updated ' + targetRows.length + ' prospect rows (' + rowPreviewLabel + ') to: ' + statusText);
+  ss.toast(toastMsg, 'Status Updated', 4);
 }
 
 function triggerPilotRun() {
