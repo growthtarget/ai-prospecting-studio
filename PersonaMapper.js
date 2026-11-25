@@ -9,7 +9,7 @@
  * 1. Multi-AI Support: Routes dynamically to GEMINI (Grounding) or OPENAI (GPT-4o)
  *    using strict Client-Scoped API keys (zero local fallback for clients).
  * 2. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
- *    Custom HTTPS keys strictly per Client / Owner.
+ *    Custom HTTPS keys strictly per Client / Owner (validated pre-flight before AI calls).
  * 3. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
  *    opt-out emails, and role-based accounts before queuing.
  * 4. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 cols).
@@ -33,6 +33,31 @@ const PERSONA_MAPPER_SHEETS_ = {
   queue: 'Prospect Review Queue',
   evidence: 'Research Evidence'
 };
+
+/**
+ * Validates budget cap & external client verifier keys BEFORE burning paid AI tokens.
+ */
+function validatePersonaPreRunGuardrails_(spreadsheet, campaignId, settings) {
+  const clientName = (settings && settings['Department']) || 'Growth Target';
+
+  if (typeof checkApiBudgetGuardrails_ === 'function') {
+    checkApiBudgetGuardrails_(campaignId, clientName);
+  }
+
+  const verifierProvider = String((settings && settings['Email Verification Provider']) || 'ZeroBounce').trim();
+  if (verifierProvider !== 'None') {
+    resolveVerifierApiKey_(spreadsheet, settings);
+    if (verifierProvider.toLowerCase().indexOf('custom') >= 0) {
+      const endpoint = String((settings && settings['Email Verification Endpoint']) || '').trim();
+      const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
+      if (!isLocal && (!endpoint || !/^https:\/\//i.test(endpoint))) {
+        throw new Error(
+          'Custom HTTPS email verifier for "' + clientName + '" requires a valid https:// Email Verification Endpoint before running Persona Mapper.'
+        );
+      }
+    }
+  }
+}
 
 /**
  * Called directly from the Sidebar Control Panel (Silent execution, returns JSON)
@@ -60,6 +85,9 @@ function runPersonaMapperFromSidebar(campaignId) {
     if (!companies.length) {
       return { success: false, message: 'No qualified companies found for campaign ' + activeId + ' in Company Database. Run Step 1 first!' };
     }
+
+    // Fail-fast before making any paid AI or Verifier API calls
+    validatePersonaPreRunGuardrails_(spreadsheet, activeId, settings);
 
     const suppressionRules = loadSuppressionRulesFromSettings_(spreadsheet);
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
@@ -197,6 +225,15 @@ function runPersonaMapperForSelectedCampaign() {
     if (!companies.length) {
       if (ui) ui.alert('No qualified companies found under campaign ' + campaignId + ' in Company Database yet. Run Step 1 first.');
       else Logger.log('No qualified companies found for campaign ' + campaignId);
+      return;
+    }
+
+    // Fail-fast before making any paid AI or Verifier API calls
+    try {
+      validatePersonaPreRunGuardrails_(spreadsheet, campaignId, settings);
+    } catch (preErr) {
+      if (ui) ui.alert('Pre-Flight Check Blocked Run', preErr.message, ui.ButtonSet.OK);
+      else Logger.log('Pre-Flight Check Blocked Run: ' + preErr.message);
       return;
     }
 

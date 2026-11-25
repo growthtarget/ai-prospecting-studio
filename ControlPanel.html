@@ -24,6 +24,8 @@
       .btn-success:hover:not(:disabled) { background: #188038; }
       .btn-secondary { background: #fff; color: #174ea6; border: 1px solid #dadce0; }
       .btn-secondary:hover:not(:disabled) { background: #f1f3f4; }
+      .btn-audit { background: #e8f0fe; color: #174ea6; border: 1px solid #d2e3fc; }
+      .btn-audit:hover:not(:disabled) { background: #d2e3fc; }
       .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; margin-top: 0; }
       .row { display: flex; gap: 8px; }
       .row .field { flex: 1; }
@@ -35,6 +37,17 @@
       .client-badge { font-size: 11px; padding: 5px 8px; border-radius: 4px; margin-top: 5px; line-height: 1.35; }
       .client-badge.local { background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
       .client-badge.external { background: #e8f0fe; color: #174ea6; border: 1px solid #d2e3fc; }
+      .budget-pill { font-size: 11px; padding: 6px 8px; border-radius: 4px; margin-bottom: 8px; line-height: 1.35; background: #f1f3f4; color: #3c4043; border: 1px solid #dadce0; }
+      .budget-pill.ok { background: #e6f4ea; color: #137333; border-color: #ceead6; }
+      .budget-pill.warn { background: #fef7e0; color: #b06000; border-color: #fde293; }
+      .budget-pill.over { background: #fce8e6; color: #c5221f; border-color: #fad2cf; font-weight: 600; }
+      .audit-box { display: none; margin-top: 8px; border: 1px solid #dadce0; border-radius: 6px; padding: 8px; background: #f8f9fa; font-size: 11px; line-height: 1.4; }
+      .audit-row { padding: 4px 0; border-bottom: 1px solid #eceff1; word-break: break-word; }
+      .audit-row:last-child { border-bottom: none; padding-bottom: 0; }
+      .audit-tag { font-weight: 700; }
+      .audit-tag.pass { color: #137333; }
+      .audit-tag.warn { color: #b06000; }
+      .audit-tag.fail { color: #c5221f; }
       .new-client-box { display: none; background: #f1f3f4; border: 1px solid #dadce0; border-radius: 6px; padding: 8px; margin-top: 6px; }
       .new-client-actions { display: flex; gap: 6px; margin-top: 6px; }
       .new-client-actions .btn { margin-top: 0; padding: 6px 10px; font-size: 11px; }
@@ -420,6 +433,9 @@
     <!-- Action Pipeline -->
     <div class="card">
       <div class="header-title">Pipeline Execution</div>
+      <div id="clientBudgetMeter" class="budget-pill">💰 Daily Spend: Checking client cap...</div>
+      <button type="button" id="btnAuditConnections" class="btn btn-audit" onclick="runConnectionBudgetAudit()">🩺 Test Connections &amp; Budget ($0.00 Dry-Run)</button>
+      <div id="auditResultsBox" class="audit-box"></div>
       <button id="btnSaveConfig" class="btn btn-secondary" onclick="saveConfiguration()">💾 Save Campaign Settings</button>
       <button id="btnRunDiscovery" class="btn btn-primary" onclick="runDiscovery()">🔍 Step 1: Discover Companies</button>
       <button id="btnRunPersonaMapper" class="btn btn-primary" onclick="runPersonaMapper()">👤 Step 2: Run Persona Mapper</button>
@@ -557,6 +573,7 @@
           applyDepartmentPreset('procurement');
         }
         refreshDeliverabilitySnapshot_();
+        refreshBudgetSnapshot_();
       };
 
       function setPipelineBusy_(busy) {
@@ -567,8 +584,10 @@
         document.getElementById('btnRefreshCampaigns').disabled = isPipelineBusy;
         document.getElementById('campaignSelect').disabled = isPipelineBusy;
         document.getElementById('departmentOwner').disabled = isPipelineBusy;
+        const btnAudit = document.getElementById('btnAuditConnections');
         const btnSyncDeliv = document.getElementById('btnSyncDeliv');
         const btnRefreshDeliv = document.getElementById('btnRefreshDeliv');
+        if (btnAudit) btnAudit.disabled = isPipelineBusy;
         if (btnSyncDeliv) btnSyncDeliv.disabled = isPipelineBusy;
         if (btnRefreshDeliv) btnRefreshDeliv.disabled = isPipelineBusy;
       }
@@ -887,6 +906,14 @@
         return select.value;
       }
 
+      function clearAuditBox_() {
+        const box = document.getElementById('auditResultsBox');
+        if (box) {
+          box.style.display = 'none';
+          box.innerHTML = '';
+        }
+      }
+
       function onClientOwnerChanged() {
         const select = document.getElementById('departmentOwner');
         const box = document.getElementById('newClientBox');
@@ -898,6 +925,7 @@
           return;
         }
         box.style.display = 'none';
+        clearAuditBox_();
 
         const selectedClient = select.value || 'Growth Target';
         lastValidClientOwner = selectedClient;
@@ -910,6 +938,7 @@
         } else {
           populateNewCampaignDefaults_(selectedClient);
           refreshDeliverabilitySnapshot_();
+          refreshBudgetSnapshot_();
           const suggestedId = document.getElementById('campaignIdInput').value;
           setPipelineBusy_(true);
           showStatus('🔄 Switching workspace to "' + selectedClient + '" and filtering Campaigns, Email Deliverability & Agent Settings...', 'info');
@@ -936,6 +965,7 @@
         document.getElementById('newClientBox').style.display = 'none';
         renderClientOptions(serverClients, lastValidClientOwner || 'Growth Target');
         refreshDeliverabilitySnapshot_();
+        refreshBudgetSnapshot_();
       }
 
       function confirmAddNewClient() {
@@ -959,6 +989,7 @@
             btnSave.disabled = false;
             btnCancel.disabled = false;
             setPipelineBusy_(false);
+            clearAuditBox_();
             document.getElementById('newClientBox').style.display = 'none';
             if (res && Array.isArray(res.inactiveClients)) {
               serverInactiveClients = res.inactiveClients;
@@ -982,6 +1013,7 @@
               onCampaignSelected(true);
             }
             refreshDeliverabilitySnapshot_();
+            refreshBudgetSnapshot_();
             const suggestedId = document.getElementById('campaignIdInput').value;
             showStatus('✅ ' + (res && res.message ? res.message : 'Client added!') + ' Suggested Campaign ID "' + suggestedId + '" is ready to save.', 'success');
           })
@@ -1025,7 +1057,7 @@
         const box = document.getElementById('statusBox');
         box.innerHTML = '';
         box.appendChild(document.createTextNode(String(msg || '')));
-        if (authUrl && /^https:\/\/accounts\.google\.com\//i.test(authUrl)) {
+        if (authUrl && (/^https:\/\/accounts\.google\.com\//i.test(authUrl) || /^https:\/\/script\.google\.com\//i.test(authUrl))) {
           box.appendChild(document.createElement('br'));
           const link = document.createElement('a');
           link.href = authUrl;
@@ -1096,6 +1128,7 @@
                 }
 
                 refreshDeliverabilitySnapshot_();
+                refreshBudgetSnapshot_();
 
                 if (!quiet) {
                   let msg = 'Loaded ' + serverCampaigns.length + ' campaign(s) & ' + activeClientsList.length + ' active client(s).';
@@ -1297,6 +1330,7 @@
       function onCampaignSelected(skipSync, statusPrefix) {
         const cid = document.getElementById('campaignSelect').value;
         if (!cid) return;
+        clearAuditBox_();
 
         if (cid === '__NEW_CAMPAIGN__') {
           const selectedVal = document.getElementById('departmentOwner').value;
@@ -1305,6 +1339,7 @@
             : (lastValidClientOwner || 'Growth Target');
           populateNewCampaignDefaults_(clientName);
           refreshDeliverabilitySnapshot_();
+          refreshBudgetSnapshot_();
           const suggestedId = document.getElementById('campaignIdInput').value;
           showStatus('🆕 Ready to create a new campaign for "' + clientName + '" (suggested ID: "' + suggestedId + '"). Customize fields and click Save.', 'info');
           const idInput = document.getElementById('campaignIdInput');
@@ -1315,6 +1350,7 @@
         const localData = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : { id: cid };
         populateFormWithData(localData);
         refreshDeliverabilitySnapshot_();
+        refreshBudgetSnapshot_();
         showStatus((statusPrefix || '') + 'Loaded configuration for ' + cid, 'info');
 
         if (!skipSync) {
@@ -1329,6 +1365,7 @@
                   renderCampaignOptionsForClient(getCampaignClient_(cid), cid);
                 }
                 refreshDeliverabilitySnapshot_();
+                refreshBudgetSnapshot_();
                 showStatus('✅ ' + (statusPrefix || '') + cid + ' is now active on Dashboard and across all tabs!', 'success');
               }
             })
@@ -1415,6 +1452,145 @@
             emailHint.textContent = 'Sender email passed in the webhook JSON payload.';
           }
         }
+      }
+
+      function refreshBudgetSnapshot_() {
+        const meterEl = document.getElementById('clientBudgetMeter');
+        if (!meterEl) return;
+
+        const ownerVal = document.getElementById('departmentOwner').value;
+        const clientName = (ownerVal && ownerVal !== '__ADD_NEW_CLIENT__')
+          ? ownerVal
+          : (lastValidClientOwner || 'Growth Target');
+        const campSelectVal = document.getElementById('campaignSelect').value;
+        const typedCid = document.getElementById('campaignIdInput').value.trim();
+        const campaignId = (campSelectVal && campSelectVal !== '__NEW_CAMPAIGN__')
+          ? campSelectVal
+          : typedCid;
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (!res || !res.success) return;
+            renderBudgetMeter_(res.clientName, res.todaySpend, res.dailyCap, res.remainingUsd, res.isOverCap);
+          })
+          .withFailureHandler(function(err) {
+            meterEl.className = 'budget-pill';
+            meterEl.textContent = '💰 Daily Spend: Could not check cap (' + err.message + ')';
+          })
+          .getClientBudgetSnapshot(clientName, campaignId);
+      }
+
+      function renderBudgetMeter_(clientName, todaySpend, dailyCap, remainingUsd, isOverCap) {
+        const meterEl = document.getElementById('clientBudgetMeter');
+        if (!meterEl) return;
+        const spentNum = Number(todaySpend) || 0;
+        const capNum = Number(dailyCap) || 0;
+        const remNum = Number(remainingUsd) || 0;
+
+        if (isOverCap || spentNum >= capNum) {
+          meterEl.className = 'budget-pill over';
+          meterEl.textContent = '🛑 ' + clientName + ': $' + spentNum.toFixed(4) + ' / $' + capNum.toFixed(2) + ' daily cap REACHED (Locked)';
+        } else if (capNum > 0 && spentNum >= capNum * 0.8) {
+          meterEl.className = 'budget-pill warn';
+          meterEl.textContent = '⚠️ ' + clientName + ': $' + spentNum.toFixed(4) + ' / $' + capNum.toFixed(2) + ' cap ($' + remNum.toFixed(2) + ' left)';
+        } else {
+          meterEl.className = 'budget-pill ok';
+          meterEl.textContent = '💰 ' + clientName + ': $' + spentNum.toFixed(4) + ' spent today / $' + capNum.toFixed(2) + ' cap ($' + remNum.toFixed(2) + ' left)';
+        }
+      }
+
+      function runConnectionBudgetAudit() {
+        if (isPipelineBusy) return;
+        const ownerVal = document.getElementById('departmentOwner').value;
+        if (!ownerVal || ownerVal === '__ADD_NEW_CLIENT__') {
+          showStatus('⚠️ Select a Client / Owner first before running the connection audit.', 'error');
+          return;
+        }
+
+        const campSelectVal = document.getElementById('campaignSelect').value;
+        const typedCid = document.getElementById('campaignIdInput').value.trim();
+        const campaignId = (campSelectVal && campSelectVal !== '__NEW_CAMPAIGN__')
+          ? campSelectVal
+          : typedCid;
+
+        const auditInput = {
+          clientName: ownerVal,
+          campaignId: campaignId,
+          aiProvider: document.getElementById('aiProviderSelect').value,
+          aiModel: getSelectedAiModel_(),
+          emailVerifier: document.getElementById('emailVerifierSelect').value,
+          emailEndpoint: document.getElementById('emailEndpoint').value.trim(),
+          emailSenderProvider: document.getElementById('senderProviderSelect').value,
+          emailSenderEndpoint: document.getElementById('senderEndpointInput').value.trim(),
+          senderEmail: document.getElementById('senderEmail').value.trim()
+        };
+
+        setPipelineBusy_(true);
+        showStatus('🩺 Testing Budget Cap, AI Key, Verifier Credits & Sender Mailbox for "' + ownerVal + '" ($0.00 dry-run)...', 'info');
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            setPipelineBusy_(false);
+            if (!res) {
+              showStatus('⚠️ Audit returned an empty response.', 'error');
+              return;
+            }
+            if (res.budget) {
+              renderBudgetMeter_(
+                res.clientName,
+                res.budget.todaySpend,
+                res.budget.dailyCap,
+                res.budget.remainingUsd,
+                res.budget.status === 'FAIL'
+              );
+            }
+            renderAuditResultsBox_(res);
+
+            if (res.overallStatus === 'PASS') {
+              showStatus('✅ All connections & budget checks PASSED for "' + res.clientName + '" (' + res.checkedAt + '). Ready to run!', 'success');
+            } else if (res.overallStatus === 'WARN') {
+              showStatus('⚠️ Connection audit passed with warnings for "' + res.clientName + '" (' + res.checkedAt + '). Review details above.', 'info');
+            } else {
+              showStatus('❌ Connection / Budget audit detected blocking issue(s) for "' + res.clientName + '". Review details above before running.', 'error');
+            }
+          })
+          .withFailureHandler(function(err) {
+            setPipelineBusy_(false);
+            showStatus('Audit error: ' + err.message, 'error');
+          })
+          .runClientConnectionAndBudgetAudit(auditInput);
+      }
+
+      function renderAuditResultsBox_(res) {
+        const box = document.getElementById('auditResultsBox');
+        if (!box) return;
+        box.innerHTML = '';
+
+        function appendAuditRow(title, item) {
+          const st = (item && item.status) ? item.status : 'WARN';
+          const icon = st === 'PASS' ? '✅' : (st === 'WARN' ? '⚠️' : '❌');
+          const cls = st === 'PASS' ? 'pass' : (st === 'WARN' ? 'warn' : 'fail');
+
+          const row = document.createElement('div');
+          row.className = 'audit-row';
+
+          const badge = document.createElement('span');
+          badge.className = 'audit-tag ' + cls;
+          badge.textContent = icon + ' ' + title + ' [' + st + ']: ';
+
+          const txt = document.createElement('span');
+          txt.textContent = (item && item.message) ? item.message : 'No details';
+
+          row.appendChild(badge);
+          row.appendChild(txt);
+          box.appendChild(row);
+        }
+
+        appendAuditRow('Budget', res.budget);
+        appendAuditRow('AI (' + ((res.ai && res.ai.provider) || 'LLM') + ')', res.ai);
+        appendAuditRow('Verifier (' + ((res.verifier && res.verifier.provider) || 'None') + ')', res.verifier);
+        appendAuditRow('Sender (' + ((res.sender && res.sender.provider) || 'Gmail') + ')', res.sender);
+        box.style.display = 'block';
       }
 
       function saveConfiguration() {
@@ -1547,6 +1723,7 @@
         google.script.run
           .withSuccessHandler(function(res) {
             setPipelineBusy_(false);
+            refreshBudgetSnapshot_();
             if (res && res.success) {
               showStatus('✅ ' + res.message, 'success');
             } else {
@@ -1555,6 +1732,7 @@
           })
           .withFailureHandler(function(err) {
             setPipelineBusy_(false);
+            refreshBudgetSnapshot_();
             showStatus('Discovery Error: ' + err.message, 'error');
           })
           .runCompanyDiscoveryFromSidebar(cid);
@@ -1579,6 +1757,7 @@
         google.script.run
           .withSuccessHandler(function(res) {
             setPipelineBusy_(false);
+            refreshBudgetSnapshot_();
             if (res && res.success) {
               showStatus('✅ ' + res.message, 'success');
             } else {
@@ -1587,6 +1766,7 @@
           })
           .withFailureHandler(function(err) {
             setPipelineBusy_(false);
+            refreshBudgetSnapshot_();
             showStatus('Persona Mapper Error: ' + err.message, 'error');
           })
           .runPersonaMapperFromSidebar(cid);

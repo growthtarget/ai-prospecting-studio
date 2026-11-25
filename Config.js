@@ -34,16 +34,23 @@ const APP_CONFIG = Object.freeze({
     defaultMinVerifierCredits: 500,        // Minimum email verification credits before email alert
     // Standard Pricing Rates (per 1 Million tokens for LLMs, per credit for verifiers)
     pricing: {
-      'gemini-3.8-flash': { inputPer1M: 0.075, outputPer1M: 0.30 },
-      'gemini-2.5-flash': { inputPer1M: 0.075, outputPer1M: 0.30 },
-      'gemini-2.0-flash': { inputPer1M: 0.10,  outputPer1M: 0.40 },
-      'gemini-1.5-pro':   { inputPer1M: 1.25,  outputPer1M: 5.00 },
-      'gpt-4o':           { inputPer1M: 2.50,  outputPer1M: 10.00 },
-      'gpt-4o-mini':      { inputPer1M: 0.15,  outputPer1M: 0.60 },
-      'o1-mini':          { inputPer1M: 1.10,  outputPer1M: 4.40 },
-      'ZeroBounce':       { costPerUnit: 0.007 },
-      'MillionVerifier':  { costPerUnit: 0.003 },
-      'NeverBounce':      { costPerUnit: 0.008 }
+      'gemini-3.8-flash':      { inputPer1M: 0.75,  outputPer1M: 3.75 },
+      'gemini-3.5-flash-lite': { inputPer1M: 0.30,  outputPer1M: 2.50 },
+      'gemini-2.5-flash-lite': { inputPer1M: 0.10,  outputPer1M: 0.40 },
+      'gemini-2.5-flash':      { inputPer1M: 0.30,  outputPer1M: 2.50 },
+      'gemini-2.5-pro':        { inputPer1M: 1.25,  outputPer1M: 10.00 },
+      'gemini-2.0-flash':      { inputPer1M: 0.10,  outputPer1M: 0.40 },
+      'gemini-1.5-pro':        { inputPer1M: 1.25,  outputPer1M: 5.00 },
+      'gpt-4o':                { inputPer1M: 2.50,  outputPer1M: 10.00 },
+      'gpt-4o-mini':           { inputPer1M: 0.15,  outputPer1M: 0.60 },
+      'gpt-4.1':               { inputPer1M: 2.00,  outputPer1M: 8.00 },
+      'gpt-4.1-mini':          { inputPer1M: 0.80,  outputPer1M: 3.20 },
+      'o1-mini':               { inputPer1M: 1.10,  outputPer1M: 4.40 },
+      'o4-mini':               { inputPer1M: 1.10,  outputPer1M: 4.40 },
+      'ZeroBounce':            { costPerUnit: 0.007 },
+      'MillionVerifier':       { costPerUnit: 0.003 },
+      'NeverBounce':           { costPerUnit: 0.008 },
+      'Custom HTTPS':          { costPerUnit: 0.005 }
     }
   },
 
