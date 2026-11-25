@@ -4,7 +4,7 @@
  * PLUGGABLE EMAIL SENDER & CLIENT-ISOLATED OUTREACH DISPATCH ENGINE
  * ============================================================================
  * File: EmailSender.gs / EmailSender.js
- * 
+ *
  * CAPABILITIES:
  * 1. Multi-Provider Dispatch: Google Workspace (Local & Client Relay),
  *    Microsoft 365 / Exchange Online (Drafts Only & Direct Send via Graph API),
@@ -14,7 +14,9 @@
  * 3. Campaign Isolation: Resolves sender profile and provider dynamically per prospect Campaign ID.
  * 4. Sender Identity & Mailbox Stamping: Attaches Sender Display Name, Sender Email/Mailbox,
  *    and Reply-To Email address to drafts and outreach emails.
- * 5. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
+ * 5. Deliverability Event Capture: Captures Draft / Message IDs in Prospect Review Queue
+ *    and records inline "Sent" events to EmailEvents via EmailEventsDeliverability.js.
+ * 6. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
  * ============================================================================
  */
 
@@ -34,9 +36,23 @@ function createGmailDraftsForApprovedProspects() {
 }
 
 /**
+ * Helper: Finds the first matching column index from a list of header aliases.
+ */
+function findSenderHeaderCol_(headers, candidates) {
+  const normHeaders = headers.map(function(h) {
+    return String(h || '').trim().toLowerCase();
+  });
+  for (let i = 0; i < candidates.length; i++) {
+    const idx = normHeaders.indexOf(String(candidates[i]).toLowerCase());
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+/**
  * Core outreach processor.
  * Resolves settings per prospect row, ensuring complete campaign and client isolation.
- * 
+ *
  * @param {boolean} forceDrafts When true, routes all approved prospects to Drafts Only mode
  */
 function processOutreachQueue_(forceDrafts) {
@@ -71,29 +87,41 @@ function processOutreachQueue_(forceDrafts) {
     return String(h || '').trim();
   });
 
-  const campIdCol = headers.indexOf('Campaign ID');
-  const emailCol = headers.indexOf('Business Email');
-  const subjectCol = headers.indexOf('Draft Subject');
-  const bodyCol = headers.indexOf('Draft Email');
-  const humanApprCol = headers.indexOf('Human Approval Status');
-  const reviewStatusCol = headers.indexOf('Review Status');
-  const sendStatusCol = headers.indexOf('Send Status');
-  const sentAtCol = headers.indexOf('Sent At');
-  const sendErrorCol = headers.indexOf('Send Error');
-  const leadNameCol = headers.indexOf('Name');
-  const companyCol = headers.indexOf('Company Name');
+  const campIdCol = findSenderHeaderCol_(headers, ['Campaign ID']);
+  const emailCol = findSenderHeaderCol_(headers, ['Business Email']);
+  const approvedSubjectCol = findSenderHeaderCol_(headers, ['Approved Email Subject']);
+  const subjectCol = findSenderHeaderCol_(headers, ['Draft Subject', 'Email Subject']);
+  const approvedBodyCol = findSenderHeaderCol_(headers, ['Approved Email Body']);
+  const bodyCol = findSenderHeaderCol_(headers, ['Draft Email', 'Email Body']);
+  const humanApprCol = findSenderHeaderCol_(headers, ['Human Approval Status']);
+  const reviewStatusCol = findSenderHeaderCol_(headers, ['Review Status']);
+  const sendStatusCol = findSenderHeaderCol_(headers, ['Send Status']);
+  const sentAtCol = findSenderHeaderCol_(headers, ['Sent At']);
+  const dispatchModeCol = findSenderHeaderCol_(headers, ['Dispatch Mode']);
+  const threadMsgIdCol = findSenderHeaderCol_(headers, ['Thread / Message ID', 'Message ID']);
+  const draftCreatedAtCol = findSenderHeaderCol_(headers, ['Draft Created At']);
+  const sendErrorCol = findSenderHeaderCol_(headers, ['Send Error', 'Last Error']);
+  const leadNameCol = findSenderHeaderCol_(headers, ['Name', 'Persona Name']);
+  const companyCol = findSenderHeaderCol_(headers, ['Company Name']);
 
   const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
   const queueToProcess = [];
 
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
-    const email = String(row[emailCol] || '').trim();
-    const body = String(row[bodyCol] || '').trim();
-    const humanAppr = String(row[humanApprCol] || '').trim().toLowerCase();
-    const reviewStatus = String(row[reviewStatusCol] || '').trim().toLowerCase();
-    const sendStatus = String(row[sendStatusCol] || '').trim().toLowerCase();
-    const campaignId = String(row[campIdCol] || '').trim();
+    const email = emailCol >= 0 ? String(row[emailCol] || '').trim() : '';
+    const approvedBody = approvedBodyCol >= 0 ? String(row[approvedBodyCol] || '').trim() : '';
+    const baseBody = bodyCol >= 0 ? String(row[bodyCol] || '').trim() : '';
+    const body = approvedBody || baseBody;
+
+    const approvedSubj = approvedSubjectCol >= 0 ? String(row[approvedSubjectCol] || '').trim() : '';
+    const baseSubj = subjectCol >= 0 ? String(row[subjectCol] || '').trim() : '';
+    const subject = approvedSubj || baseSubj || 'Introduction';
+
+    const humanAppr = humanApprCol >= 0 ? String(row[humanApprCol] || '').trim().toLowerCase() : '';
+    const reviewStatus = reviewStatusCol >= 0 ? String(row[reviewStatusCol] || '').trim().toLowerCase() : '';
+    const sendStatus = sendStatusCol >= 0 ? String(row[sendStatusCol] || '').trim().toLowerCase() : '';
+    const campaignId = campIdCol >= 0 ? String(row[campIdCol] || '').trim() : '';
 
     const isRejected = (humanAppr.startsWith('rejected') || reviewStatus === 'rejected');
     const isApproved = !isRejected && (
@@ -114,10 +142,10 @@ function processOutreachQueue_(forceDrafts) {
         rowIndex: i + 2,
         campaignId: campaignId,
         email: email,
-        subject: String(row[subjectCol] || 'Introduction'),
+        subject: subject,
         body: body,
-        leadName: String(row[leadNameCol] || ''),
-        companyName: String(row[companyCol] || '')
+        leadName: leadNameCol >= 0 ? String(row[leadNameCol] || '') : '',
+        companyName: companyCol >= 0 ? String(row[companyCol] || '') : ''
       });
     }
   }
@@ -127,7 +155,7 @@ function processOutreachQueue_(forceDrafts) {
       'To approve a prospect:\n' +
       '1. Set Human Approval Status or Review Status to "Approved"\n' +
       '2. Ensure Send Status is not already "Sent", "Draft Created", "Draft Created in Gmail", or "Suppressed - Not Sent"\n' +
-      '3. Ensure Business Email, Draft Subject, and Draft Email are filled.';
+      '3. Ensure Business Email and Email Subject/Body are filled.';
     if (ui) ui.alert('No Prospects Ready', msg, ui.ButtonSet.OK);
     else Logger.log(msg);
     return;
@@ -162,7 +190,8 @@ function processOutreachQueue_(forceDrafts) {
 
   let successCount = 0;
   let failCount = 0;
-  const nowStr = new Date().toLocaleString();
+  const nowDate = new Date();
+  const nowStr = nowDate.toLocaleString();
   const msTokenCache = {};
 
   queueToProcess.forEach(function(item) {
@@ -182,7 +211,7 @@ function processOutreachQueue_(forceDrafts) {
     }
 
     try {
-      dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet, msTokenCache);
+      const dispatchResult = dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet, msTokenCache) || {};
 
       const lowerProv = rawProvider.toLowerCase();
       let finalStatus = 'Sent';
@@ -200,10 +229,42 @@ function processOutreachQueue_(forceDrafts) {
       }
 
       if (sendStatusCol >= 0) sheet.getRange(item.rowIndex, sendStatusCol + 1).setValue(finalStatus);
+      if (dispatchModeCol >= 0) sheet.getRange(item.rowIndex, dispatchModeCol + 1).setValue(rawProvider);
+
+      const trackedId = String(dispatchResult.queueTrackId || dispatchResult.providerMessageId || dispatchResult.draftId || '').trim();
+      if (threadMsgIdCol >= 0 && trackedId) {
+        sheet.getRange(item.rowIndex, threadMsgIdCol + 1).setValue(trackedId);
+      }
+
+      if (draftCreatedAtCol >= 0 && (finalStatus === 'Draft Created' || finalStatus === 'Draft Created in Gmail')) {
+        sheet.getRange(item.rowIndex, draftCreatedAtCol + 1).setValue(nowStr);
+      }
       if (sentAtCol >= 0 && (finalStatus === 'Sent' || finalStatus === 'Pushed to Sequencer')) {
         sheet.getRange(item.rowIndex, sentAtCol + 1).setValue(nowStr);
       }
       if (sendErrorCol >= 0) sheet.getRange(item.rowIndex, sendErrorCol + 1).setValue('');
+
+      // Record Sent events inline to EmailEvents for real-time deliverability tracking
+      if (finalStatus === 'Sent' &&
+          (dispatchResult.provider === 'Gmail' || dispatchResult.provider === 'Microsoft 365') &&
+          typeof recordEmailEvent_ === 'function') {
+        try {
+          recordEmailEvent_({
+            client_id: campaignConfig.clientName || 'Growth Target',
+            campaign_id: item.campaignId,
+            provider: dispatchResult.provider,
+            provider_message_id: dispatchResult.providerMessageId || trackedId,
+            event_type: 'Sent',
+            event_date: new Date(),
+            recipient: item.email,
+            smtp_code: '250 2.0.0',
+            reason: 'Dispatched via ' + rawProvider
+          }, spreadsheet);
+        } catch (evtErr) {
+          Logger.log('EmailEvents Sent logging notice: ' + evtErr.message);
+        }
+      }
+
       successCount++;
     } catch (err) {
       failCount++;
@@ -225,7 +286,7 @@ function processOutreachQueue_(forceDrafts) {
 
   const completionMsg = 'Outreach Execution Completed!\n\n' +
     '• Successfully Processed: ' + successCount + '\n' +
-    (failCount > 0 ? ('• Failed: ' + failCount + ' (Check "Send Error" column for details)') : '• All approved records processed cleanly.');
+    (failCount > 0 ? ('• Failed: ' + failCount + ' (Check "Send Error" / "Last Error" column for details)') : '• All approved records processed cleanly.');
 
   if (ui) {
     ui.alert('Outreach Completed', completionMsg, ui.ButtonSet.OK);
@@ -284,30 +345,57 @@ function dispatchOutreach_(item, provider, config, spreadsheet, msTokenCache) {
       }
 
       if (isDraftMode) {
+        let draft;
         try {
-          GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
+          draft = GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
         } catch (aliasErr) {
           if (mailOptions.from) {
             delete mailOptions.from;
-            GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
+            draft = GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
           } else {
             throw aliasErr;
           }
         }
-        return { status: 'draft_created' };
+        const draftId = draft ? draft.getId() : '';
+        return {
+          status: 'draft_created',
+          provider: 'Gmail',
+          draftId: draftId,
+          providerMessageId: draftId,
+          queueTrackId: draftId
+        };
       }
 
+      // Direct Send via createDraft().send() so we capture GmailMessage ID & RFC Message-ID
+      let draftToSend;
       try {
-        GmailApp.sendEmail(item.email, item.subject, item.body, mailOptions);
+        draftToSend = GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
       } catch (aliasErr) {
         if (mailOptions.from) {
           delete mailOptions.from;
-          GmailApp.sendEmail(item.email, item.subject, item.body, mailOptions);
+          draftToSend = GmailApp.createDraft(item.email, item.subject, item.body, mailOptions);
         } else {
           throw aliasErr;
         }
       }
-      return { status: 'sent' };
+
+      const sentMsg = draftToSend.send();
+      let sentMsgId = '';
+      let rfcMsgId = '';
+      try {
+        sentMsgId = sentMsg ? (sentMsg.getId() || '') : '';
+        rfcMsgId = sentMsg ? (sentMsg.getHeader('Message-ID') || '') : '';
+      } catch (idErr) {}
+
+      const finalMsgId = rfcMsgId || sentMsgId || ('gmail-' + Utilities.getUuid());
+      return {
+        status: 'sent',
+        provider: 'Gmail',
+        messageId: sentMsgId,
+        rfcMessageId: rfcMsgId,
+        providerMessageId: finalMsgId,
+        queueTrackId: finalMsgId
+      };
     }
 
     // External Client Workspace Relay (Option A): Strictly routes via client's own Relay Web App
@@ -359,7 +447,15 @@ function dispatchOutreach_(item, provider, config, spreadsheet, msTokenCache) {
       throw new Error('Client Gmail Relay error: ' + (parsedRelay && parsedRelay.error ? parsedRelay.error : relayText.slice(0, 200)));
     }
 
-    return { status: isDraftMode ? 'draft_created_client_relay' : 'sent_client_relay' };
+    const relayDraftId = parsedRelay.draftId || '';
+    const relayMsgId = parsedRelay.rfcMessageId || parsedRelay.messageId || relayDraftId || '';
+    return {
+      status: isDraftMode ? 'draft_created_client_relay' : 'sent_client_relay',
+      provider: 'Gmail',
+      draftId: relayDraftId,
+      providerMessageId: relayMsgId,
+      queueTrackId: isDraftMode ? relayDraftId : relayMsgId
+    };
   }
 
   // 3. Smartlead Sequencer Integration (Option B)
@@ -510,6 +606,7 @@ function dispatchOutreach_(item, provider, config, spreadsheet, msTokenCache) {
 /**
  * Microsoft 365 / Exchange Online Dispatcher (Microsoft Graph API v1.0).
  * Strictly isolated per Client / Owner using MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET.
+ * Uses ImmutableId + Draft-then-Send on Direct Send to capture internetMessageId & conversationId.
  */
 function dispatchMicrosoft365Outreach_(item, providerLower, config, spreadsheet, msTokenCache) {
   const clientName = String(config.clientName || 'Growth Target').trim();
@@ -579,57 +676,110 @@ function dispatchMicrosoft365Outreach_(item, providerLower, config, spreadsheet,
     messageObj.replyTo = [{ emailAddress: replyAddr }];
   }
 
-  if (isDraftMode) {
-    messageObj.isDraft = true;
-    const draftUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) + '/messages';
-    const draftRes = UrlFetchApp.fetch(draftUrl, {
-      method: 'post',
-      contentType: 'application/json',
-      headers: {
-        Authorization: 'Bearer ' + accessToken
-      },
-      payload: JSON.stringify(messageObj),
-      muteHttpExceptions: true
-    });
+  // Create draft first (works for Drafts Only AND captures internetMessageId for Direct Send)
+  const createDraftPayload = Object.assign({}, messageObj, { isDraft: true });
+  const draftUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) + '/messages';
+  const draftRes = UrlFetchApp.fetch(draftUrl, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      Authorization: 'Bearer ' + accessToken,
+      Prefer: 'IdType="ImmutableId"'
+    },
+    payload: JSON.stringify(createDraftPayload),
+    muteHttpExceptions: true
+  });
 
-    const draftCode = draftRes.getResponseCode();
-    const draftText = draftRes.getContentText() || '';
-    if (draftCode < 200 || draftCode >= 300) {
-      throw new Error(parseMicrosoftGraphError_(draftCode, draftText, 'create draft', senderEmail));
-    }
+  const draftCode = draftRes.getResponseCode();
+  const draftText = draftRes.getContentText() || '';
 
+  if (draftCode >= 200 && draftCode < 300) {
     let parsedDraft = {};
     try {
       parsedDraft = JSON.parse(draftText || '{}');
     } catch (e) {}
 
+    const draftId = parsedDraft.id || '';
+    const internetMessageId = parsedDraft.internetMessageId || '';
+    const conversationId = parsedDraft.conversationId || '';
+
+    if (isDraftMode) {
+      return {
+        status: 'draft_created_microsoft365',
+        provider: 'Microsoft 365',
+        draftId: draftId,
+        providerMessageId: internetMessageId || draftId,
+        queueTrackId: draftId,
+        conversationId: conversationId
+      };
+    }
+
+    // Direct Send: Send the created draft (saves automatically to Sent Items)
+    const sendDraftUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) +
+      '/messages/' + encodeURIComponent(draftId) + '/send';
+    const sendDraftRes = UrlFetchApp.fetch(sendDraftUrl, {
+      method: 'post',
+      headers: {
+        Authorization: 'Bearer ' + accessToken
+      },
+      payload: '',
+      muteHttpExceptions: true
+    });
+
+    const sendDraftCode = sendDraftRes.getResponseCode();
+    const sendDraftText = sendDraftRes.getContentText() || '';
+    if (sendDraftCode < 200 || sendDraftCode >= 300) {
+      throw new Error(parseMicrosoftGraphError_(sendDraftCode, sendDraftText, 'send created draft', senderEmail));
+    }
+
+    const finalMsgId = internetMessageId || draftId;
     return {
-      status: 'draft_created_microsoft365',
-      draftId: parsedDraft.id || ''
+      status: 'sent_microsoft365',
+      provider: 'Microsoft 365',
+      draftId: draftId,
+      providerMessageId: finalMsgId,
+      queueTrackId: finalMsgId,
+      conversationId: conversationId
     };
   }
 
-  const sendUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) + '/sendMail';
-  const sendRes = UrlFetchApp.fetch(sendUrl, {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      Authorization: 'Bearer ' + accessToken
-    },
-    payload: JSON.stringify({
-      message: messageObj,
-      saveToSentItems: true
-    }),
-    muteHttpExceptions: true
-  });
-
-  const sendCode = sendRes.getResponseCode();
-  const sendText = sendRes.getContentText() || '';
-  if (sendCode < 200 || sendCode >= 300) {
-    throw new Error(parseMicrosoftGraphError_(sendCode, sendText, 'send email', senderEmail));
+  // If Drafts Only failed, throw error immediately
+  if (isDraftMode) {
+    throw new Error(parseMicrosoftGraphError_(draftCode, draftText, 'create draft', senderEmail));
   }
 
-  return { status: 'sent_microsoft365' };
+  // If Direct Send failed on /messages with 403 (client only granted Mail.Send without Mail.ReadWrite), fallback to /sendMail
+  if (draftCode === 403) {
+    const sendUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) + '/sendMail';
+    const sendRes = UrlFetchApp.fetch(sendUrl, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        Authorization: 'Bearer ' + accessToken
+      },
+      payload: JSON.stringify({
+        message: messageObj,
+        saveToSentItems: true
+      }),
+      muteHttpExceptions: true
+    });
+
+    const sendCode = sendRes.getResponseCode();
+    const sendText = sendRes.getContentText() || '';
+    if (sendCode < 200 || sendCode >= 300) {
+      throw new Error(parseMicrosoftGraphError_(sendCode, sendText, 'send email', senderEmail));
+    }
+
+    const fallbackId = 'm365-' + Utilities.getUuid();
+    return {
+      status: 'sent_microsoft365',
+      provider: 'Microsoft 365',
+      providerMessageId: fallbackId,
+      queueTrackId: fallbackId
+    };
+  }
+
+  throw new Error(parseMicrosoftGraphError_(draftCode, draftText, 'create message before send', senderEmail));
 }
 
 /**
@@ -707,7 +857,7 @@ function parseMicrosoftGraphError_(statusCode, bodyText, actionLabel, senderEmai
 /**
  * Dynamically resolves sender profile, provider configuration, and Client / Owner per Campaign ID.
  * Scans Campaigns (28 cols), Persona Mapper Settings (39 cols), and Campaign Configuration.
- * 
+ *
  * @param {Spreadsheet} spreadsheet Active spreadsheet instance
  * @param {string} campaignId Target campaign identifier
  * @return {Object} Resolved settings object

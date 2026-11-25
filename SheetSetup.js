@@ -4,17 +4,18 @@
  * AUTOMATED SHEET & DROPDOWN SETUP ENGINE
  * ============================================================================
  * File: SheetSetup.gs / SheetSetup.js
- * 
+ *
  * PURPOSE:
  * 1. Manages "Lists & Settings" client registry ("Client - Account") & suppression dropdowns,
  *    keeping Client - Account rows cleanly pinned at the top.
  * 2. Preserves locked 38 parameters in "Campaign Configuration" & 28 columns in "Campaigns".
- * 3. Dynamically binds Client / Owner dropdowns from active "Client - Account" rows.
+ * 3. Dynamically binds Client / Owner dropdowns from active "Client - Account" rows
+ *    (including "Email Deliverability" filter dropdowns).
  * 4. Enforces plain integer formatting (0) on limit/score columns to prevent date conversion.
- * 5. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across all 13 tabs.
+ * 5. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across all tabs.
  * 6. Pre-populates "Agent Settings" with Growth Target defaults + per-client status & guardrails.
  * 7. Filters "Agent Settings" cleanly to the active Client / Owner.
- * 8. Initializes and formats "API_Usage_Log" (Tab 2).
+ * 8. Initializes and formats "API_Usage_Log" (Tab 2) plus "EmailEvents" & "Email Deliverability".
  * ============================================================================
  */
 
@@ -89,9 +90,17 @@ function setupAllSheetsAndDropdowns() {
     'Timestamp', 'Campaign ID', 'Action', 'Target', 'Status', 'Details'
   ]);
 
+  // 15. Setup Email Performance & Deliverability Module Tabs (EmailEvents & Email Deliverability)
+  if (typeof setupEmailEventsTab_ === 'function') {
+    setupEmailEventsTab_(ss);
+  }
+  if (typeof setupEmailDeliverabilityDashboardTab_ === 'function') {
+    setupEmailDeliverabilityDashboardTab_(ss);
+  }
+
   SpreadsheetApp.flush();
-  ss.toast('All 13 tabs formatted, Lists & Settings organized, and dropdowns applied!', '✅ Setup Complete', 10);
-  Logger.log('>>> ALL 13 TABS & DROPDOWNS CONFIGURED SUCCESSFULLY <<<');
+  ss.toast('All tabs formatted (including EmailEvents & Email Deliverability), Lists & Settings organized, and dropdowns applied!', '✅ Setup Complete', 10);
+  Logger.log('>>> ALL TABS & DROPDOWNS CONFIGURED SUCCESSFULLY <<<');
 }
 
 /**
@@ -280,8 +289,9 @@ function sortListsAndSettingsTab_(ss) {
 }
 
 /**
- * Refreshes the Client / Owner dropdown validation rules on "Campaign Configuration" (Row 4)
- * and "Campaigns" (Col C) using the latest active "Client - Account" entries in "Lists & Settings".
+ * Refreshes the Client / Owner dropdown validation rules on "Campaign Configuration" (Row 4),
+ * "Campaigns" (Col C), and "Email Deliverability" (Filter B3/D3) using the latest active
+ * "Client - Account" entries in "Lists & Settings".
  */
 function refreshClientDropdownValidations_(ss) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -306,6 +316,11 @@ function refreshClientDropdownValidations_(ss) {
   const campSheet = spreadsheet.getSheetByName('Campaigns');
   if (campSheet) {
     applyDropdownToRange(campSheet.getRange('C2:C500'), clientList, false);
+  }
+
+  // 3. Refresh Email Deliverability tab filter dropdowns if present
+  if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+    refreshDeliverabilityFilterDropdowns_(spreadsheet);
   }
 
   return clientList;

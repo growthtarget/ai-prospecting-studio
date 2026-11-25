@@ -630,6 +630,9 @@ function addClientAccountToSettings(clientName) {
   if (typeof refreshClientDropdownValidations_ === 'function') {
     refreshClientDropdownValidations_(ss);
   }
+  if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+    refreshDeliverabilityFilterDropdowns_(ss);
+  }
   if (typeof setupAgentSettingsTabDropdowns === 'function') {
     setupAgentSettingsTabDropdowns(ss, cleanName);
   }
@@ -702,7 +705,7 @@ function parseSafeCampaignNumeric_(val) {
 }
 
 /**
- * Master onOpen Trigger: Clean menu with isolated audit function.
+ * Master onOpen Trigger: Clean menu with isolated audit & deliverability controls.
  * Note: Outreach functions live in EmailSender.js to avoid global namespace collisions.
  */
 function onOpen() {
@@ -728,6 +731,10 @@ function onOpen() {
     .addItem('📝 Create Outreach Drafts (Safe Review)', 'createGmailDraftsForApprovedProspects')
     .addItem('✉️ Send Approved Outreach Emails', 'sendApprovedOutreachEmails')
     .addSeparator()
+    .addItem('📊 Open Email Deliverability', 'openEmailDeliverabilitySheet')
+    .addItem('🔄 Sync Email Deliverability Events', 'syncEmailDeliverabilityEvents')
+    .addItem('⏱️ Enable Hourly Deliverability Sync', 'installDeliverabilitySyncTrigger')
+    .addSeparator()
     .addItem('❓ Check Spreadsheet Setup', 'runStudioSpreadsheetAudit')
     .addSeparator()
     .addItem('🧪 Run Authentic Pilot Pipeline', 'triggerPilotRun')
@@ -740,6 +747,8 @@ function onOpen() {
  * 1. Syncs Dashboard (D1/C4 Status, B2 Campaign ID) and Campaigns Column 4 (Status).
  * 2. Keeps "Lists & Settings" sorted with Client - Account rows pinned at the top
  *    and refreshes Client dropdown validations whenever a completed row is edited.
+ * 3. Automatically resets "Email Deliverability" Campaign Filter (D3) to "All Campaigns"
+ *    if Client Filter (B3) is switched away from the selected campaign's owner.
  */
 function onEdit(e) {
   if (!e || !e.range) return;
@@ -764,6 +773,17 @@ function onEdit(e) {
       if (editedCampId && editedCampId === activeCampId) {
         updateDashboardStatusOnly_(activeCampId, val);
       }
+    } else if (sheetName === 'Email Deliverability' && row === 3 && col === 2) {
+      const newClient = String(val || '').trim();
+      const campFilterCell = sheet.getRange(3, 4);
+      const currentCamp = String(campFilterCell.getValue() || '').trim();
+      if (newClient && newClient !== 'All Clients' && currentCamp && currentCamp !== 'All Campaigns') {
+        const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+        const campOwner = resolveCampaignClientName_(currentCamp, '', ss);
+        if (campOwner && campOwner.toLowerCase() !== newClient.toLowerCase()) {
+          campFilterCell.setValue('All Campaigns');
+        }
+      }
     } else if (sheetName === 'Lists & Settings' && row > 1 && col >= 1 && col <= 3) {
       const rowVals = sheet.getRange(row, 1, 1, 3).getValues()[0];
       const listType = String(rowVals[0] || '').trim();
@@ -779,6 +799,9 @@ function onEdit(e) {
         if (lowerType === 'client - account' || lowerType === 'client / owner' || lowerType === 'client') {
           if (typeof refreshClientDropdownValidations_ === 'function') {
             refreshClientDropdownValidations_(ss);
+          }
+          if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+            refreshDeliverabilityFilterDropdowns_(ss);
           }
           if (ss && ss.toast) {
             ss.toast('Lists & Settings organized & Client dropdowns updated.', '✅ Registry Updated', 3);
@@ -870,7 +893,8 @@ function fixAllTabHeaderContrast() {
   const sheets = ss.getSheets();
 
   sheets.forEach(function(sh) {
-    if (sh.getName() === 'Dashboard') return;
+    const sName = sh.getName();
+    if (sName === 'Dashboard' || sName === 'Email Deliverability') return;
     if (sh.getLastColumn() > 0) {
       const headerRange = sh.getRange(1, 1, 1, sh.getLastColumn());
       headerRange
@@ -1451,6 +1475,9 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (typeof setupAgentSettingsTabDropdowns === 'function') {
     setupAgentSettingsTabDropdowns(ss, clientOwner);
   }
+  if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+    refreshDeliverabilityFilterDropdowns_(ss);
+  }
 
   filterOperationalSheetsByCampaign_(campId, clientOwner);
 
@@ -1751,10 +1778,10 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
 }
 
 /**
- * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log
- * and Persona Mapper Settings) so rows from other campaigns are hidden, displaying exclusively
- * the active campaign. Also filters "Campaigns", "Dashboard" Rollup, and "Agent Settings"
- * to the active Client / Owner.
+ * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log,
+ * Persona Mapper Settings, and EmailEvents) so rows from other campaigns are hidden,
+ * displaying exclusively the active campaign. Also filters "Campaigns", "Dashboard" Rollup,
+ * and "Agent Settings" to the active Client / Owner.
  */
 function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName) {
   if (!activeCampaignId) return;
@@ -1770,7 +1797,8 @@ function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName
     'Research Evidence',
     'Execution Logs',
     'API_Usage_Log',
-    'Persona Mapper Settings'
+    'Persona Mapper Settings',
+    'EmailEvents'
   ];
 
   targetSheetNames.forEach(function(targetName) {
@@ -1895,13 +1923,16 @@ function filterSheetsForActiveCampaignMenu() {
   if (typeof setupAgentSettingsTabDropdowns === 'function') {
     setupAgentSettingsTabDropdowns(ss, activeClient);
   }
+  if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+    refreshDeliverabilityFilterDropdowns_(ss);
+  }
 
   filterOperationalSheetsByCampaign_(activeId, activeClient);
 
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
-    ui.alert('Tabs Filtered', 'Operational tabs (including Dashboard Rollup, Campaigns, Persona Mapper Settings, API_Usage_Log & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
+    ui.alert('Tabs Filtered', 'Operational tabs (including Dashboard Rollup, Campaigns, Persona Mapper Settings, API_Usage_Log, EmailEvents & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
   } catch (e) {
     Logger.log('Operational tabs filtered to active campaign: ' + activeId);
   }
@@ -2015,8 +2046,12 @@ function runStudioSpreadsheetAudit() {
     'Lists & Settings'
   ];
 
+  const deliverabilityTabs = ['EmailEvents', 'Email Deliverability'];
+
   const present = [];
   const missing = [];
+  const delivPresent = [];
+  const delivMissing = [];
 
   requiredTabs.forEach(function(name) {
     if (name === 'Persona Mapper Settings') {
@@ -2027,6 +2062,22 @@ function runStudioSpreadsheetAudit() {
       else missing.push(name);
     }
   });
+
+  deliverabilityTabs.forEach(function(name) {
+    if (ss.getSheetByName(name)) delivPresent.push(name);
+    else delivMissing.push(name);
+  });
+
+  let hourlySyncActive = false;
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getHandlerFunction() === 'syncEmailDeliverabilityEvents') {
+        hourlySyncActive = true;
+        break;
+      }
+    }
+  } catch (e) {}
 
   const scriptProps = PropertiesService.getScriptProperties().getProperties();
   const userProps = PropertiesService.getUserProperties().getProperties();
@@ -2093,12 +2144,16 @@ function runStudioSpreadsheetAudit() {
   let message = '📊 SPREADSHEET SYSTEM HEALTH CHECK:\n\n';
   message += '• Active Campaign: ' + activeId + ' (Client / Owner: ' + activeClient + ')\n';
   message += '• Registered Clients: ' + registeredClients.join(', ') + '\n';
-  message += '• Project Tabs Verified: ' + present.length + ' of ' + requiredTabs.length + ' Tabs Active\n';
+  message += '• Core Project Tabs Verified: ' + present.length + ' of ' + requiredTabs.length + ' Tabs Active\n';
   if (missing.length > 0) {
-    message += '⚠️ Missing Tabs: ' + missing.join(', ') + '\n\n';
+    message += '⚠️ Missing Core Tabs: ' + missing.join(', ') + '\n';
   } else {
-    message += '✅ All 13 project tabs exist and match system schema.\n\n';
+    message += '✅ All 13 core project tabs exist and match system schema.\n';
   }
+
+  message += '• Deliverability Tabs: ' + delivPresent.length + ' of ' + deliverabilityTabs.length + ' Active' +
+    (delivMissing.length > 0 ? (' (Missing: ' + delivMissing.join(', ') + ' — run setupEmailDeliverabilityModule)') : ' ✅') + '\n';
+  message += '• Hourly Deliverability Sync Trigger: ' + (hourlySyncActive ? 'Active ✅' : 'Not Installed (Enable from menu)') + '\n\n';
 
   message += '• Local Agency AI Status: ' + apiKeyInfo + '\n';
   message += '• Client-Isolated Properties Detected: ' + detectedClientKeys.length + ' key(s)\n';
@@ -2219,6 +2274,8 @@ function authorizeStudioPermissions() {
   UrlFetchApp.fetch('https://www.google.com', { muteHttpExceptions: true });
   SpreadsheetApp.getActiveSpreadsheet();
   GmailApp.getDrafts();
+  GmailApp.search('in:sent', 0, 1);
+  ScriptApp.getProjectTriggers();
   let ui;
   try {
     ui = SpreadsheetApp.getUi();

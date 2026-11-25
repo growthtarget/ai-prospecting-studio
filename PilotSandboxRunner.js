@@ -6,20 +6,22 @@
  * File: PilotSandboxRunner.gs / PilotSandboxRunner.js
  *
  * CAPABILITIES:
- * 1. Generates & Synchronizes ALL 13 Tabs for the Pilot Run (Client: "Pilot Acme"):
- *    - Cold-start safe: Automatically seeds canonical headers across all 13 tabs.
+ * 1. Generates & Synchronizes ALL Project Tabs for the Pilot Run (Client: "Pilot Acme"):
+ *    - Cold-start safe: Automatically seeds canonical headers across all 13 core tabs
+ *      plus EmailEvents & Email Deliverability.
  *    - Updates "Campaign Configuration" strictly preserving the locked 38 parameters.
  *    - Generates 39-column row in "Persona Mapper Settings" for PILOT-CMP-001.
  *    - Restores and populates "Dashboard" with the complete 10-row KPI table.
  *    - Populates "Campaigns" (28 master cols), "Company Database" (Col J Campaign ID),
  *      "Company Intelligence" (25 cols), "Persona Leads" (29 cols),
  *      "Research Evidence" (9 canonical cols), "Prospect Review Queue" (45 cols),
- *      and logs client-tagged token/credit usage to "API_Usage_Log".
+ *      "EmailEvents" (11 cols), and logs client-tagged token/credit usage to "API_Usage_Log".
  * 2. Creates Safe Gmail Drafts (via Pilot Acme Relay if configured, or local sandbox Gmail).
  * 3. Enforces real-time suppression rules and pins "Lists & Settings" client rows cleanly.
  * 4. Option A Full Wipe Purge: Removes all pilot records (PILOT-* and Pilot Acme)
- *    across all 13 tabs including Dashboard Rollup, Agent Settings, Lists & Settings,
- *    Campaign Configuration, API_Usage_Log, and Execution Logs, then restores active state.
+ *    across all tabs including EmailEvents, Dashboard Rollup, Agent Settings,
+ *    Lists & Settings, Campaign Configuration, API_Usage_Log, and Execution Logs,
+ *    then restores active state.
  * ============================================================================
  */
 
@@ -55,7 +57,8 @@ const PILOT_CONFIG = {
 };
 
 /**
- * MAIN ENTRY POINT: Runs the full pilot for client "Pilot Acme", logs API usage, and updates Dashboard.
+ * MAIN ENTRY POINT: Runs the full pilot for client "Pilot Acme", logs API usage,
+ * seeds EmailEvents deliverability samples, and updates Dashboard.
  */
 function runPilotOnRealSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -64,10 +67,10 @@ function runPilotOnRealSheets() {
   Logger.log('===============================================================');
 
   try {
-    // Step 0: Ensure all 13 project tabs exist with canonical headers and high-contrast styling
+    // Step 0: Ensure all core tabs + EmailEvents & Email Deliverability tabs exist with canonical headers
     validateRequiredTabs(ss);
 
-    // Step 1: Clean previous pilot test rows from all operational tabs
+    // Step 1: Clean previous pilot test rows from all operational tabs (including EmailEvents)
     purgeExistingPilotRows(ss, PILOT_CONFIG.CAMPAIGN_ID);
     Logger.log('Step 1: Purged previous pilot records.');
 
@@ -145,6 +148,13 @@ function runPilotOnRealSheets() {
     }
     Logger.log('Step 11: API token and verifier usage logged to "API_Usage_Log".');
 
+    // Step 11b: Seed sample EmailEvents rows for Pilot Acme to verify Email Deliverability Dashboard
+    writePilotDeliverabilityEvents_(ss, PILOT_CONFIG);
+    if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+      refreshDeliverabilityFilterDropdowns_(ss);
+    }
+    Logger.log('Step 11b: Deliverability pilot events written to "EmailEvents".');
+
     // Step 12: Log Execution in "Execution Logs"
     logPilotExecution(ss, processedQueue);
 
@@ -155,13 +165,13 @@ function runPilotOnRealSheets() {
     Logger.log('Step 13: Master Dashboard updated with live KPIs for client ' + PILOT_CONFIG.DEPARTMENT + '.');
 
     ss.toast(
-      'Pilot for "' + PILOT_CONFIG.DEPARTMENT + '" completed! ' + draftsCreated + ' Gmail drafts created. Check Dashboard, API_Usage_Log, and Gmail.',
+      'Pilot for "' + PILOT_CONFIG.DEPARTMENT + '" completed! ' + draftsCreated + ' Gmail drafts created & sample EmailEvents seeded. Check Dashboard, Email Deliverability & Gmail.',
       '🚀 Pilot Complete',
       12
     );
 
     Logger.log('===============================================================');
-    Logger.log('>>> PILOT RUN COMPLETED: ALL 13 TABS & API TRACKER SYNCHRONIZED <<<');
+    Logger.log('>>> PILOT RUN COMPLETED: ALL TABS, DELIVERABILITY & API TRACKER SYNCHRONIZED <<<');
     Logger.log('===============================================================');
   } catch (err) {
     Logger.log('❌ Pilot Execution Error: ' + err.stack);
@@ -170,7 +180,7 @@ function runPilotOnRealSheets() {
 }
 
 /**
- * Validates that all 13 project tabs exist in canonical layout and applies high-contrast styling.
+ * Validates that all 13 core project tabs plus EmailEvents & Email Deliverability exist in canonical layout.
  */
 function validateRequiredTabs(ss) {
   const definitions = (typeof APP_CONFIG !== 'undefined' && Array.isArray(APP_CONFIG.sheetDefinitions))
@@ -207,6 +217,54 @@ function validateRequiredTabs(ss) {
       sheet.setFrozenRows(1);
     }
   });
+
+  if (typeof setupEmailEventsTab_ === 'function') {
+    setupEmailEventsTab_(ss);
+  }
+  if (typeof setupEmailDeliverabilityDashboardTab_ === 'function') {
+    if (!ss.getSheetByName('Email Deliverability')) {
+      setupEmailDeliverabilityDashboardTab_(ss);
+    } else if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+      refreshDeliverabilityFilterDropdowns_(ss);
+    }
+  }
+}
+
+/**
+ * Seeds 8 clean sandbox events in "EmailEvents" for PILOT-CMP-001 ("Pilot Acme")
+ * so all Email Deliverability tiles, rates, SMTP error charts & daily volume charts can be verified.
+ */
+function writePilotDeliverabilityEvents_(ss, config) {
+  let eventsSheet = (typeof setupEmailEventsTab_ === 'function')
+    ? setupEmailEventsTab_(ss)
+    : ss.getSheetByName('EmailEvents');
+  if (!eventsSheet) return;
+
+  const now = new Date();
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const yesterdayPlus = new Date(yesterday.getTime() + 10 * 60 * 1000);
+  const todayEarlier = new Date(now.getTime() - 5 * 60 * 60 * 1000);
+  const todayDelivered = new Date(todayEarlier.getTime() + 15 * 60 * 1000);
+  const todayReply = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+
+  const sampleRows = [
+    ['PILOT-EVT-001', config.DEPARTMENT, config.CAMPAIGN_ID, 'Gmail', '<pilot-msg-1@pilotacme.com>', 'Sent', yesterday, 'marcus.vance@growthtarget.com', '250 2.0.0', '', 'Pilot simulated outreach dispatch'],
+    ['PILOT-EVT-002', config.DEPARTMENT, config.CAMPAIGN_ID, 'Gmail', '<pilot-msg-1@pilotacme.com>', 'Delivered', yesterdayPlus, 'marcus.vance@growthtarget.com', '250 2.0.0', '', 'No DSN bounce received within 4h window'],
+    ['PILOT-EVT-003', config.DEPARTMENT, config.CAMPAIGN_ID, 'Gmail', '<pilot-msg-1@pilotacme.com>', 'Replied', todayReply, 'marcus.vance@growthtarget.com', '', '', 'Reply received: Re: Apex infrastructure sprint'],
+    ['PILOT-EVT-004', config.DEPARTMENT, config.CAMPAIGN_ID, 'Gmail', '<pilot-msg-2@pilotacme.com>', 'Sent', yesterday, 'elena.rostova@novussystems.com', '250 2.0.0', '', 'Pilot simulated outreach dispatch'],
+    ['PILOT-EVT-005', config.DEPARTMENT, config.CAMPAIGN_ID, 'Gmail', '<pilot-msg-2@pilotacme.com>', 'Delivered', yesterdayPlus, 'elena.rostova@novussystems.com', '250 2.0.0', '', 'No DSN bounce received within 4h window'],
+    ['PILOT-EVT-006', config.DEPARTMENT, config.CAMPAIGN_ID, 'Gmail', '<pilot-msg-3@pilotacme.com>', 'Sent', todayEarlier, 'invalid.user@novussystems.com', '250 2.0.0', '', 'Pilot simulated outreach dispatch'],
+    ['PILOT-EVT-007', config.DEPARTMENT, config.CAMPAIGN_ID, 'Gmail', '<pilot-msg-3@pilotacme.com>', 'Bounced', todayDelivered, 'invalid.user@novussystems.com', '550 5.1.1', 'Hard', '550 5.1.1 The email account that you tried to reach does not exist'],
+    ['PILOT-EVT-008', config.DEPARTMENT, config.CAMPAIGN_ID, 'Microsoft 365', '<pilot-msg-4@pilotacme.com>', 'Sent', todayEarlier, 'throttled.lead@example.com', '250 2.0.0', '', 'Pilot simulated outreach dispatch'],
+    ['PILOT-EVT-009', config.DEPARTMENT, config.CAMPAIGN_ID, 'Microsoft 365', '<pilot-msg-4@pilotacme.com>', 'Bounced', todayDelivered, 'throttled.lead@example.com', '451 4.7.1', 'Soft', '451 4.7.1 Greylisting in action, please try again later'],
+    ['PILOT-EVT-010', config.DEPARTMENT, config.CAMPAIGN_ID, 'Microsoft 365', '<pilot-msg-5@pilotacme.com>', 'Sent', todayEarlier, 'ops.lead@example.com', '250 2.0.0', '', 'Pilot simulated outreach dispatch'],
+    ['PILOT-EVT-011', config.DEPARTMENT, config.CAMPAIGN_ID, 'Microsoft 365', '<pilot-msg-5@pilotacme.com>', 'Delivered', todayDelivered, 'ops.lead@example.com', '250 2.0.0', '', 'Confirmed Delivered via Exchange Message Trace']
+  ];
+
+  const startRow = eventsSheet.getLastRow() + 1;
+  eventsSheet.getRange(startRow, 7, sampleRows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  eventsSheet.getRange(startRow, 9, sampleRows.length, 1).setNumberFormat('@');
+  eventsSheet.getRange(startRow, 1, sampleRows.length, 11).setValues(sampleRows);
 }
 
 /**
@@ -914,6 +972,7 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
       'Company Name': p['Company Name'],
       'Persona ID': p['Persona ID'],
       'Name': p['Name'],
+      'Persona Name': p['Name'],
       'Title': p['Title'],
       'Business Email': p['Business Email'],
       'Company Opportunity Score': companyOppScore,
@@ -923,7 +982,9 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
       'Priority Tier': p['Persona Fit Score'] >= 90 ? 'Tier 1' : 'Tier 2',
       'Priority Score Rationale': 'Evaluated for ' + config.DEPARTMENT + ' based on: ' + (config.CUSTOM_BUSINESS_NEEDS.slice(0, 50)),
       'Draft Subject': p['Draft Subject'],
+      'Email Subject': p['Draft Subject'],
       'Draft Email': p['Draft Email'],
+      'Email Body': p['Draft Email'],
       'Evidence URLs': p['Evidence URL'],
       'Review Status': approvalStatus.startsWith('Approved') ? 'Approved' : (approvalStatus === 'Needs Review' ? 'Needs Review' : 'Rejected'),
       'Reviewer': 'Pilot Automated Runner',
@@ -934,7 +995,11 @@ function processSecurityApprovalAndDrafts(personas, enrichedCompanies, suppressi
       'Approved At': approvalStatus.startsWith('Approved') ? nowStr : '',
       'Send Status': sendStatus,
       'Sent At': '',
+      'Dispatch Mode': 'Workspace Gmail (Drafts Only)',
+      'Thread / Message ID': draftId,
+      'Draft Created At': draftId ? nowStr : '',
       'Send Error': sendError,
+      'Last Error': sendError,
       'Country': 'United States',
       'Industry': p['Industry'],
       'Company Opportunity': 'Operational / Compliance Automation',
@@ -1235,12 +1300,25 @@ function collectPilotCampaignIds_(ss, primaryCampaignId) {
     }
   }
 
+  // 5. Scan EmailEvents
+  const eventsSheet = ss.getSheetByName('EmailEvents');
+  if (eventsSheet && eventsSheet.getLastRow() > 1) {
+    const eData = eventsSheet.getRange(2, 1, eventsSheet.getLastRow() - 1, 3).getValues();
+    for (let r = 0; r < eData.length; r++) {
+      const client = String(eData[r][1] || '').trim().toLowerCase();
+      const cid = String(eData[r][2] || '').trim();
+      if (cid && (cid.toUpperCase().indexOf('PILOT-') === 0 || client === pilotClientLower)) {
+        ids[cid] = true;
+      }
+    }
+  }
+
   return ids;
 }
 
 /**
  * Universal Pilot Purge: Scans every row across operational & log tabs (including API_Usage_Log,
- * Company Database Col J, Persona Mapper Settings, and Execution Logs) and deletes pilot rows.
+ * Company Database Col J, Persona Mapper Settings, Execution Logs, and EmailEvents) and deletes pilot rows.
  * Removes stale sheet filters before deleting rows so filters never break or stay pinned.
  */
 function purgeExistingPilotRows(ss, campaignIdOrMap) {
@@ -1258,7 +1336,8 @@ function purgeExistingPilotRows(ss, campaignIdOrMap) {
     PILOT_CONFIG.TABS.RESEARCH_EVIDENCE,
     PILOT_CONFIG.TABS.PERSONA_SETTINGS,
     PILOT_CONFIG.TABS.LOGS,
-    PILOT_CONFIG.TABS.API_USAGE_LOG
+    PILOT_CONFIG.TABS.API_USAGE_LOG,
+    'EmailEvents'
   ];
 
   tabsToClean.forEach(function(tabName) {
@@ -1338,6 +1417,30 @@ function cleanupPilotEntriesFromListsAndSettings_(ss) {
   }
   if (typeof refreshClientDropdownValidations_ === 'function') {
     refreshClientDropdownValidations_(ss);
+  }
+}
+
+/**
+ * Option A Cleanup Helper: Resets Email Deliverability filters if pointing to Pilot Acme / PILOT-*
+ * and refreshes the filter dropdown lists cleanly.
+ */
+function cleanupPilotEntriesFromDeliverability_(ss, pilotIdsMap) {
+  const dash = ss.getSheetByName('Email Deliverability');
+  if (!dash) return;
+
+  const pilotLower = PILOT_CONFIG.DEPARTMENT.toLowerCase();
+  const b3 = String(dash.getRange('B3').getValue() || '').trim();
+  const d3 = String(dash.getRange('D3').getValue() || '').trim();
+
+  if (b3.toLowerCase() === pilotLower) {
+    dash.getRange('B3').setValue('All Clients');
+  }
+  if (d3 && (pilotIdsMap[d3] || d3.toUpperCase().indexOf('PILOT-') === 0)) {
+    dash.getRange('D3').setValue('All Campaigns');
+  }
+
+  if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
+    refreshDeliverabilityFilterDropdowns_(ss);
   }
 }
 
@@ -1460,7 +1563,8 @@ function resetCampaignConfigurationToStandby_(cfgSheet) {
 /**
  * OPTION A FULL WIPE CLEANUP:
  * Removes zero-trace of all Pilot test data (PILOT-CMP-001, PILOT-*, and Pilot Acme)
- * across all 13 tabs, preserves/restores active real campaigns, and resets to Standby only if none exist.
+ * across all tabs including EmailEvents, preserves/restores active real campaigns,
+ * and resets to Standby only if none exist.
  */
 function cleanupPilotDataFromRealSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1469,7 +1573,7 @@ function cleanupPilotDataFromRealSheets() {
   // Step 1: Discover all pilot campaign IDs (PILOT-CMP-001, PILOT-*, and any Pilot Acme campaigns like PA-001)
   const pilotIdsMap = collectPilotCampaignIds_(ss, PILOT_CONFIG.CAMPAIGN_ID);
 
-  // Step 2: Purge all pilot rows from operational & log tabs and remove stale filters
+  // Step 2: Purge all pilot rows from operational, EmailEvents & log tabs and remove stale filters
   purgeExistingPilotRows(ss, pilotIdsMap);
 
   // Step 3: Clean stored DocumentProperties cursors for all purged pilot campaigns
@@ -1482,6 +1586,9 @@ function cleanupPilotDataFromRealSheets() {
 
   // Step 4: Remove Pilot Acme & pilot suppression rules from Lists & Settings and refresh client dropdowns
   cleanupPilotEntriesFromListsAndSettings_(ss);
+
+  // Step 4b: Reset Email Deliverability filter if pointing to Pilot Acme / PILOT-* and refresh dropdowns
+  cleanupPilotEntriesFromDeliverability_(ss, pilotIdsMap);
 
   // Step 5: Remove Client: Pilot Acme block from Agent Settings
   cleanupPilotEntriesFromAgentSettings_(ss);
@@ -1605,7 +1712,7 @@ function cleanupPilotDataFromRealSheets() {
 
   SpreadsheetApp.flush();
   ss.toast(
-    'Pilot data wiped cleanly. If the Campaign Control Panel sidebar is open, close and reopen it to refresh dropdowns.',
+    'Pilot data wiped cleanly (including EmailEvents). If the Campaign Control Panel sidebar is open, close and reopen it to refresh dropdowns.',
     '🧹 Pilot Wipe Complete',
     8
   );

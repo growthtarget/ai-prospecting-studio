@@ -4,10 +4,10 @@
  * GLOBAL SYSTEM CONFIGURATION & WORKSPACE DEFINITIONS
  * ============================================================================
  * File: Config.gs / Config.js
- * 
+ *
  * Provides frozen master settings, API property keys, model designations,
  * pricing rates, budget guardrails, and canonical header schemas across
- * all 13 project tabs.
+ * all 13 core project tabs plus the Email Performance & Deliverability Module.
  * ============================================================================
  */
 
@@ -23,6 +23,10 @@ const APP_CONFIG = Object.freeze({
   openAiChatCompletionsUrl: 'https://api.openai.com/v1/chat/completions',
   defaultEmailVerifier: 'ZeroBounce',
   defaultSenderMode: 'Workspace Gmail (Drafts Only)',
+  emailEventsSheetName: 'EmailEvents',
+  deliverabilityDashboardSheetName: 'Email Deliverability',
+  deliverabilityLookbackDays: 7,
+  deliverabilityDeliveryGraceHours: 4,
 
   // API Financial & Guardrail Defaults (Configurable)
   guardrails: {
@@ -43,7 +47,7 @@ const APP_CONFIG = Object.freeze({
     }
   },
 
-  // Confirmed Tab Schemas (Exact 13-Tab Order)
+  // Confirmed Tab Schemas (Exact 13 Core Tabs + 2 Deliverability Module Tabs)
   sheetDefinitions: [
     {
       name: 'Dashboard',
@@ -158,6 +162,17 @@ const APP_CONFIG = Object.freeze({
     {
       name: 'Lists & Settings',
       headers: ['List name', 'Value', 'Active status']
+    },
+    {
+      name: 'EmailEvents',
+      headers: [
+        'event_id', 'client_id', 'campaign_id', 'provider', 'provider_message_id',
+        'event_type', 'event_date', 'recipient', 'smtp_code', 'bounce_type', 'reason'
+      ]
+    },
+    {
+      name: 'Email Deliverability',
+      headers: []
     }
   ]
 });

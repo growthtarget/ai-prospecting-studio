@@ -41,6 +41,15 @@
       hr { border: 0; border-top: 1px solid #eee; margin: 12px 0; }
       .subheading { font-weight: 700; font-size: 11px; color: #174ea6; text-transform: uppercase; margin: 8px 0 6px 0; }
       .custom-needs-container { background: #f1f3f4; border: 1px dashed #c6c9cc; border-radius: 6px; padding: 10px; margin-top: 10px; }
+      .kpi-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; }
+      .kpi-tile { background: #f8f9fa; border: 1px solid #dadce0; border-radius: 6px; padding: 7px 8px; text-align: center; }
+      .kpi-tile.wide { grid-column: span 2; }
+      .kpi-label { font-size: 10px; font-weight: 700; color: #5f6368; text-transform: uppercase; }
+      .kpi-val { font-size: 16px; font-weight: 700; color: #174ea6; margin-top: 2px; }
+      .kpi-val.good { color: #137333; }
+      .kpi-val.warn { color: #b06000; }
+      .kpi-val.bad { color: #c5221f; }
+      .deliv-meta { font-size: 11px; color: #5f6368; margin-top: 8px; line-height: 1.4; background: #f1f3f4; padding: 6px 8px; border-radius: 4px; }
     </style>
   </head>
   <body>
@@ -418,6 +427,68 @@
       <div id="statusBox" class="status"></div>
     </div>
 
+    <!-- 6. Email Performance & Deliverability Snapshot (Queries Existing Filters) -->
+    <div class="card">
+      <div class="section-toggle" onclick="toggleSection('secDeliverability')">
+        <span>6. Email Deliverability Snapshot</span>
+        <span id="iconDeliverability">▼</span>
+      </div>
+      <div id="secDeliverability">
+        <div class="field">
+          <label for="delivScopeSelect">Query Scope</label>
+          <select id="delivScopeSelect" onchange="refreshDeliverabilitySnapshot_()">
+            <option value="matchFilters" selected>Match Control Panel Filters (Client + Campaign)</option>
+            <option value="clientAll">All Campaigns for Selected Client</option>
+            <option value="all">Agency-Wide (All Clients & Campaigns)</option>
+          </select>
+          <div id="delivScopeText" class="hint">Scope: —</div>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi-tile">
+            <div class="kpi-label">Sent</div>
+            <div class="kpi-val" id="delivSent">0</div>
+          </div>
+          <div class="kpi-tile">
+            <div class="kpi-label">Delivered</div>
+            <div class="kpi-val good" id="delivDelivered">0</div>
+          </div>
+          <div class="kpi-tile">
+            <div class="kpi-label">Hard Bounces</div>
+            <div class="kpi-val bad" id="delivHardBounce">0</div>
+          </div>
+          <div class="kpi-tile">
+            <div class="kpi-label">Soft Bounces</div>
+            <div class="kpi-val warn" id="delivSoftBounce">0</div>
+          </div>
+          <div class="kpi-tile">
+            <div class="kpi-label">Delivery Rate</div>
+            <div class="kpi-val good" id="delivDeliveryRate">0.0%</div>
+          </div>
+          <div class="kpi-tile">
+            <div class="kpi-label">Bounce Rate</div>
+            <div class="kpi-val bad" id="delivBounceRate">0.0%</div>
+          </div>
+          <div class="kpi-tile">
+            <div class="kpi-label">Replies</div>
+            <div class="kpi-val" id="delivReplied">0</div>
+          </div>
+          <div class="kpi-tile">
+            <div class="kpi-label">Reply Rate</div>
+            <div class="kpi-val" id="delivReplyRate">0.0%</div>
+          </div>
+        </div>
+
+        <div id="delivMetaText" class="deliv-meta">No EmailEvents recorded for this filter yet.</div>
+
+        <div class="row" style="margin-top:8px;">
+          <button type="button" id="btnRefreshDeliv" class="btn btn-secondary" onclick="refreshDeliverabilitySnapshot_()">🔄 Refresh Stats</button>
+          <button type="button" id="btnSyncDeliv" class="btn btn-primary" onclick="syncDeliverabilityFromSidebar()">⚡ Sync Events</button>
+        </div>
+        <button type="button" id="btnOpenDelivTab" class="btn btn-secondary" onclick="openDeliverabilityTabFromSidebar()">📊 Open Email Deliverability Tab</button>
+      </div>
+    </div>
+
     <script>
       var serverCampaigns = <?!= (typeof initialCampaigns !== 'undefined' && initialCampaigns) ? JSON.stringify(initialCampaigns) : '[]' ?>;
       var serverConfigsMap = <?!= (typeof initialConfigsMap !== 'undefined' && initialConfigsMap) ? JSON.stringify(initialConfigsMap) : '{}' ?>;
@@ -485,6 +556,7 @@
           document.getElementById('presetNeedSelect').value = 'procurement';
           applyDepartmentPreset('procurement');
         }
+        refreshDeliverabilitySnapshot_();
       };
 
       function setPipelineBusy_(busy) {
@@ -495,6 +567,10 @@
         document.getElementById('btnRefreshCampaigns').disabled = isPipelineBusy;
         document.getElementById('campaignSelect').disabled = isPipelineBusy;
         document.getElementById('departmentOwner').disabled = isPipelineBusy;
+        const btnSyncDeliv = document.getElementById('btnSyncDeliv');
+        const btnRefreshDeliv = document.getElementById('btnRefreshDeliv');
+        if (btnSyncDeliv) btnSyncDeliv.disabled = isPipelineBusy;
+        if (btnRefreshDeliv) btnRefreshDeliv.disabled = isPipelineBusy;
       }
 
       function normalizeClientPrefix_(clientName) {
@@ -833,6 +909,7 @@
           onCampaignSelected(false, 'Switched to ' + selectedClient + ': ');
         } else {
           populateNewCampaignDefaults_(selectedClient);
+          refreshDeliverabilitySnapshot_();
           const suggestedId = document.getElementById('campaignIdInput').value;
           setPipelineBusy_(true);
           showStatus('🔄 Switching workspace to "' + selectedClient + '" and filtering Campaigns & Agent Settings...', 'info');
@@ -858,6 +935,7 @@
       function cancelAddNewClient() {
         document.getElementById('newClientBox').style.display = 'none';
         renderClientOptions(serverClients, lastValidClientOwner || 'Growth Target');
+        refreshDeliverabilitySnapshot_();
       }
 
       function confirmAddNewClient() {
@@ -903,6 +981,7 @@
             } else {
               onCampaignSelected(true);
             }
+            refreshDeliverabilitySnapshot_();
             const suggestedId = document.getElementById('campaignIdInput').value;
             showStatus('✅ ' + (res && res.message ? res.message : 'Client added!') + ' Suggested Campaign ID "' + suggestedId + '" is ready to save.', 'success');
           })
@@ -1001,6 +1080,8 @@
                 } else {
                   populateNewCampaignDefaults_(targetClient);
                 }
+
+                refreshDeliverabilitySnapshot_();
 
                 if (!quiet) {
                   let msg = 'Loaded ' + serverCampaigns.length + ' campaign(s) & ' + activeClientsList.length + ' active client(s).';
@@ -1209,6 +1290,7 @@
             ? selectedVal
             : (lastValidClientOwner || 'Growth Target');
           populateNewCampaignDefaults_(clientName);
+          refreshDeliverabilitySnapshot_();
           const suggestedId = document.getElementById('campaignIdInput').value;
           showStatus('🆕 Ready to create a new campaign for "' + clientName + '" (suggested ID: "' + suggestedId + '"). Customize fields and click Save.', 'info');
           const idInput = document.getElementById('campaignIdInput');
@@ -1218,6 +1300,7 @@
 
         const localData = (serverConfigsMap && serverConfigsMap[cid]) ? serverConfigsMap[cid] : { id: cid };
         populateFormWithData(localData);
+        refreshDeliverabilitySnapshot_();
         showStatus((statusPrefix || '') + 'Loaded configuration for ' + cid, 'info');
 
         if (!skipSync) {
@@ -1231,6 +1314,7 @@
                   populateFormWithData(res.config);
                   renderCampaignOptionsForClient(getCampaignClient_(cid), cid);
                 }
+                refreshDeliverabilitySnapshot_();
                 showStatus('✅ ' + (statusPrefix || '') + cid + ' is now active on Dashboard and across all tabs!', 'success');
               }
             })
@@ -1508,6 +1592,108 @@
             showStatus('Failed to switch tab: ' + err.message, 'error');
           })
           .navigateToReviewQueueSheet();
+      }
+
+      function getCurrentDeliverabilityFilters_() {
+        const mode = document.getElementById('delivScopeSelect')
+          ? document.getElementById('delivScopeSelect').value
+          : 'matchFilters';
+
+        if (mode === 'all') {
+          return { clientFilter: 'All Clients', campaignFilter: 'All Campaigns' };
+        }
+
+        const ownerVal = document.getElementById('departmentOwner').value;
+        const clientFilter = (ownerVal && ownerVal !== '__ADD_NEW_CLIENT__')
+          ? ownerVal
+          : (lastValidClientOwner || 'Growth Target');
+
+        if (mode === 'clientAll') {
+          return { clientFilter: clientFilter, campaignFilter: 'All Campaigns' };
+        }
+
+        const campSelectVal = document.getElementById('campaignSelect').value;
+        const campaignFilter = (campSelectVal && campSelectVal !== '__NEW_CAMPAIGN__')
+          ? campSelectVal
+          : 'All Campaigns';
+
+        return { clientFilter: clientFilter, campaignFilter: campaignFilter };
+      }
+
+      function refreshDeliverabilitySnapshot_() {
+        const filters = getCurrentDeliverabilityFilters_();
+        const scopeText = document.getElementById('delivScopeText');
+        if (scopeText) {
+          scopeText.textContent = 'Querying: ' + filters.clientFilter + '  |  ' + filters.campaignFilter;
+        }
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (!res || !res.success) return;
+            document.getElementById('delivSent').textContent = res.sent || 0;
+            document.getElementById('delivDelivered').textContent = res.delivered || 0;
+            document.getElementById('delivHardBounce').textContent = res.hardBounces || 0;
+            document.getElementById('delivSoftBounce').textContent = res.softBounces || 0;
+            document.getElementById('delivReplied').textContent = res.replied || 0;
+            document.getElementById('delivDeliveryRate').textContent = ((res.deliveryRate || 0) * 100).toFixed(1) + '%';
+            document.getElementById('delivBounceRate').textContent = ((res.bounceRate || 0) * 100).toFixed(1) + '%';
+            document.getElementById('delivReplyRate').textContent = ((res.replyRate || 0) * 100).toFixed(1) + '%';
+
+            const metaEl = document.getElementById('delivMetaText');
+            if (metaEl) {
+              if ((res.sent || 0) === 0 && (res.hardBounces || 0) === 0 && (res.softBounces || 0) === 0 && (res.replied || 0) === 0) {
+                metaEl.textContent = 'No EmailEvents recorded for "' + res.clientFilter + ' | ' + res.campaignFilter + '" yet.';
+              } else {
+                const parts = [];
+                if (res.lastEventAt) parts.push('Last event: ' + res.lastEventAt);
+                if (res.topSmtpError) parts.push('Top SMTP bounce: ' + res.topSmtpError);
+                metaEl.textContent = parts.length > 0 ? parts.join(' • ') : 'Metrics synced from EmailEvents.';
+              }
+            }
+          })
+          .withFailureHandler(function(err) {
+            const metaEl = document.getElementById('delivMetaText');
+            if (metaEl) metaEl.textContent = 'Could not query EmailEvents: ' + err.message;
+          })
+          .queryEmailDeliverabilityMetrics(filters.clientFilter, filters.campaignFilter);
+      }
+
+      function syncDeliverabilityFromSidebar() {
+        if (isPipelineBusy) return;
+        setPipelineBusy_(true);
+        showStatus('⚡ Syncing Gmail, Client Relay & Microsoft 365 deliverability events...', 'info');
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            setPipelineBusy_(false);
+            refreshDeliverabilitySnapshot_();
+            if (res && res.success) {
+              showStatus('✅ ' + (res.message || 'Deliverability events synced!'), 'success');
+            } else {
+              showStatus('⚠️ ' + (res && res.message ? res.message : 'Sync completed with warnings.'), 'error');
+            }
+          })
+          .withFailureHandler(function(err) {
+            setPipelineBusy_(false);
+            showStatus('Deliverability sync error: ' + err.message, 'error');
+          })
+          .syncEmailDeliverabilityFromSidebar();
+      }
+
+      function openDeliverabilityTabFromSidebar() {
+        showStatus('Opening Email Deliverability tab...', 'info');
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (res && res.success) {
+              showStatus(res.message, 'success');
+            } else {
+              showStatus(res && res.message ? res.message : 'Could not open Email Deliverability tab.', 'error');
+            }
+          })
+          .withFailureHandler(function(err) {
+            showStatus('Tab switch error: ' + err.message, 'error');
+          })
+          .openEmailDeliverabilitySheet();
       }
     </script>
   </body>
