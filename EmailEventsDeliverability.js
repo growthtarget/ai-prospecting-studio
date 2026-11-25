@@ -13,10 +13,11 @@
  *    daily-volume tables, and 3 native Google Sheets charts.
  * 3. Ingests events from Local Gmail, External Client Gmail Relays (v2.2+),
  *    and Microsoft 365 / Exchange Online (Graph API v1.0) using strict
- *    CLIENT_{NAME}_* isolation with zero fallback.
+ *    CLIENT_{NAME}_* isolation with zero fallback and optional Client/Campaign
+ *    scoping for Control Panel syncs.
  * 4. Exposes queryEmailDeliverabilityMetrics(clientFilter, campaignFilter)
- *    and syncEmailDeliverabilityFromSidebar() so ControlPanel.html queries and
- *    syncs cleanly without blocking modal alerts or changing client config.
+ *    and syncEmailDeliverabilityFromSidebar(clientFilter, campaignFilter) so
+ *    ControlPanel.html queries and syncs cleanly without blocking modal alerts.
  * ============================================================================
  */
 
@@ -466,7 +467,7 @@ function setupEmailDeliverabilityDashboardTab_(ss) {
  * Refreshes the Client Filter (B3) and Campaign Filter (D3) dropdowns on
  * "Email Deliverability" from existing Lists & Settings, Campaigns, and EmailEvents.
  */
-function refreshDeliverabilityFilterDropdowns_(ss) {
+function refreshDeliverabilityFilterDropdowns_(ss, extraClient, extraCampaign) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!spreadsheet) return;
 
@@ -521,6 +522,9 @@ function refreshDeliverabilityFilterDropdowns_(ss) {
     });
   }
 
+  if (extraClient) addClient(extraClient);
+  if (extraCampaign) addCampaign(extraCampaign);
+
   const currentClient = String(dash.getRange('B3').getValue() || '').trim();
   if (currentClient && currentClient !== 'All Clients') addClient(currentClient);
 
@@ -536,7 +540,7 @@ function refreshDeliverabilityFilterDropdowns_(ss) {
 
 /**
  * Syncs "Email Deliverability" tab filter cells (B3 / D3) to a Client & Campaign
- * without overriding valid options.
+ * while guaranteeing values exist in the dropdown validation list.
  */
 function syncDeliverabilityTabFilters_(ss, clientFilter, campaignFilter) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -544,13 +548,16 @@ function syncDeliverabilityTabFilters_(ss, clientFilter, campaignFilter) {
   const dash = spreadsheet.getSheetByName(DELIVERABILITY_DASHBOARD_SHEET_NAME);
   if (!dash) return;
 
-  refreshDeliverabilityFilterDropdowns_(spreadsheet);
+  const cleanClient = String(clientFilter || '').trim();
+  const cleanCamp = String(campaignFilter || '').trim();
 
-  if (clientFilter) {
-    dash.getRange('B3').setValue(String(clientFilter).trim() || 'All Clients');
+  refreshDeliverabilityFilterDropdowns_(spreadsheet, cleanClient, cleanCamp);
+
+  if (cleanClient) {
+    dash.getRange('B3').setValue(cleanClient);
   }
-  if (campaignFilter) {
-    dash.getRange('D3').setValue(String(campaignFilter).trim() || 'All Campaigns');
+  if (cleanCamp) {
+    dash.getRange('D3').setValue(cleanCamp);
   }
 }
 
@@ -808,29 +815,46 @@ function installDeliverabilitySyncTrigger() {
 }
 
 /**
- * Menu & Time-Trigger Entry Point (shows summary dialog when run interactively from menu).
+ * Menu & Time-Trigger Entry Point (syncs all active non-archived clients;
+ * shows summary dialog when run interactively from menu).
  */
 function syncEmailDeliverabilityEvents() {
-  return runEmailDeliverabilitySync_(false);
+  return runEmailDeliverabilitySync_(false, null);
 }
 
 /**
  * Silent Sidebar Entry Point (never blocks ControlPanel.html with a modal ui.alert).
+ * Respects the Client / Campaign scope selected in ControlPanel.html (or defaults to the
+ * currently active campaign & client if called with no arguments).
  */
-function syncEmailDeliverabilityFromSidebar() {
-  return runEmailDeliverabilitySync_(true);
+function syncEmailDeliverabilityFromSidebar(clientFilter, campaignFilter) {
+  let resolvedClient = (clientFilter !== undefined && clientFilter !== null) ? String(clientFilter).trim() : '';
+  let resolvedCamp = (campaignFilter !== undefined && campaignFilter !== null) ? String(campaignFilter).trim() : '';
+
+  if (clientFilter === undefined && campaignFilter === undefined) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+    resolvedCamp = (typeof getStudioActiveCampaignId_ === 'function') ? getStudioActiveCampaignId_() : '';
+    resolvedClient = (typeof resolveCampaignClientName_ === 'function')
+      ? resolveCampaignClientName_(resolvedCamp, '', ss)
+      : 'Growth Target';
+  }
+
+  return runEmailDeliverabilitySync_(true, {
+    clientFilter: resolvedClient || 'All Clients',
+    campaignFilter: resolvedCamp || 'All Campaigns'
+  });
 }
 
 /**
  * MASTER INGESTION RUNNER
  * 1. Promotes manually sent drafts from Gmail & Microsoft 365 into Sent events.
  * 2. Polls Gmail (local & ClientGmailRelay.gs) and Microsoft 365 (Graph API) per client
- *    with strict zero-fallback credential isolation.
+ *    with strict zero-fallback credential isolation and optional Client/Campaign scoping.
  * 3. Parses SMTP DSN bounces (Hard/Soft) and Replies.
  * 4. Confirms Delivered events (via Exchange Message Trace or 4h no-bounce grace window),
  *    deduplicates against already-delivered message IDs, and reconciles late bounces cleanly.
  */
-function runEmailDeliverabilitySync_(silentMode) {
+function runEmailDeliverabilitySync_(silentMode, options) {
   let ui = null;
   if (!silentMode) {
     try { ui = SpreadsheetApp.getUi(); } catch (e) {}
@@ -847,6 +871,28 @@ function runEmailDeliverabilitySync_(silentMode) {
   }
 
   try {
+    const opts = options || {};
+    const rawClientFilter = String(opts.clientFilter || '').trim();
+    const rawCampFilter = String(opts.campaignFilter || '').trim();
+    const filterByClient = Boolean(rawClientFilter && rawClientFilter !== 'All Clients' && rawClientFilter !== '__ALL__');
+    const filterByCamp = Boolean(rawCampFilter && rawCampFilter !== 'All Campaigns' && rawCampFilter !== '__NEW_CAMPAIGN__' && rawCampFilter !== '__ALL__');
+
+    const inactiveClientsMap = {};
+    if (!filterByClient && typeof getInactiveClientsList_ === 'function') {
+      getInactiveClientsList_(ss).forEach(function(cName) {
+        const low = String(cName || '').trim().toLowerCase();
+        if (low) inactiveClientsMap[low] = true;
+      });
+    }
+
+    const scopeOpts = {
+      rawClientFilter: rawClientFilter || 'All Clients',
+      rawCampFilter: rawCampFilter || 'All Campaigns',
+      filterByClient: filterByClient,
+      filterByCamp: filterByCamp,
+      inactiveClientsMap: inactiveClientsMap
+    };
+
     const eventsSheet = setupEmailEventsTab_(ss);
     if (!ss.getSheetByName(DELIVERABILITY_DASHBOARD_SHEET_NAME)) {
       setupEmailDeliverabilityDashboardTab_(ss);
@@ -904,15 +950,23 @@ function runEmailDeliverabilitySync_(silentMode) {
       }
     }
 
+    const scopedSentEvents = sentEvents.filter(function(s) {
+      if (filterByClient && String(s.client_id || '').toLowerCase() !== rawClientFilter.toLowerCase()) return false;
+      if (filterByCamp && String(s.campaign_id || '').toLowerCase() !== rawCampFilter.toLowerCase()) return false;
+      if (!filterByClient && inactiveClientsMap[String(s.client_id || '').toLowerCase()]) return false;
+      return true;
+    });
+
     // Collect tracked Prospect Review Queue rows (Drafts pending manual send + Sent rows)
     const queueInfo = readQueueTrackingContext_(ss);
 
-    // Group active mailboxes by (clientName, providerType, mailbox)
-    const mailboxTargets = collectActiveMailboxTargets_(ss, sentEvents, queueInfo);
+    // Group active mailboxes by (clientName, providerType, mailbox) respecting active scope
+    const mailboxTargets = collectActiveMailboxTargets_(ss, scopedSentEvents, queueInfo, scopeOpts);
     const pendingNewRows = [];
     const assumedRowsToDelete = {};
     const clientNotes = [];
     const msTokenCache = {};
+    let detectedAuthUrl = '';
 
     function stageNewEvent(evt) {
       const eType = normalizeDeliverabilityEventType_(evt.event_type);
@@ -961,7 +1015,7 @@ function runEmailDeliverabilitySync_(silentMode) {
       ]);
 
       if (eType === 'Sent') {
-        sentEvents.push({
+        scopedSentEvents.push({
           client_id: clientId,
           campaign_id: campId,
           provider: prov,
@@ -989,32 +1043,39 @@ function runEmailDeliverabilitySync_(silentMode) {
         if (target.provider === 'Microsoft 365') {
           syncMicrosoft365MailboxEvents_(
             target,
-            sentEvents,
+            scopedSentEvents,
             queueInfo,
             msTokenCache,
             stageNewEvent,
-            ss
+            ss,
+            scopeOpts
           );
         } else {
           syncGmailMailboxEvents_(
             target,
-            sentEvents,
+            scopedSentEvents,
             queueInfo,
             stageNewEvent,
-            ss
+            ss,
+            scopeOpts
           );
         }
       } catch (clientErr) {
         Logger.log('[Deliverability Sync] Skipped ' + target.clientName + ' (' + target.provider + '): ' + clientErr.message);
         clientNotes.push(target.clientName + ' (' + target.provider + '): ' + clientErr.message);
+        if (!detectedAuthUrl && clientErr.authUrl) {
+          detectedAuthUrl = clientErr.authUrl;
+        }
       }
     });
 
-    // Apply 4-hour no-bounce delivery confirmation ONLY for Sent messages without existing Delivered/Bounced
+    // Apply 4-hour no-bounce delivery confirmation ONLY for scoped Sent messages without existing Delivered/Bounced
     const graceCutoffMs = Date.now() - (DELIVERABILITY_DELIVERY_GRACE_HOURS * 60 * 60 * 1000);
-    for (let i = 0; i < sentEvents.length; i++) {
-      const s = sentEvents[i];
+    for (let i = 0; i < scopedSentEvents.length; i++) {
+      const s = scopedSentEvents[i];
       if (!s.event_date || s.event_date.getTime() > graceCutoffMs) continue;
+      if (filterByClient && String(s.client_id || '').toLowerCase() !== rawClientFilter.toLowerCase()) continue;
+      if (filterByCamp && String(s.campaign_id || '').toLowerCase() !== rawCampFilter.toLowerCase()) continue;
 
       const msgIdLow = String(s.provider_message_id || '').toLowerCase();
       const recipKey = (s.client_id + '::' + s.recipient).toLowerCase();
@@ -1054,16 +1115,25 @@ function runEmailDeliverabilitySync_(silentMode) {
     refreshDeliverabilityFilterDropdowns_(ss);
     SpreadsheetApp.flush();
 
-    const summary = 'Synced ' + pendingNewRows.length + ' new event(s) across ' + mailboxTargets.length + ' mailbox target(s).' +
+    const scopeLabel = (filterByClient || filterByCamp)
+      ? (' [' + scopeOpts.rawClientFilter + ' | ' + scopeOpts.rawCampFilter + ']')
+      : '';
+
+    const summary = 'Synced ' + pendingNewRows.length + ' new event(s) across ' +
+      mailboxTargets.length + ' mailbox target(s)' + scopeLabel + '.' +
       (clientNotes.length > 0 ? ('\nSkipped: ' + clientNotes.join(' | ')) : '');
 
     if (ui) ui.alert('Email Deliverability Sync Complete', summary, ui.ButtonSet.OK);
     else Logger.log(summary);
 
     return {
-      success: true,
+      success: clientNotes.length === 0 || pendingNewRows.length > 0,
+      hasWarnings: clientNotes.length > 0,
       addedCount: pendingNewRows.length,
       targetsChecked: mailboxTargets.length,
+      clientFilter: scopeOpts.rawClientFilter,
+      campaignFilter: scopeOpts.rawCampFilter,
+      authUrl: detectedAuthUrl,
       notes: clientNotes,
       message: summary
     };
@@ -1146,12 +1216,28 @@ function readQueueTrackingContext_(ss) {
 
 /**
  * Discovers unique active (clientName, provider, mailbox) targets from Campaigns,
- * existing Sent events, and tracked Prospect Review Queue rows.
+ * existing Sent events, and tracked Prospect Review Queue rows — filtered by scopeOpts.
  */
-function collectActiveMailboxTargets_(ss, sentEvents, queueInfo) {
+function collectActiveMailboxTargets_(ss, sentEvents, queueInfo, scopeOpts) {
   const targetsMap = {};
+  const scope = scopeOpts || {};
+  const filterByClient = Boolean(scope.filterByClient);
+  const filterByCamp = Boolean(scope.filterByCamp);
+  const targetClientLow = String(scope.rawClientFilter || '').trim().toLowerCase();
+  const targetCampLow = String(scope.rawCampFilter || '').trim().toLowerCase();
+  const inactiveClientsMap = scope.inactiveClientsMap || {};
+
+  function matchesScope(clientName, campaignId) {
+    const cLow = String(clientName || '').trim().toLowerCase();
+    const cidLow = String(campaignId || '').trim().toLowerCase();
+    if (filterByClient && cLow !== targetClientLow) return false;
+    if (filterByCamp && cidLow !== targetCampLow) return false;
+    if (!filterByClient && inactiveClientsMap[cLow]) return false;
+    return true;
+  }
 
   function addTarget(clientName, providerRaw, mailbox, campaignId) {
+    if (!matchesScope(clientName, campaignId)) return;
     const cleanClient = String(clientName || 'Growth Target').trim();
     const normProv = normalizeDeliverabilityProvider_(providerRaw);
     const cleanBox = String(mailbox || '').trim().toLowerCase();
@@ -1197,7 +1283,7 @@ function collectActiveMailboxTargets_(ss, sentEvents, queueInfo) {
 
       campMeta[cid] = { clientName: clientName, provider: prov, mailbox: mailbox };
 
-      if (status !== 'paused' && status !== 'archived') {
+      if (filterByCamp || (status !== 'paused' && status !== 'archived')) {
         const pLow = prov.toLowerCase();
         if (!prov || pLow.indexOf('gmail') >= 0 || pLow.indexOf('workspace') >= 0 || pLow.indexOf('draft') >= 0 || pLow.indexOf('direct') >= 0 || pLow.indexOf('microsoft') >= 0 || pLow.indexOf('m365') >= 0) {
           addTarget(clientName, prov || 'Gmail', mailbox, cid);
@@ -1220,13 +1306,40 @@ function collectActiveMailboxTargets_(ss, sentEvents, queueInfo) {
 }
 
 /**
+ * Helper to build a helpful Gmail authorization error including Google's direct auth URL.
+ */
+function buildGmailPermissionError_(rawErrMsg) {
+  let authUrl = '';
+  try {
+    if (typeof ScriptApp !== 'undefined' && typeof ScriptApp.getAuthorizationInfo === 'function') {
+      const authInfo = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL, ['https://mail.google.com/']);
+      if (authInfo && authInfo.getAuthorizationStatus() === ScriptApp.AuthorizationStatus.REQUIRED) {
+        authUrl = authInfo.getAuthorizationUrl() || '';
+      }
+    }
+  } catch (e) {}
+
+  const err = new Error(
+    'Gmail read permission (https://mail.google.com/) is not granted yet. ' +
+    'Open Extensions > Apps Script > Code.gs, choose "authorizeStudioPermissions" in the Run dropdown, click Run, and check "Select all" on Google\'s permission screen.' +
+    (authUrl ? (' Direct auth link: ' + authUrl) : '') +
+    (rawErrMsg ? (' [' + rawErrMsg + ']') : '')
+  );
+  if (authUrl) err.authUrl = authUrl;
+  return err;
+}
+
+/**
  * Polls Gmail events (Local Agency GmailApp OR External Client GmailRelay.gs v2.2+).
  */
-function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, ss) {
+function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, ss, scopeOpts) {
   const clientName = target.clientName;
   const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
+  const filterByCamp = Boolean(scopeOpts && scopeOpts.filterByCamp);
   const clientSent = sentEvents.filter(function(s) {
-    return s.client_id.toLowerCase() === clientName.toLowerCase() && s.provider === 'Gmail';
+    return s.client_id.toLowerCase() === clientName.toLowerCase() &&
+      s.provider === 'Gmail' &&
+      (!filterByCamp || target.campaignIds[s.campaign_id]);
   });
   const trackedRecipients = {};
   const sentByMsgId = {};
@@ -1249,109 +1362,135 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
   });
 
   if (isLocal) {
-    // 1. Promote any local Gmail drafts that the user sent manually
-    clientDrafts.forEach(function(draftItem) {
-      try {
-        const draftObj = GmailApp.getDraft(draftItem.msgId);
-        if (!draftObj) {
-          const sentThreads = GmailApp.search('in:sent to:' + draftItem.email + ' newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd', 0, 5);
-          if (sentThreads && sentThreads.length > 0) {
-            const msgs = sentThreads[0].getMessages();
-            const lastMsg = msgs[msgs.length - 1];
-            let rfcId = '';
-            try { rfcId = lastMsg ? (lastMsg.getHeader('Message-ID') || '') : ''; } catch (e) {}
-            const sentMsgId = rfcId || (lastMsg ? lastMsg.getId() : draftItem.msgId);
-            const sentAt = lastMsg ? lastMsg.getDate() : new Date();
-
-            promoteQueueDraftToSent_(queueInfo, draftItem, sentMsgId, sentAt);
-            stageNewEvent({
-              client_id: clientName,
-              campaign_id: draftItem.campaignId,
-              provider: 'Gmail',
-              provider_message_id: sentMsgId,
-              event_type: 'Sent',
-              event_date: sentAt,
-              recipient: draftItem.email,
-              smtp_code: '250 2.0.0',
-              reason: 'Promoted from Gmail Draft to Sent'
-            });
-            trackedRecipients[draftItem.email] = true;
-            sentByMsgId[sentMsgId.toLowerCase()] = { campaign_id: draftItem.campaignId, recipient: draftItem.email, event_date: sentAt, provider_message_id: sentMsgId };
-          }
+    // Pre-flight check for granular Gmail read scope
+    try {
+      if (typeof ScriptApp !== 'undefined' && typeof ScriptApp.getAuthorizationInfo === 'function') {
+        const authInfo = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL, ['https://mail.google.com/']);
+        if (authInfo && authInfo.getAuthorizationStatus() === ScriptApp.AuthorizationStatus.REQUIRED) {
+          throw buildGmailPermissionError_('AuthorizationStatus.REQUIRED');
         }
-      } catch (draftErr) {
-        Logger.log('Local draft check notice (' + draftItem.msgId + '): ' + draftErr.message);
       }
-    });
-
-    // 2. Poll Gmail DSN bounce messages
-    const bounceThreads = GmailApp.search('from:(mailer-daemon OR postmaster) newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd', 0, 50);
-    bounceThreads.forEach(function(thread) {
-      const msgs = thread.getMessages();
-      msgs.forEach(function(msg) {
-        let raw = '';
-        try { raw = msg.getRawContent(); } catch (e) { raw = msg.getPlainBody() || ''; }
-        const parsedBounce = parseSmtpBounceDetails_(msg.getSubject(), msg.getPlainBody() || '', raw);
-        const recip = parsedBounce.recipient;
-        if (!recip) return;
-
-        const matchSent = (parsedBounce.originalMessageId && sentByMsgId[parsedBounce.originalMessageId.toLowerCase()]) ||
-          sentByRecipient[recip] ||
-          (queueInfo.byRecipient[recip] && target.campaignIds[queueInfo.byRecipient[recip].campaignId] ? { campaign_id: queueInfo.byRecipient[recip].campaignId } : null);
-        if (!matchSent) return;
-
-        stageNewEvent({
-          client_id: clientName,
-          campaign_id: matchSent.campaign_id,
-          provider: 'Gmail',
-          provider_message_id: parsedBounce.originalMessageId || matchSent.provider_message_id || msg.getId(),
-          event_type: 'Bounced',
-          event_date: msg.getDate(),
-          recipient: recip,
-          smtp_code: parsedBounce.smtpCode,
-          bounce_type: parsedBounce.bounceType,
-          reason: parsedBounce.reason,
-          fallbackSeed: msg.getId()
-        });
-      });
-    });
-
-    // 3. Poll prospect replies matching tracked recipients
-    const recipList = Object.keys(trackedRecipients);
-    if (recipList.length > 0) {
-      const myEmail = (function() {
-        try { return String(Session.getActiveUser().getEmail() || '').toLowerCase(); } catch (e) { return ''; }
-      })();
-
-      for (let idx = 0; idx < recipList.length; idx += 15) {
-        const chunk = recipList.slice(idx, idx + 15);
-        const query = 'in:anywhere newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd -from:mailer-daemon -from:postmaster (' +
-          chunk.map(function(e) { return 'from:' + e; }).join(' OR ') + ')';
-        const replyThreads = GmailApp.search(query, 0, 50);
-        replyThreads.forEach(function(thread) {
-          thread.getMessages().forEach(function(msg) {
-            const sender = extractEmailAddress_(msg.getFrom());
-            if (!sender || sender === myEmail || !trackedRecipients[sender]) return;
-            const matchSent = sentByRecipient[sender] || { campaign_id: (queueInfo.byRecipient[sender] ? queueInfo.byRecipient[sender].campaignId : '') };
-            if (!matchSent || !matchSent.campaign_id) return;
-
-            stageNewEvent({
-              client_id: clientName,
-              campaign_id: matchSent.campaign_id,
-              provider: 'Gmail',
-              provider_message_id: msg.getId(),
-              event_type: 'Replied',
-              event_date: msg.getDate(),
-              recipient: sender,
-              smtp_code: '',
-              reason: 'Reply received: ' + String(msg.getSubject() || '').slice(0, 120),
-              fallbackSeed: msg.getId()
-            });
-          });
-        });
+    } catch (preErr) {
+      if (preErr && (preErr.authUrl || String(preErr.message || '').indexOf('Gmail read permission') >= 0)) {
+        throw preErr;
       }
     }
-    return;
+
+    try {
+      // 1. Promote any local Gmail drafts that the user sent manually
+      clientDrafts.forEach(function(draftItem) {
+        try {
+          const draftObj = GmailApp.getDraft(draftItem.msgId);
+          if (!draftObj) {
+            const sentThreads = GmailApp.search('in:sent to:' + draftItem.email + ' newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd', 0, 5);
+            if (sentThreads && sentThreads.length > 0) {
+              const msgs = sentThreads[0].getMessages();
+              const lastMsg = msgs[msgs.length - 1];
+              let rfcId = '';
+              try { rfcId = lastMsg ? (lastMsg.getHeader('Message-ID') || '') : ''; } catch (e) {}
+              const sentMsgId = rfcId || (lastMsg ? lastMsg.getId() : draftItem.msgId);
+              const sentAt = lastMsg ? lastMsg.getDate() : new Date();
+
+              promoteQueueDraftToSent_(queueInfo, draftItem, sentMsgId, sentAt);
+              stageNewEvent({
+                client_id: clientName,
+                campaign_id: draftItem.campaignId,
+                provider: 'Gmail',
+                provider_message_id: sentMsgId,
+                event_type: 'Sent',
+                event_date: sentAt,
+                recipient: draftItem.email,
+                smtp_code: '250 2.0.0',
+                reason: 'Promoted from Gmail Draft to Sent'
+              });
+              trackedRecipients[draftItem.email] = true;
+              sentByMsgId[sentMsgId.toLowerCase()] = { campaign_id: draftItem.campaignId, recipient: draftItem.email, event_date: sentAt, provider_message_id: sentMsgId };
+            }
+          }
+        } catch (draftErr) {
+          const dMsg = String(draftErr && draftErr.message ? draftErr.message : draftErr);
+          if (dMsg.indexOf('does not have permission') >= 0 || dMsg.indexOf('Required permissions') >= 0) {
+            throw draftErr;
+          }
+          Logger.log('Local draft check notice (' + draftItem.msgId + '): ' + dMsg);
+        }
+      });
+
+      // 2. Poll Gmail DSN bounce messages
+      const bounceThreads = GmailApp.search('from:(mailer-daemon OR postmaster) newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd', 0, 50);
+      bounceThreads.forEach(function(thread) {
+        const msgs = thread.getMessages();
+        msgs.forEach(function(msg) {
+          let raw = '';
+          try { raw = msg.getRawContent(); } catch (e) { raw = msg.getPlainBody() || ''; }
+          const parsedBounce = parseSmtpBounceDetails_(msg.getSubject(), msg.getPlainBody() || '', raw);
+          const recip = parsedBounce.recipient;
+          if (!recip) return;
+
+          const matchSent = (parsedBounce.originalMessageId && sentByMsgId[parsedBounce.originalMessageId.toLowerCase()]) ||
+            sentByRecipient[recip] ||
+            (queueInfo.byRecipient[recip] && target.campaignIds[queueInfo.byRecipient[recip].campaignId] ? { campaign_id: queueInfo.byRecipient[recip].campaignId } : null);
+          if (!matchSent) return;
+
+          stageNewEvent({
+            client_id: clientName,
+            campaign_id: matchSent.campaign_id,
+            provider: 'Gmail',
+            provider_message_id: parsedBounce.originalMessageId || matchSent.provider_message_id || msg.getId(),
+            event_type: 'Bounced',
+            event_date: msg.getDate(),
+            recipient: recip,
+            smtp_code: parsedBounce.smtpCode,
+            bounce_type: parsedBounce.bounceType,
+            reason: parsedBounce.reason,
+            fallbackSeed: msg.getId()
+          });
+        });
+      });
+
+      // 3. Poll prospect replies matching tracked recipients
+      const recipList = Object.keys(trackedRecipients);
+      if (recipList.length > 0) {
+        const myEmail = (function() {
+          try { return String(Session.getActiveUser().getEmail() || '').toLowerCase(); } catch (e) { return ''; }
+        })();
+
+        for (let idx = 0; idx < recipList.length; idx += 15) {
+          const chunk = recipList.slice(idx, idx + 15);
+          const query = 'in:anywhere newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd -from:mailer-daemon -from:postmaster (' +
+            chunk.map(function(e) { return 'from:' + e; }).join(' OR ') + ')';
+          const replyThreads = GmailApp.search(query, 0, 50);
+          replyThreads.forEach(function(thread) {
+            thread.getMessages().forEach(function(msg) {
+              const sender = extractEmailAddress_(msg.getFrom());
+              if (!sender || sender === myEmail || !trackedRecipients[sender]) return;
+              const matchSent = sentByRecipient[sender] || { campaign_id: (queueInfo.byRecipient[sender] ? queueInfo.byRecipient[sender].campaignId : '') };
+              if (!matchSent || !matchSent.campaign_id) return;
+
+              stageNewEvent({
+                client_id: clientName,
+                campaign_id: matchSent.campaign_id,
+                provider: 'Gmail',
+                provider_message_id: msg.getId(),
+                event_type: 'Replied',
+                event_date: msg.getDate(),
+                recipient: sender,
+                smtp_code: '',
+                reason: 'Reply received: ' + String(msg.getSubject() || '').slice(0, 120),
+                fallbackSeed: msg.getId()
+              });
+            });
+          });
+        }
+      }
+      return;
+    } catch (gmailErr) {
+      const errMsg = String(gmailErr && gmailErr.message ? gmailErr.message : gmailErr);
+      if (errMsg.indexOf('does not have permission') >= 0 || errMsg.indexOf('Required permissions') >= 0) {
+        throw buildGmailPermissionError_(errMsg);
+      }
+      throw gmailErr;
+    }
   }
 
   // EXTERNAL CLIENT: Strict zero-fallback ClientGmailRelay.gs pollEvents call
@@ -1406,7 +1545,7 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
     if (matchDraft) {
       promoteQueueDraftToSent_(queueInfo, matchDraft, sentMsgId, sentAt);
     }
-    if (campId && recip) {
+    if (campId && recip && (!filterByCamp || target.campaignIds[campId])) {
       stageNewEvent({
         client_id: clientName,
         campaign_id: campId,
@@ -1427,8 +1566,9 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
   (parsed.bounces || []).forEach(function(b) {
     const recip = String(b.recipient || '').toLowerCase();
     const matchSent = (b.originalMessageId && sentByMsgId[String(b.originalMessageId).toLowerCase()]) || sentByRecipient[recip];
-    if (!matchSent && (!recip || !queueInfo.byRecipient[recip])) return;
-    const campId = matchSent ? matchSent.campaign_id : queueInfo.byRecipient[recip].campaignId;
+    const qMatch = (recip && queueInfo.byRecipient[recip] && target.campaignIds[queueInfo.byRecipient[recip].campaignId]) ? queueInfo.byRecipient[recip] : null;
+    if (!matchSent && !qMatch) return;
+    const campId = matchSent ? matchSent.campaign_id : qMatch.campaignId;
 
     stageNewEvent({
       client_id: clientName,
@@ -1449,7 +1589,8 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
   (parsed.replies || []).forEach(function(r) {
     const recip = String(r.recipient || '').toLowerCase();
     const matchSent = sentByRecipient[recip];
-    const campId = matchSent ? matchSent.campaign_id : (queueInfo.byRecipient[recip] ? queueInfo.byRecipient[recip].campaignId : '');
+    const qMatch = (recip && queueInfo.byRecipient[recip] && target.campaignIds[queueInfo.byRecipient[recip].campaignId]) ? queueInfo.byRecipient[recip] : null;
+    const campId = matchSent ? matchSent.campaign_id : (qMatch ? qMatch.campaignId : '');
     if (!campId || !recip) return;
 
     stageNewEvent({
@@ -1471,9 +1612,10 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
  * Polls Microsoft 365 / Exchange Online events via Microsoft Graph API v1.0
  * using strict CLIENT_{NAME}_MS_* credentials (or local MS_* for Growth Target).
  */
-function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCache, stageNewEvent, ss) {
+function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCache, stageNewEvent, ss, scopeOpts) {
   const clientName = target.clientName;
   const mailbox = target.mailbox;
+  const filterByCamp = Boolean(scopeOpts && scopeOpts.filterByCamp);
   if (!mailbox || mailbox.indexOf('@') < 1) {
     throw new Error('No Sender Email / Mailbox configured for Microsoft 365 campaign.');
   }
@@ -1489,7 +1631,9 @@ function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCa
   const accessToken = getMicrosoftGraphAccessToken_(tenantId, clientId, clientSecret, clientName, msTokenCache);
 
   const clientSent = sentEvents.filter(function(s) {
-    return s.client_id.toLowerCase() === clientName.toLowerCase() && s.provider === 'Microsoft 365';
+    return s.client_id.toLowerCase() === clientName.toLowerCase() &&
+      s.provider === 'Microsoft 365' &&
+      (!filterByCamp || target.campaignIds[s.campaign_id]);
   });
   const sentByMsgId = {};
   const sentByRecipient = {};
@@ -1674,7 +1818,8 @@ function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCa
           fallbackSeed: msg.id
         });
       } else if (trackedRecipients[fromAddr]) {
-        const matchSent = sentByRecipient[fromAddr] || { campaign_id: (queueInfo.byRecipient[fromAddr] ? queueInfo.byRecipient[fromAddr].campaignId : '') };
+        const qMatch = (queueInfo.byRecipient[fromAddr] && target.campaignIds[queueInfo.byRecipient[fromAddr].campaignId]) ? queueInfo.byRecipient[fromAddr] : null;
+        const matchSent = sentByRecipient[fromAddr] || (qMatch ? { campaign_id: qMatch.campaignId } : null);
         if (!matchSent || !matchSent.campaign_id) return;
 
         stageNewEvent({

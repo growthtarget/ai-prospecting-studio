@@ -27,7 +27,7 @@
       .btn-icon { width: auto; display: inline-block; padding: 4px 8px; font-size: 11px; margin-top: 0; }
       .row { display: flex; gap: 8px; }
       .row .field { flex: 1; }
-      .status { font-size: 11px; padding: 8px; border-radius: 4px; margin-top: 8px; display: none; line-height: 1.4; }
+      .status { font-size: 11px; padding: 8px; border-radius: 4px; margin-top: 8px; display: none; line-height: 1.4; word-break: break-word; }
       .status.info { display: block; background: #e8f0fe; color: #174ea6; border: 1px solid #d2e3fc; }
       .status.success { display: block; background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
       .status.error { display: block; background: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }
@@ -912,12 +912,12 @@
           refreshDeliverabilitySnapshot_();
           const suggestedId = document.getElementById('campaignIdInput').value;
           setPipelineBusy_(true);
-          showStatus('🔄 Switching workspace to "' + selectedClient + '" and filtering Campaigns & Agent Settings...', 'info');
+          showStatus('🔄 Switching workspace to "' + selectedClient + '" and filtering Campaigns, Email Deliverability & Agent Settings...', 'info');
           google.script.run
             .withSuccessHandler(function(res) {
               setPipelineBusy_(false);
               showStatus(
-                '✅ Switched to "' + selectedClient + '" (Campaigns & Agent Settings filtered). Suggested ID "' + suggestedId + '" is ready — customize settings and click Save.',
+                '✅ Switched to "' + selectedClient + '" (Campaigns, Email Deliverability & Agent Settings filtered). Suggested ID "' + suggestedId + '" is ready — customize settings and click Save.',
                 'success'
               );
             })
@@ -1021,9 +1021,23 @@
         }
       }
 
-      function showStatus(msg, type) {
+      function showStatus(msg, type, authUrl) {
         const box = document.getElementById('statusBox');
-        box.textContent = msg;
+        box.innerHTML = '';
+        box.appendChild(document.createTextNode(String(msg || '')));
+        if (authUrl && /^https:\/\/accounts\.google\.com\//i.test(authUrl)) {
+          box.appendChild(document.createElement('br'));
+          const link = document.createElement('a');
+          link.href = authUrl;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.style.display = 'inline-block';
+          link.style.marginTop = '6px';
+          link.style.fontWeight = '700';
+          link.style.color = '#174ea6';
+          link.textContent = '🔓 Click here to authorize Gmail read permission (Select all), then click Sync Events again';
+          box.appendChild(link);
+        }
         box.className = 'status ' + (type || 'info');
       }
 
@@ -1660,24 +1674,26 @@
 
       function syncDeliverabilityFromSidebar() {
         if (isPipelineBusy) return;
+        const filters = getCurrentDeliverabilityFilters_();
         setPipelineBusy_(true);
-        showStatus('⚡ Syncing Gmail, Client Relay & Microsoft 365 deliverability events...', 'info');
+        showStatus('⚡ Syncing deliverability events for ' + filters.clientFilter + ' | ' + filters.campaignFilter + '...', 'info');
 
         google.script.run
           .withSuccessHandler(function(res) {
             setPipelineBusy_(false);
             refreshDeliverabilitySnapshot_();
-            if (res && res.success) {
+            if (res && res.success && !res.hasWarnings) {
               showStatus('✅ ' + (res.message || 'Deliverability events synced!'), 'success');
             } else {
-              showStatus('⚠️ ' + (res && res.message ? res.message : 'Sync completed with warnings.'), 'error');
+              const msg = (res && res.message) ? res.message : 'Sync completed with warnings.';
+              showStatus('⚠️ ' + msg, 'error', res ? res.authUrl : '');
             }
           })
           .withFailureHandler(function(err) {
             setPipelineBusy_(false);
             showStatus('Deliverability sync error: ' + err.message, 'error');
           })
-          .syncEmailDeliverabilityFromSidebar();
+          .syncEmailDeliverabilityFromSidebar(filters.clientFilter, filters.campaignFilter);
       }
 
       function openDeliverabilityTabFromSidebar() {

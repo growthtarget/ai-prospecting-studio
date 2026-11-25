@@ -332,7 +332,7 @@ function resolveClientScopedSecret_(basePropertyNames, context, options) {
 }
 
 /**
- * Returns active registered clients from Tab 13 ("Lists & Settings").
+ * Returns active registered clients from Tab 15 ("Lists & Settings").
  */
 function getRegisteredClientsList_(ss) {
   if (typeof getRegisteredClientsFromSettings_ === 'function') {
@@ -367,7 +367,7 @@ function getRegisteredClientsList_(ss) {
 }
 
 /**
- * Returns Client - Account names explicitly marked Inactive in Tab 13 ("Lists & Settings").
+ * Returns Client - Account names explicitly marked Inactive in Tab 15 ("Lists & Settings").
  */
 function getInactiveClientsList_(ss) {
   if (typeof getInactiveClientsFromSettings_ === 'function') {
@@ -585,7 +585,8 @@ function filterDashboardRollupByClient_(ss, clientName) {
 
 /**
  * Adds or reactivates a Client / Account in "Lists & Settings", pins Client - Account rows
- * at the top, refreshes sheet dropdowns, provisions "Agent Settings", and filters tabs.
+ * at the top, refreshes sheet dropdowns, provisions "Agent Settings", and filters tabs
+ * (including Email Deliverability B3/D3).
  * Callable directly from the Sidebar Control Panel "[ + Add New Client... ]".
  */
 function addClientAccountToSettings(clientName) {
@@ -641,6 +642,9 @@ function addClientAccountToSettings(clientName) {
   }
   filterCampaignsSheetByClient_(ss, cleanName);
   filterDashboardRollupByClient_(ss, cleanName);
+  if (typeof syncDeliverabilityTabFilters_ === 'function') {
+    syncDeliverabilityTabFilters_(ss, cleanName, 'All Campaigns');
+  }
   SpreadsheetApp.flush();
 
   return {
@@ -653,8 +657,9 @@ function addClientAccountToSettings(clientName) {
 }
 
 /**
- * Refreshes Agent Settings protection status indicators and filters Tab 11 ("Agent Settings"),
- * Tab 3 ("Campaigns"), and Tab 1 ("Dashboard" Rollup) to the specified Client / Owner — including 0-campaign clients.
+ * Refreshes Agent Settings protection status indicators and filters "Agent Settings",
+ * "Campaigns", "Dashboard" Rollup, and "Email Deliverability" (B3/D3) to the specified
+ * Client / Owner — including 0-campaign clients.
  */
 function filterAgentSettingsForClientWorkspace(clientName) {
   const cleanClient = String(clientName || '').trim() || 'Growth Target';
@@ -671,12 +676,15 @@ function filterAgentSettingsForClientWorkspace(clientName) {
   }
   filterCampaignsSheetByClient_(ss, cleanClient);
   filterDashboardRollupByClient_(ss, cleanClient);
+  if (typeof syncDeliverabilityTabFilters_ === 'function') {
+    syncDeliverabilityTabFilters_(ss, cleanClient, 'All Campaigns');
+  }
   SpreadsheetApp.flush();
 
   return {
     success: true,
     clientName: cleanClient,
-    message: 'Dashboard Rollup, Campaigns, and Agent Settings filtered to client "' + cleanClient + '".'
+    message: 'Dashboard Rollup, Campaigns, Email Deliverability, and Agent Settings filtered to client "' + cleanClient + '".'
   };
 }
 
@@ -1218,7 +1226,7 @@ function selectAndActivateCampaign(cid) {
     success: true,
     campaignId: cid,
     config: config,
-    message: 'Active campaign set to ' + cid + ' and synced to Dashboard, Campaigns, Persona Mapper Settings & Agent Settings!'
+    message: 'Active campaign set to ' + cid + ' and synced to Dashboard, Campaigns, Persona Mapper Settings, Email Deliverability & Agent Settings!'
   };
 }
 
@@ -1781,7 +1789,7 @@ function ensureCompanyDatabaseCampaignIdColumn_(sheet) {
  * Applies Google Sheets native FilterCriteria to operational tabs (including API_Usage_Log,
  * Persona Mapper Settings, and EmailEvents) so rows from other campaigns are hidden,
  * displaying exclusively the active campaign. Also filters "Campaigns", "Dashboard" Rollup,
- * and "Agent Settings" to the active Client / Owner.
+ * "Agent Settings", and "Email Deliverability" (B3/D3) to the active Client / Owner & Campaign.
  */
 function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName) {
   if (!activeCampaignId) return;
@@ -1900,12 +1908,16 @@ function filterOperationalSheetsByCampaign_(activeCampaignId, explicitClientName
   if (typeof filterAgentSettingsByClient_ === 'function') {
     filterAgentSettingsByClient_(ss, activeClient);
   }
+  if (typeof syncDeliverabilityTabFilters_ === 'function') {
+    syncDeliverabilityTabFilters_(ss, activeClient, activeCampaignId);
+  }
 
   SpreadsheetApp.flush();
 }
 
 /**
- * Menu action to trigger tab re-filtering manually (also refreshes Campaigns, Dashboard Rollup & Agent Settings filters).
+ * Menu action to trigger tab re-filtering manually (also refreshes Campaigns,
+ * Dashboard Rollup, Email Deliverability & Agent Settings filters).
  */
 function filterSheetsForActiveCampaignMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1932,7 +1944,7 @@ function filterSheetsForActiveCampaignMenu() {
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
-    ui.alert('Tabs Filtered', 'Operational tabs (including Dashboard Rollup, Campaigns, Persona Mapper Settings, API_Usage_Log, EmailEvents & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
+    ui.alert('Tabs Filtered', 'Operational tabs (including Dashboard Rollup, Campaigns, Persona Mapper Settings, API_Usage_Log, EmailEvents, Email Deliverability & Agent Settings) filtered to active campaign: ' + activeId + ' (' + activeClient + ')', ui.ButtonSet.OK);
   } catch (e) {
     Logger.log('Operational tabs filtered to active campaign: ' + activeId);
   }
@@ -2270,17 +2282,54 @@ function preparePersonaMapperSheets() {
   }
 }
 
+/**
+ * Forces Google Apps Script to request & verify ALL manifest scopes (including
+ * full Gmail read/search permission via https://mail.google.com/) before
+ * reporting authorization complete.
+ */
 function authorizeStudioPermissions() {
+  if (typeof ScriptApp !== 'undefined' && typeof ScriptApp.requireAllScopes === 'function') {
+    ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  }
+
+  if (typeof ScriptApp !== 'undefined' && typeof ScriptApp.getAuthorizationInfo === 'function') {
+    const gmailAuthInfo = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL, ['https://mail.google.com/']);
+    if (gmailAuthInfo && gmailAuthInfo.getAuthorizationStatus() === ScriptApp.AuthorizationStatus.REQUIRED) {
+      const authUrl = gmailAuthInfo.getAuthorizationUrl();
+      const missingMsg =
+        'Gmail read permission (https://mail.google.com/) is still NOT granted.\n\n' +
+        'When Google shows the permissions screen, please click "Select all" (or check the box to Read/Manage Gmail).\n\n' +
+        (authUrl ? ('Open this link to authorize:\n' + authUrl) : '');
+      Logger.log(missingMsg);
+      try {
+        const ui = SpreadsheetApp.getUi();
+        ui.alert('Additional Permission Needed', missingMsg, ui.ButtonSet.OK);
+      } catch (e) {}
+      throw new Error(missingMsg);
+    }
+  }
+
   UrlFetchApp.fetch('https://www.google.com', { muteHttpExceptions: true });
   SpreadsheetApp.getActiveSpreadsheet();
   GmailApp.getDrafts();
   GmailApp.search('in:sent', 0, 1);
   ScriptApp.getProjectTriggers();
+
+  let grantedScopes = [];
+  try {
+    if (typeof ScriptApp !== 'undefined' && typeof ScriptApp.getAuthorizationInfo === 'function') {
+      grantedScopes = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL).getAuthorizedScopes() || [];
+    }
+  } catch (e) {}
+
+  const successMsg = 'Authorization verified successfully!' +
+    (grantedScopes.length > 0 ? ('\n\nGranted permissions:\n• ' + grantedScopes.join('\n• ')) : '');
+
   let ui;
   try {
     ui = SpreadsheetApp.getUi();
-    ui.alert('Authorization verified successfully.');
+    ui.alert('Authorization Complete', successMsg, ui.ButtonSet.OK);
   } catch (e) {
-    Logger.log('Authorization verified successfully.');
+    Logger.log(successMsg);
   }
 }
