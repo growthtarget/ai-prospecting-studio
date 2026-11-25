@@ -12,8 +12,10 @@
  * 3. Dynamically binds Client / Owner dropdowns from active "Client - Account" rows
  *    (including "Email Deliverability" filter dropdowns).
  * 4. Enforces plain integer formatting (0) on limit/score columns to prevent date conversion.
- * 5. Enforces high-contrast readable headers (#174ea6 on #e8f0fe) across all tabs.
- * 6. Pre-populates "Agent Settings" with Growth Target defaults + per-client status & guardrails.
+ * 5. Ensures "Prospect Review Queue" includes trailing tracking columns (Dispatch Mode,
+ *    Thread / Message ID, Draft Created At) in AT:AV without shifting existing cols A:AS.
+ * 6. Pre-populates "Agent Settings" with Growth Target defaults + per-client status,
+ *    spend caps, verifier thresholds, and daily send limits.
  * 7. Filters "Agent Settings" cleanly to the active Client / Owner.
  * 8. Initializes and formats "API_Usage_Log" (Tab 2) plus "EmailEvents" & "Email Deliverability".
  * ============================================================================
@@ -63,7 +65,7 @@ function setupAllSheetsAndDropdowns() {
     pSettingsSheet.getRange('AI2:AI500').setNumberFormat('0');
   }
 
-  // 9. Setup Prospect Review Queue Tab with 45 Canonical Headers & Dropdowns
+  // 9. Setup Prospect Review Queue Tab with 45 Canonical Headers + Tracking Cols (AT:AV) & Dropdowns
   setupReviewQueueTabDropdowns(ss);
 
   // 10. Setup Campaign Configuration with Locked 38 Parameters & Dynamic Client Dropdowns
@@ -99,7 +101,7 @@ function setupAllSheetsAndDropdowns() {
   }
 
   SpreadsheetApp.flush();
-  ss.toast('All tabs formatted (including EmailEvents & Email Deliverability), Lists & Settings organized, and dropdowns applied!', '✅ Setup Complete', 10);
+  ss.toast('All tabs formatted (including Prospect Review Queue tracking cols, EmailEvents & Email Deliverability), and dropdowns applied!', '✅ Setup Complete', 10);
   Logger.log('>>> ALL TABS & DROPDOWNS CONFIGURED SUCCESSFULLY <<<');
 }
 
@@ -124,7 +126,7 @@ function normalizeSetupClientPrefix_(clientName) {
 }
 
 /**
- * Reads active Client / Account names from Tab 13 ("Lists & Settings").
+ * Reads active Client / Account names from Tab 15 ("Lists & Settings").
  * Never resurrects a client explicitly marked Inactive in Lists & Settings.
  */
 function getRegisteredClientsFromSettings_(ss) {
@@ -164,7 +166,7 @@ function getRegisteredClientsFromSettings_(ss) {
 }
 
 /**
- * Returns Client - Account names explicitly marked Inactive in Tab 13 ("Lists & Settings").
+ * Returns Client - Account names explicitly marked Inactive in Tab 15 ("Lists & Settings").
  * Used by the Control Panel to archive Inactive clients out of the Client / Owner dropdown
  * even if historical campaigns still exist in the "Campaigns" tab.
  */
@@ -203,7 +205,7 @@ function getInactiveClientsFromSettings_(ss) {
 }
 
 /**
- * Organizes Tab 13 ("Lists & Settings") cleanly so all "Client - Account" rows stay pinned
+ * Organizes Tab 15 ("Lists & Settings") cleanly so all "Client - Account" rows stay pinned
  * at the top (Growth Target first, then Active clients A-Z, then Inactive clients A-Z),
  * followed by Whitelist rules and Suppression rules grouped by List name.
  */
@@ -227,7 +229,6 @@ function sortListsAndSettingsTab_(ss) {
 
     if (!listName && !val && !status) continue;
 
-    // Deduplicate identical (List name + Value) rows if both exist
     if (listName && val) {
       const pairKey = listName.toLowerCase() + '||' + val.toLowerCase();
       if (seenPairs[pairKey]) continue;
@@ -256,7 +257,6 @@ function sortListsAndSettingsTab_(ss) {
     if (rankA !== rankB) return rankA - rankB;
 
     if (rankA === 0) {
-      // Client - Account block: Active first, then Growth Target pinned #1, then alphabetical
       const actA = isRowActive(a[2]) ? 0 : 1;
       const actB = isRowActive(b[2]) ? 0 : 1;
       if (actA !== actB) return actA - actB;
@@ -268,7 +268,6 @@ function sortListsAndSettingsTab_(ss) {
       return String(a[1] || '').toLowerCase().localeCompare(String(b[1] || '').toLowerCase());
     }
 
-    // Other blocks: group by List name, then Active first, then alphabetical by Value
     const typeCmp = String(a[0] || '').toLowerCase().localeCompare(String(b[0] || '').toLowerCase());
     if (typeCmp !== 0) return typeCmp;
 
@@ -299,7 +298,6 @@ function refreshClientDropdownValidations_(ss) {
 
   const clientList = getRegisteredClientsFromSettings_(spreadsheet);
 
-  // 1. Update Campaign Configuration Row for DEPARTMENT
   const cfgSheet = spreadsheet.getSheetByName('Campaign Configuration');
   if (cfgSheet && cfgSheet.getLastRow() > 1) {
     const keys = cfgSheet.getRange(2, 1, cfgSheet.getLastRow() - 1, 1).getValues();
@@ -312,13 +310,11 @@ function refreshClientDropdownValidations_(ss) {
     }
   }
 
-  // 2. Update Campaigns Tab Column C (Department / Client Owner)
   const campSheet = spreadsheet.getSheetByName('Campaigns');
   if (campSheet) {
     applyDropdownToRange(campSheet.getRange('C2:C500'), clientList, false);
   }
 
-  // 3. Refresh Email Deliverability tab filter dropdowns if present
   if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
     refreshDeliverabilityFilterDropdowns_(spreadsheet);
   }
@@ -356,7 +352,6 @@ function migrateLegacyClientNames_(ss) {
     return clean;
   }
 
-  // 1. Migrate Campaign Configuration (Row 4)
   const cfgSheet = ss.getSheetByName('Campaign Configuration');
   if (cfgSheet && cfgSheet.getLastRow() > 1) {
     const cfgData = cfgSheet.getDataRange().getValues();
@@ -378,7 +373,6 @@ function migrateLegacyClientNames_(ss) {
     }
   }
 
-  // 2. Migrate Campaigns Tab (Col C + JSON backup in Col AA)
   const campSheet = ss.getSheetByName('Campaigns');
   if (campSheet && campSheet.getLastRow() > 1) {
     const lastR = campSheet.getLastRow();
@@ -410,7 +404,6 @@ function migrateLegacyClientNames_(ss) {
     }
   }
 
-  // 3. Migrate Dashboard KPI & Performance Rollup if displaying legacy label
   const dashSheet = ss.getSheetByName('Dashboard');
   if (dashSheet && dashSheet.getLastRow() >= 6) {
     const activeId = String(dashSheet.getRange('B2').getValue() || '').trim();
@@ -569,7 +562,6 @@ function setupCampaignConfigurationTab(ss) {
     'AUTO_SEND_ENABLED': ['TRUE', 'FALSE']
   };
 
-  // Flexible preset dropdowns matching ControlPanel.html free-text / custom number inputs
   const flexibleRules = {
     'TARGET_COUNTRIES': ['United States & Canada', 'United States Only', 'Canada Only', 'Sweden, Norway, Denmark', 'United Kingdom & Europe', 'Global'],
     'TARGET_INDUSTRIES': ['Freight & Logistics, Industrial Equipment', 'Energy, CleanTech & Utilities', 'Manufacturing, Industrial, BioTech', 'Financial Services / FinTech SaaS', 'Retail & Consumer Goods'],
@@ -621,7 +613,6 @@ function setupCampaignsTabDropdowns(ss) {
   }
   styleHeaderRow(sheet);
 
-  // Enforce plain integer format so scores (80, 85) and limits never render as 1900 dates
   sheet.getRange('H2:H500').setNumberFormat('0');
   sheet.getRange('J2:M500').setNumberFormat('0');
 
@@ -646,10 +637,11 @@ function setupCampaignsTabDropdowns(ss) {
 }
 
 /**
- * Injects Dropdowns into "Prospect Review Queue" Tab (45 Canonical Columns)
+ * Injects Dropdowns & Trailing Tracking Columns ("Dispatch Mode", "Thread / Message ID",
+ * "Draft Created At" in AT:AV) into "Prospect Review Queue" Tab without shifting existing A:AS cols.
  */
 function setupReviewQueueTabDropdowns(ss) {
-  const headers = [
+  const baseHeaders = [
     'Campaign ID', 'Campaign Name', 'Company ID', 'Company Name', 'Persona ID',
     'Name', 'Title', 'Business Email', 'Company Opportunity Score', 'Persona Fit Score',
     'Buying Signal', 'Priority Score', 'Priority Tier', 'Priority Score Rationale',
@@ -662,9 +654,29 @@ function setupReviewQueueTabDropdowns(ss) {
     'Email Verification Notes', 'Queue Status', 'Compliance Status', 'Suppression Check',
     'Date Added', 'Personalized Hook'
   ];
+  const trackingHeaders = ['Dispatch Mode', 'Thread / Message ID', 'Draft Created At'];
+  const allHeaders = baseHeaders.concat(trackingHeaders);
+
   const sheet = getOrCreateSheet(ss, 'Prospect Review Queue');
-  if (sheet.getLastRow() === 0 || sheet.getLastColumn() < headers.length) {
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (sheet.getLastRow() === 0 || sheet.getLastColumn() === 0) {
+    if (sheet.getMaxColumns() < allHeaders.length) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), allHeaders.length - sheet.getMaxColumns());
+    }
+    sheet.getRange(1, 1, 1, allHeaders.length).setValues([allHeaders]);
+  } else {
+    const existingHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(function(h) {
+      return String(h || '').trim();
+    });
+    const missing = allHeaders.filter(function(h) {
+      return existingHeaders.indexOf(h) < 0;
+    });
+    if (missing.length > 0) {
+      const startCol = sheet.getLastColumn() + 1;
+      if (sheet.getMaxColumns() < startCol + missing.length - 1) {
+        sheet.insertColumnsAfter(sheet.getMaxColumns(), (startCol + missing.length - 1) - sheet.getMaxColumns());
+      }
+      sheet.getRange(1, startCol, 1, missing.length).setValues([missing]);
+    }
   }
   styleHeaderRow(sheet);
 
@@ -674,6 +686,36 @@ function setupReviewQueueTabDropdowns(ss) {
   applyDropdownToRange(sheet.getRange('Y2:Y1000'), ['Queued', 'Draft Created in Gmail', 'Draft Created', 'Sent', 'Pushed to Sequencer', 'Suppressed - Not Sent', 'Draft Failed'], false);
   applyDropdownToRange(sheet.getRange('AP2:AP1000'), ['Passed', 'Failed - Suppressed', 'Failed - Role Based', 'Failed - Invalid Syntax'], false);
   applyDropdownToRange(sheet.getRange('AQ2:AQ1000'), ['Clear', 'Blocked: Email in Lists & Settings', 'Blocked: Domain in Lists & Settings', 'Blocked: Role-Based Account', 'Blocked: Bad Email Syntax'], false);
+
+  // Format and validate trailing tracking columns dynamically by header name
+  const finalHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
+  const dispatchCol = finalHeaders.indexOf('Dispatch Mode') + 1;
+  const threadCol = finalHeaders.indexOf('Thread / Message ID') + 1;
+  const draftAtCol = finalHeaders.indexOf('Draft Created At') + 1;
+
+  if (dispatchCol > 0) {
+    applyDropdownToRange(sheet.getRange(2, dispatchCol, 999, 1), [
+      'Workspace Gmail (Drafts Only)',
+      'Workspace Gmail (Direct Send)',
+      'Google Workspace (Drafts Only)',
+      'Google Workspace (Direct Send)',
+      'Microsoft 365 (Drafts Only)',
+      'Microsoft 365 (Direct Send)',
+      'Smartlead',
+      'Instantly',
+      'Custom Webhook'
+    ], false);
+    sheet.setColumnWidth(dispatchCol, 210);
+  }
+  if (threadCol > 0) {
+    sheet.getRange(2, threadCol, 999, 1).setNumberFormat('@');
+    sheet.setColumnWidth(threadCol, 240);
+  }
+  if (draftAtCol > 0) {
+    sheet.setColumnWidth(draftAtCol, 160);
+  }
 }
 
 /**
@@ -737,7 +779,6 @@ function setupListsAndSettingsTabDropdowns(ss) {
   }
   styleHeaderRow(sheet);
 
-  // Apply updated dropdown validation FIRST so seeding "Client - Account" never collides with old rules
   applyDropdownToRange(sheet.getRange('A2:A500'), [
     'Client - Account',
     'Suppression - Domain',
@@ -749,7 +790,6 @@ function setupListsAndSettingsTabDropdowns(ss) {
   ], false);
   applyDropdownToRange(sheet.getRange('C2:C500'), ['Active', 'Inactive'], false);
 
-  // Seed initial "Client - Account" entries if none exist yet
   let hasClientEntries = false;
   if (sheet.getLastRow() > 1) {
     const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
@@ -774,9 +814,10 @@ function setupListsAndSettingsTabDropdowns(ss) {
 }
 
 /**
- * Formats, Populates & Dynamically Refreshes Tab 11: "Agent Settings"
+ * Formats, Populates & Dynamically Refreshes "Agent Settings"
  * Layout: Category | Setting Key | Value | Status / Description
- * Includes Growth Target (Local Default) rows AND per-client rows for every external client.
+ * Includes Growth Target (Local Default) rows AND per-client rows for every external client,
+ * including editable DAILY_SPEND_CAP_USD, MIN_VERIFIER_CREDITS, and DAILY_SEND_LIMIT.
  */
 function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -800,7 +841,6 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     return true;
   }
 
-  // Strictly checks LOCAL agency keys (ignores CLIENT_* keys)
   function checkLocalPropertyConfigured(primaryKey, aliases) {
     const searchKeys = [primaryKey].concat(aliases || []).map(function(k) {
       return k.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -815,7 +855,6 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     return false;
   }
 
-  // Strictly checks EXTERNAL CLIENT keys matching CLIENT_{NAME}_{SUFFIX}
   function checkClientPropertyConfigured(prefix, suffixes) {
     const searchKeys = suffixes.map(function(suf) {
       return (prefix + suf).toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -845,7 +884,6 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
 
   const protectedMsg = 'Configured in Script Properties (Protected)';
 
-  // 1. Local Agency ("Growth Target") & Global Defaults
   const localRows = [
     ['AI Routing', 'PRIMARY_AI_PROVIDER', 'GEMINI', 'Default AI provider for Growth Target (overridden per campaign)'],
     ['AI Models', 'GEMINI_MODEL', 'gemini-3.8-flash', 'Default Gemini model for Growth Target'],
@@ -861,10 +899,10 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     ['Outreach Microsoft 365', 'MS_CLIENT_ID', hasMsClientId ? protectedMsg : '', 'Growth Target Microsoft 365 Application (Client) ID (encrypted in Script Properties)'],
     ['Outreach Microsoft 365', 'MS_CLIENT_SECRET', hasMsClientSecret ? protectedMsg : '', 'Growth Target Microsoft 365 Client Secret (encrypted in Script Properties)'],
     ['Budget Guardrails', 'DAILY_SPEND_CAP_USD', '10.00', 'Growth Target daily API spend limit in USD (editable)'],
-    ['Budget Guardrails', 'MIN_VERIFIER_CREDITS', '500', 'Growth Target min verifier credits before email alert (editable)']
+    ['Budget Guardrails', 'MIN_VERIFIER_CREDITS', '500', 'Growth Target min verifier credits before email alert (editable)'],
+    ['Outreach Guardrails', 'DAILY_SEND_LIMIT', '25', 'Growth Target max direct emails sent per day (editable)']
   ];
 
-  // Track exact live protection values & descriptions by normalized Setting Key
   const secretValueByKey = {
     'GEMINIAPIKEY': hasGemini ? protectedMsg : '',
     'OPENAIAPIKEY': hasOpenAi ? protectedMsg : '',
@@ -880,7 +918,8 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
   const descriptionSyncByKey = {};
   const numericFormatByKey = {
     'DAILYSPENDCAPUSD': '0.00',
-    'MINVERIFIERCREDITS': '0'
+    'MINVERIFIERCREDITS': '0',
+    'DAILYSENDLIMIT': '0'
   };
 
   localRows.forEach(function(r) {
@@ -888,7 +927,6 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     descriptionSyncByKey[cleanKey] = r[3];
   });
 
-  // 2. Per-Client Rows for every active External Client in "Lists & Settings"
   const clientRows = [];
   const allClients = getRegisteredClientsFromSettings_(spreadsheet);
 
@@ -931,7 +969,8 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
       [catLabel, prefix + 'MS_CLIENT_ID', cMsClientId ? protectedMsg : '', clientName + ' Microsoft 365 Application (Client) ID (add in Script Properties)'],
       [catLabel, prefix + 'MS_CLIENT_SECRET', cMsClientSecret ? protectedMsg : '', clientName + ' Microsoft 365 Client Secret (add in Script Properties)'],
       [catLabel, prefix + 'DAILY_SPEND_CAP_USD', '10.00', clientName + ' daily API spend limit in USD (editable)'],
-      [catLabel, prefix + 'MIN_VERIFIER_CREDITS', '500', clientName + ' min verifier credits before alert (editable)']
+      [catLabel, prefix + 'MIN_VERIFIER_CREDITS', '500', clientName + ' min verifier credits before alert (editable)'],
+      [catLabel, prefix + 'DAILY_SEND_LIMIT', '25', clientName + ' max direct emails sent per day (editable)']
     ];
 
     cRows.forEach(function(r) {
@@ -941,12 +980,13 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
       descriptionSyncByKey[cleanK] = r[3];
       if (r[1].indexOf('DAILY_SPEND_CAP_USD') < 0 &&
           r[1].indexOf('MIN_VERIFIER_CREDITS') < 0 &&
+          r[1].indexOf('DAILY_SEND_LIMIT') < 0 &&
           r[1].indexOf('GOOGLE_SEARCH_GROUNDING') < 0) {
         secretValueByKey[cleanK] = r[2];
       }
       if (r[1].indexOf('DAILY_SPEND_CAP_USD') >= 0) {
         numericFormatByKey[cleanK] = '0.00';
-      } else if (r[1].indexOf('MIN_VERIFIER_CREDITS') >= 0) {
+      } else if (r[1].indexOf('MIN_VERIFIER_CREDITS') >= 0 || r[1].indexOf('DAILY_SEND_LIMIT') >= 0) {
         numericFormatByKey[cleanK] = '0';
       }
     });
@@ -986,7 +1026,6 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     });
   }
 
-  // Apply dropdowns & clean number formats across all rows (preserving user-edited cap/credit values)
   const agentKeyDropdowns = {
     'PRIMARYAIPROVIDER': ['GEMINI', 'OPENAI'],
     'GEMINIMODEL': ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'],
@@ -1020,14 +1059,12 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
   sheet.setColumnWidth(3, 300);
   sheet.setColumnWidth(4, 440);
 
-  // Filter Agent Settings to show only the active Client / Owner's rows
   filterAgentSettingsByClient_(spreadsheet, activeClientOverride);
 }
 
 /**
  * Filters "Agent Settings" Column A (Category) to show only the active Client / Owner's block
  * (or only Growth Target / Local defaults when Growth Target is active).
- * Users can clear the Column A filter in Sheets at any time to compare all clients side by side.
  */
 function filterAgentSettingsByClient_(ss, explicitClientName) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();

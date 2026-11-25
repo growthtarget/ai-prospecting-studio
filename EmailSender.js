@@ -11,24 +11,24 @@
  *    Smartlead, Instantly, Custom Webhooks.
  * 2. Strict Client Isolation: External clients strictly require CLIENT_{NAME}_*
  *    credentials in Script Properties (zero fallback to local keys or personal Gmail).
- * 3. Campaign Isolation: Resolves sender profile and provider dynamically per prospect Campaign ID.
- * 4. Sender Identity & Mailbox Stamping: Attaches Sender Display Name, Sender Email/Mailbox,
- *    and Reply-To Email address to drafts and outreach emails.
+ * 3. Active Campaign Scope Guard: Processes ONLY the Active Campaign so approved
+ *    leads from other clients/campaigns are never dispatched accidentally.
+ * 4. Runtime Suppression, Duplicate-Send & Daily Send-Limit Guardrails + Pacing.
  * 5. Deliverability Event Capture: Captures Draft / Message IDs in Prospect Review Queue
- *    and records inline "Sent" events to EmailEvents via EmailEventsDeliverability.js.
+ *    (AT:AV) and records inline "Sent" events to EmailEvents.
  * 6. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
  * ============================================================================
  */
 
 /**
- * Universal sender: Dispatches outreach based on each campaign's configured provider.
+ * Universal sender: Dispatches outreach for the Active Campaign based on its configured provider.
  */
 function sendApprovedOutreachEmails() {
   processOutreachQueue_(false);
 }
 
 /**
- * Force creates Drafts regardless of provider Direct Send setting (Safe testing & review mode).
+ * Force creates Drafts for the Active Campaign regardless of provider Direct Send setting (Safe testing & review mode).
  * Routes Microsoft 365 campaigns to Microsoft 365 Drafts and all other campaigns to Workspace Gmail Drafts.
  */
 function createGmailDraftsForApprovedProspects() {
@@ -50,8 +50,191 @@ function findSenderHeaderCol_(headers, candidates) {
 }
 
 /**
+ * Ensures trailing tracking columns ("Dispatch Mode", "Thread / Message ID", "Draft Created At")
+ * exist at the end of "Prospect Review Queue" without shifting existing columns A:AS.
+ */
+function ensureReviewQueueTrackingColumns_(sheet) {
+  if (!sheet || sheet.getLastRow() < 1 || sheet.getLastColumn() < 1) return;
+  const existingHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
+  const trackingHeaders = ['Dispatch Mode', 'Thread / Message ID', 'Draft Created At'];
+  const missing = trackingHeaders.filter(function(h) {
+    return existingHeaders.indexOf(h) < 0;
+  });
+  if (missing.length > 0) {
+    const startCol = sheet.getLastColumn() + 1;
+    if (sheet.getMaxColumns() < startCol + missing.length - 1) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), (startCol + missing.length - 1) - sheet.getMaxColumns());
+    }
+    sheet.getRange(1, startCol, 1, missing.length)
+      .setValues([missing])
+      .setFontWeight('bold')
+      .setFontColor('#174ea6')
+      .setBackground('#e8f0fe')
+      .setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
+  }
+}
+
+/**
+ * Loads active suppression rules from "Lists & Settings" for runtime safety checks.
+ */
+function loadSenderSuppressionRules_(ss) {
+  const rules = { domains: {}, emails: {} };
+  if (!ss) return rules;
+  const sheet = ss.getSheetByName('Lists & Settings');
+  if (!sheet || sheet.getLastRow() <= 1) return rules;
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const listName = String(data[i][0] || '').trim().toLowerCase();
+    const val = String(data[i][1] || '').trim().toLowerCase();
+    const status = String(data[i][2] || '').trim().toLowerCase();
+    const isActive = (status === 'active' || status === 'true' || status === '');
+    const isSuppression = (
+      listName.indexOf('suppression') >= 0 ||
+      listName.indexOf('blacklist') >= 0 ||
+      listName.indexOf('opt-out') >= 0 ||
+      listName.indexOf('competitor') >= 0
+    );
+    if (isActive && isSuppression && val) {
+      if (val.indexOf('@') >= 0) {
+        rules.emails[val] = true;
+      } else {
+        rules.domains[val.replace(/^@/, '')] = true;
+      }
+    }
+  }
+  return rules;
+}
+
+/**
+ * Collects already-dispatched (campaignId::email) keys from Prospect Review Queue & EmailEvents.
+ */
+function loadAlreadyDispatchedLookup_(ss, queueData, campIdCol, emailCol, sendStatusCol) {
+  const dispatched = {};
+
+  for (let i = 0; i < queueData.length; i++) {
+    const row = queueData[i];
+    const cid = campIdCol >= 0 ? String(row[campIdCol] || '').trim().toLowerCase() : '';
+    const email = emailCol >= 0 ? String(row[emailCol] || '').trim().toLowerCase() : '';
+    const st = sendStatusCol >= 0 ? String(row[sendStatusCol] || '').trim().toLowerCase() : '';
+    if (!email) continue;
+    if (st === 'sent' || st === 'draft created' || st === 'draft created in gmail' || st === 'pushed to sequencer') {
+      dispatched[cid + '::' + email] = true;
+    }
+  }
+
+  const eventsSheet = ss ? ss.getSheetByName('EmailEvents') : null;
+  if (eventsSheet && eventsSheet.getLastRow() > 1) {
+    const eData = eventsSheet.getRange(2, 1, eventsSheet.getLastRow() - 1, 8).getValues();
+    for (let i = 0; i < eData.length; i++) {
+      const cid = String(eData[i][2] || '').trim().toLowerCase();
+      const eType = String(eData[i][5] || '').trim().toLowerCase();
+      const recip = String(eData[i][7] || '').trim().toLowerCase();
+      if (recip && (eType === 'sent' || eType === 'delivered')) {
+        dispatched[cid + '::' + recip] = true;
+      }
+    }
+  }
+
+  return dispatched;
+}
+
+/**
+ * Reads per-client DAILY_SEND_LIMIT from Agent Settings / Script Properties (defaults to 25).
+ */
+function getClientDailySendLimit_(ss, clientName) {
+  const cleanClient = String(clientName || 'Growth Target').trim();
+  const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(cleanClient) : true;
+  const prefix = (!isLocal && typeof normalizeClientPropertyPrefix_ === 'function')
+    ? normalizeClientPropertyPrefix_(cleanClient)
+    : '';
+  const targetKey = isLocal ? 'DAILY_SEND_LIMIT' : (prefix + 'DAILY_SEND_LIMIT');
+  const normTarget = targetKey.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  function parseLimit(raw) {
+    if (raw === '' || raw === null || raw === undefined || raw instanceof Date) return NaN;
+    const n = parseInt(String(raw).replace(/[,\s]/g, '').trim(), 10);
+    return isFinite(n) && n >= 0 ? n : NaN;
+  }
+
+  if (ss) {
+    const agentSheet = ss.getSheetByName('Agent Settings');
+    if (agentSheet && agentSheet.getLastRow() > 1) {
+      const rows = agentSheet.getRange(2, 1, agentSheet.getLastRow() - 1, 3).getValues();
+      for (let i = 0; i < rows.length; i++) {
+        const k = String(rows[i][1] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (k === normTarget) {
+          const val = parseLimit(rows[i][2]);
+          if (!isNaN(val)) return val;
+        }
+      }
+    }
+  }
+
+  const spVal = PropertiesService.getScriptProperties().getProperty(targetKey);
+  const parsedSp = parseLimit(spVal);
+  if (!isNaN(parsedSp)) return parsedSp;
+
+  return 25;
+}
+
+/**
+ * Counts how many live sends occurred today for clientName across EmailEvents & Prospect Review Queue.
+ */
+function countClientSendsToday_(ss, clientName, queueData, campIdCol, emailCol, sendStatusCol, sentAtCol) {
+  const tz = (ss && ss.getSpreadsheetTimeZone) ? ss.getSpreadsheetTimeZone() : Session.getScriptTimeZone();
+  const todayIso = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  const clientLow = String(clientName || 'Growth Target').trim().toLowerCase();
+  const seenSent = {};
+
+  const eventsSheet = ss ? ss.getSheetByName('EmailEvents') : null;
+  if (eventsSheet && eventsSheet.getLastRow() > 1) {
+    const eData = eventsSheet.getRange(2, 1, eventsSheet.getLastRow() - 1, 8).getValues();
+    for (let i = 0; i < eData.length; i++) {
+      const rowClient = String(eData[i][1] || '').trim().toLowerCase();
+      const rowCid = String(eData[i][2] || '').trim().toLowerCase();
+      const eType = String(eData[i][5] || '').trim().toLowerCase();
+      const rawDate = eData[i][6];
+      const recip = String(eData[i][7] || '').trim().toLowerCase();
+      if (eType !== 'sent' || rowClient !== clientLow || !rawDate) continue;
+      const d = (rawDate instanceof Date) ? rawDate : new Date(rawDate);
+      if (isNaN(d.getTime())) continue;
+      if (Utilities.formatDate(d, tz, 'yyyy-MM-dd') === todayIso) {
+        seenSent[rowCid + '::' + recip] = true;
+      }
+    }
+  }
+
+  if (queueData && sentAtCol >= 0 && sendStatusCol >= 0) {
+    for (let i = 0; i < queueData.length; i++) {
+      const row = queueData[i];
+      const st = String(row[sendStatusCol] || '').trim().toLowerCase();
+      if (st !== 'sent' && st !== 'pushed to sequencer') continue;
+      const rawSentAt = row[sentAtCol];
+      if (!rawSentAt) continue;
+      const d = (rawSentAt instanceof Date) ? rawSentAt : new Date(rawSentAt);
+      if (isNaN(d.getTime())) continue;
+      if (Utilities.formatDate(d, tz, 'yyyy-MM-dd') !== todayIso) continue;
+      const cid = campIdCol >= 0 ? String(row[campIdCol] || '').trim() : '';
+      const rowClient = (typeof resolveCampaignClientName_ === 'function')
+        ? resolveCampaignClientName_(cid, '', ss).toLowerCase()
+        : 'growth target';
+      if (rowClient === clientLow) {
+        const email = emailCol >= 0 ? String(row[emailCol] || '').trim().toLowerCase() : ('row-' + i);
+        seenSent[cid.toLowerCase() + '::' + email] = true;
+      }
+    }
+  }
+
+  return Object.keys(seenSent).length;
+}
+
+/**
  * Core outreach processor.
- * Resolves settings per prospect row, ensuring complete campaign and client isolation.
+ * Enforces Active Campaign scoping, runtime suppression checks, duplicate-send protection,
+ * daily send limits, and pacing between dispatches.
  *
  * @param {boolean} forceDrafts When true, routes all approved prospects to Drafts Only mode
  */
@@ -75,7 +258,6 @@ function processOutreachQueue_(forceDrafts) {
   }
 
   const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
   if (lastRow < 2) {
     const emptyMsg = 'No prospects found in Prospect Review Queue.';
     if (ui) ui.alert(emptyMsg);
@@ -83,6 +265,8 @@ function processOutreachQueue_(forceDrafts) {
     return;
   }
 
+  ensureReviewQueueTrackingColumns_(sheet);
+  const lastCol = sheet.getLastColumn();
   const headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
     return String(h || '').trim();
   });
@@ -103,13 +287,32 @@ function processOutreachQueue_(forceDrafts) {
   const sendErrorCol = findSenderHeaderCol_(headers, ['Send Error', 'Last Error']);
   const leadNameCol = findSenderHeaderCol_(headers, ['Name', 'Persona Name']);
   const companyCol = findSenderHeaderCol_(headers, ['Company Name']);
+  const complianceCol = findSenderHeaderCol_(headers, ['Compliance Status']);
+  const suppressionCol = findSenderHeaderCol_(headers, ['Suppression Check']);
+  const verifStatusCol = findSenderHeaderCol_(headers, ['Email Verification Status']);
+
+  const activeCampaignId = (typeof getStudioActiveCampaignId_ === 'function')
+    ? String(getStudioActiveCampaignId_() || '').trim()
+    : '';
+  const activeCampLow = activeCampaignId.toLowerCase();
 
   const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const suppressionRules = loadSenderSuppressionRules_(spreadsheet);
+  const dispatchedLookup = loadAlreadyDispatchedLookup_(spreadsheet, data, campIdCol, emailCol, sendStatusCol);
+  const batchSeenKeys = {};
+  const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@', 'office@', 'jobs@', 'careers@'];
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
   const queueToProcess = [];
+  let otherCampaignReadyCount = 0;
+  let blockedSuppressedCount = 0;
+  let duplicateBlockedCount = 0;
 
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
+    const rowIndex = i + 2;
     const email = emailCol >= 0 ? String(row[emailCol] || '').trim() : '';
+    const emailLow = email.toLowerCase();
     const approvedBody = approvedBodyCol >= 0 ? String(row[approvedBodyCol] || '').trim() : '';
     const baseBody = bodyCol >= 0 ? String(row[bodyCol] || '').trim() : '';
     const body = approvedBody || baseBody;
@@ -137,25 +340,79 @@ function processOutreachQueue_(forceDrafts) {
       sendStatus === 'suppressed - not sent'
     );
 
-    if (email && body && isApproved && !isAlreadySent) {
-      queueToProcess.push({
-        rowIndex: i + 2,
-        campaignId: campaignId,
-        email: email,
-        subject: subject,
-        body: body,
-        leadName: leadNameCol >= 0 ? String(row[leadNameCol] || '') : '',
-        companyName: companyCol >= 0 ? String(row[companyCol] || '') : ''
-      });
+    if (!email || !body || !isApproved || isAlreadySent) continue;
+
+    // 1. Active Campaign Scope Guard
+    if (activeCampLow && campaignId.toLowerCase() !== activeCampLow) {
+      otherCampaignReadyCount++;
+      continue;
     }
+
+    // 2. Runtime Suppression & Invalid-Email Guard
+    const compStatus = complianceCol >= 0 ? String(row[complianceCol] || '').trim().toLowerCase() : '';
+    const suppCheck = suppressionCol >= 0 ? String(row[suppressionCol] || '').trim().toLowerCase() : '';
+    const verifStatus = verifStatusCol >= 0 ? String(row[verifStatusCol] || '').trim().toLowerCase() : '';
+    const emailDomain = emailLow.indexOf('@') >= 0 ? emailLow.split('@')[1] : '';
+
+    let blockReason = '';
+    if (!emailRegex.test(emailLow)) {
+      blockReason = 'Blocked: Invalid email syntax';
+    } else if (compStatus.indexOf('failed') >= 0 || suppCheck.indexOf('blocked') >= 0) {
+      blockReason = 'Blocked: Compliance/Suppression status failed';
+    } else if (verifStatus === 'invalid') {
+      blockReason = 'Blocked: Email verification status is invalid';
+    } else if (rolePrefixes.some(function(pre) { return emailLow.indexOf(pre) === 0; })) {
+      blockReason = 'Blocked: Role-based email prefix';
+    } else if (suppressionRules.emails[emailLow]) {
+      blockReason = 'Blocked: Email is on active suppression list in Lists & Settings';
+    } else if (emailDomain && suppressionRules.domains[emailDomain]) {
+      blockReason = 'Blocked: Domain is on active suppression list in Lists & Settings';
+    }
+
+    if (blockReason) {
+      blockedSuppressedCount++;
+      if (sendStatusCol >= 0) sheet.getRange(rowIndex, sendStatusCol + 1).setValue('Suppressed - Not Sent');
+      if (sendErrorCol >= 0) sheet.getRange(rowIndex, sendErrorCol + 1).setValue(blockReason);
+      continue;
+    }
+
+    // 3. Duplicate-Send Protection (per Campaign + Recipient)
+    const dedupKey = campaignId.toLowerCase() + '::' + emailLow;
+    if (dispatchedLookup[dedupKey] || batchSeenKeys[dedupKey]) {
+      duplicateBlockedCount++;
+      if (sendStatusCol >= 0) sheet.getRange(rowIndex, sendStatusCol + 1).setValue('Suppressed - Not Sent');
+      if (sendErrorCol >= 0) sheet.getRange(rowIndex, sendErrorCol + 1).setValue('Blocked: Duplicate recipient already dispatched in this campaign');
+      continue;
+    }
+    batchSeenKeys[dedupKey] = true;
+
+    queueToProcess.push({
+      rowIndex: rowIndex,
+      campaignId: campaignId,
+      email: email,
+      subject: subject,
+      body: body,
+      leadName: leadNameCol >= 0 ? String(row[leadNameCol] || '') : '',
+      companyName: companyCol >= 0 ? String(row[companyCol] || '') : ''
+    });
   }
 
   if (queueToProcess.length === 0) {
-    const msg = 'No approved prospects are pending outreach.\n\n' +
-      'To approve a prospect:\n' +
+    let msg = 'No approved prospects are pending outreach for active campaign "' + (activeCampaignId || 'Active') + '".\n\n';
+    if (otherCampaignReadyCount > 0) {
+      msg += '• Note: ' + otherCampaignReadyCount + ' approved prospect(s) exist in other campaigns and were safely excluded. Switch campaigns in the Control Panel to process them.\n';
+    }
+    if (blockedSuppressedCount > 0) {
+      msg += '• Blocked by Suppression/Invalid guard: ' + blockedSuppressedCount + '\n';
+    }
+    if (duplicateBlockedCount > 0) {
+      msg += '• Blocked as duplicates already sent in this campaign: ' + duplicateBlockedCount + '\n';
+    }
+    msg += '\nTo approve a prospect:\n' +
       '1. Set Human Approval Status or Review Status to "Approved"\n' +
-      '2. Ensure Send Status is not already "Sent", "Draft Created", "Draft Created in Gmail", or "Suppressed - Not Sent"\n' +
+      '2. Ensure Send Status is "Queued" or "Draft Failed"\n' +
       '3. Ensure Business Email and Email Subject/Body are filled.';
+    SpreadsheetApp.flush();
     if (ui) ui.alert('No Prospects Ready', msg, ui.ButtonSet.OK);
     else Logger.log(msg);
     return;
@@ -170,33 +427,76 @@ function processOutreachQueue_(forceDrafts) {
     campaignSettingsCache[cId] = getCampaignSenderSettings_(spreadsheet, cId);
   });
 
-  const uniqueClients = Array.from(new Set(uniqueCampaigns.map(function(cId) {
-    return campaignSettingsCache[cId].clientName || 'Growth Target';
-  })));
+  const primaryCamp = uniqueCampaigns[0];
+  const primaryConfig = campaignSettingsCache[primaryCamp] || {};
+  const primaryClient = primaryConfig.clientName || 'Growth Target';
+  const configuredProv = String(primaryConfig.emailSenderProvider || 'Workspace Gmail (Drafts Only)').trim();
+  const effectiveMode = forceDrafts
+    ? (isMicrosoft365Provider_(configuredProv.toLowerCase()) ? 'Microsoft 365 (Drafts Only)' : 'Workspace Gmail (Drafts Only)')
+    : configuredProv;
+  const isLiveSendRun = effectiveMode.toLowerCase().indexOf('draft') < 0;
+
+  const clientSendLimits = {};
+  const clientSendsUsedToday = {};
+  uniqueCampaigns.forEach(function(cId) {
+    const cName = (campaignSettingsCache[cId] && campaignSettingsCache[cId].clientName) || 'Growth Target';
+    if (clientSendLimits[cName] === undefined) {
+      clientSendLimits[cName] = getClientDailySendLimit_(spreadsheet, cName);
+      clientSendsUsedToday[cName] = countClientSendsToday_(
+        spreadsheet, cName, data, campIdCol, emailCol, sendStatusCol, sentAtCol
+      );
+    }
+  });
 
   if (ui) {
-    const modeLabel = forceDrafts ? 'Safe Mode: Drafts Only' : 'Configured Providers';
-    const confirm = ui.alert(
-      'Confirm Outreach Execution',
+    const modeLabel = forceDrafts ? 'Safe Mode: Drafts Only' : ('Configured Channel: ' + effectiveMode);
+    let confirmMsg =
       'Mode: ' + modeLabel + '\n' +
-      'Prospects to process: ' + queueToProcess.length + '\n' +
-      'Target Campaign(s): ' + uniqueCampaigns.join(', ') + '\n' +
-      'Client / Owner(s): ' + uniqueClients.join(', ') + '\n\n' +
-      'Do you want to proceed?',
+      'Active Campaign: ' + (activeCampaignId || uniqueCampaigns.join(', ')) + '\n' +
+      'Client / Owner: ' + primaryClient + '\n' +
+      (primaryConfig.senderEmail ? ('Sender Mailbox: ' + primaryConfig.senderEmail + '\n') : '') +
+      'Prospects to process: ' + queueToProcess.length + '\n';
+
+    if (isLiveSendRun) {
+      const used = clientSendsUsedToday[primaryClient] || 0;
+      const cap = clientSendLimits[primaryClient];
+      confirmMsg += 'Daily Send Limit: ' + used + ' / ' + cap + ' sent today (' + Math.max(0, cap - used) + ' remaining)\n';
+    }
+    if (otherCampaignReadyCount > 0) {
+      confirmMsg += '• Excluded from other campaigns: ' + otherCampaignReadyCount + '\n';
+    }
+    if (blockedSuppressedCount > 0) {
+      confirmMsg += '• Blocked (Suppressed/Invalid): ' + blockedSuppressedCount + '\n';
+    }
+    if (duplicateBlockedCount > 0) {
+      confirmMsg += '• Blocked (Duplicates): ' + duplicateBlockedCount + '\n';
+    }
+
+    confirmMsg += '\nDo you want to proceed?';
+
+    const confirm = ui.alert(
+      isLiveSendRun ? 'Confirm LIVE Outreach Dispatch' : 'Confirm Safe Draft Creation',
+      confirmMsg,
       ui.ButtonSet.YES_NO
     );
-    if (confirm !== ui.Button.YES) return;
+    if (confirm !== ui.Button.YES) {
+      SpreadsheetApp.flush();
+      return;
+    }
   }
 
   let successCount = 0;
   let failCount = 0;
-  const nowDate = new Date();
-  const nowStr = nowDate.toLocaleString();
+  let pausedByLimitCount = 0;
+  let liveSendsInBatch = 0;
+  let draftsInBatch = 0;
+  const nowStr = new Date().toLocaleString();
   const msTokenCache = {};
 
   queueToProcess.forEach(function(item) {
     const cId = item.campaignId || 'DEFAULT';
     const campaignConfig = campaignSettingsCache[cId] || getCampaignSenderSettings_(spreadsheet, cId);
+    const clientName = campaignConfig.clientName || 'Growth Target';
 
     const configuredProvider = String(campaignConfig.emailSenderProvider || 'Workspace Gmail (Drafts Only)').trim();
     let rawProvider = configuredProvider;
@@ -210,10 +510,38 @@ function processOutreachQueue_(forceDrafts) {
       }
     }
 
+    const lowerProv = rawProvider.toLowerCase();
+    const isRowLiveSend = lowerProv.indexOf('draft') < 0;
+
+    // Enforce Daily Send Limit on live sends / sequencer pushes
+    if (isRowLiveSend) {
+      const dailyLimit = clientSendLimits[clientName] !== undefined
+        ? clientSendLimits[clientName]
+        : getClientDailySendLimit_(spreadsheet, clientName);
+      const usedToday = clientSendsUsedToday[clientName] !== undefined
+        ? clientSendsUsedToday[clientName]
+        : countClientSendsToday_(spreadsheet, clientName, data, campIdCol, emailCol, sendStatusCol, sentAtCol);
+
+      if (usedToday >= dailyLimit) {
+        pausedByLimitCount++;
+        if (sendErrorCol >= 0) {
+          sheet.getRange(item.rowIndex, sendErrorCol + 1).setValue(
+            'Paused: Daily Send Limit (' + dailyLimit + '/day) reached for ' + clientName
+          );
+        }
+        return;
+      }
+
+      if (liveSendsInBatch > 0) {
+        Utilities.sleep(1500);
+      }
+    } else if (draftsInBatch > 0) {
+      Utilities.sleep(250);
+    }
+
     try {
       const dispatchResult = dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet, msTokenCache) || {};
 
-      const lowerProv = rawProvider.toLowerCase();
       let finalStatus = 'Sent';
       if (isMicrosoft365Provider_(lowerProv)) {
         finalStatus = lowerProv.indexOf('draft') >= 0 ? 'Draft Created' : 'Sent';
@@ -233,7 +561,9 @@ function processOutreachQueue_(forceDrafts) {
 
       const trackedId = String(dispatchResult.queueTrackId || dispatchResult.providerMessageId || dispatchResult.draftId || '').trim();
       if (threadMsgIdCol >= 0 && trackedId) {
-        sheet.getRange(item.rowIndex, threadMsgIdCol + 1).setValue(trackedId);
+        const trackCell = sheet.getRange(item.rowIndex, threadMsgIdCol + 1);
+        trackCell.setNumberFormat('@');
+        trackCell.setValue(trackedId);
       }
 
       if (draftCreatedAtCol >= 0 && (finalStatus === 'Draft Created' || finalStatus === 'Draft Created in Gmail')) {
@@ -244,13 +574,20 @@ function processOutreachQueue_(forceDrafts) {
       }
       if (sendErrorCol >= 0) sheet.getRange(item.rowIndex, sendErrorCol + 1).setValue('');
 
+      if (isRowLiveSend) {
+        liveSendsInBatch++;
+        clientSendsUsedToday[clientName] = (clientSendsUsedToday[clientName] || 0) + 1;
+      } else {
+        draftsInBatch++;
+      }
+
       // Record Sent events inline to EmailEvents for real-time deliverability tracking
       if (finalStatus === 'Sent' &&
           (dispatchResult.provider === 'Gmail' || dispatchResult.provider === 'Microsoft 365') &&
           typeof recordEmailEvent_ === 'function') {
         try {
           recordEmailEvent_({
-            client_id: campaignConfig.clientName || 'Growth Target',
+            client_id: clientName,
             campaign_id: item.campaignId,
             provider: dispatchResult.provider,
             provider_message_id: dispatchResult.providerMessageId || trackedId,
@@ -284,9 +621,26 @@ function processOutreachQueue_(forceDrafts) {
     }
   }
 
-  const completionMsg = 'Outreach Execution Completed!\n\n' +
-    '• Successfully Processed: ' + successCount + '\n' +
-    (failCount > 0 ? ('• Failed: ' + failCount + ' (Check "Send Error" / "Last Error" column for details)') : '• All approved records processed cleanly.');
+  let completionMsg = 'Outreach Execution Completed (' + (activeCampaignId || primaryCamp) + ')!\n\n' +
+    '• Successfully Processed: ' + successCount + '\n';
+  if (failCount > 0) {
+    completionMsg += '• Failed: ' + failCount + ' (Check "Send Error" column for details)\n';
+  }
+  if (pausedByLimitCount > 0) {
+    completionMsg += '• Paused by Daily Send Limit: ' + pausedByLimitCount + ' (Remaining rows stay Queued for tomorrow)\n';
+  }
+  if (blockedSuppressedCount > 0) {
+    completionMsg += '• Blocked by Suppression/Invalid Guard: ' + blockedSuppressedCount + '\n';
+  }
+  if (duplicateBlockedCount > 0) {
+    completionMsg += '• Blocked Duplicates: ' + duplicateBlockedCount + '\n';
+  }
+  if (otherCampaignReadyCount > 0) {
+    completionMsg += '• Excluded from other campaigns: ' + otherCampaignReadyCount + '\n';
+  }
+  if (failCount === 0 && pausedByLimitCount === 0) {
+    completionMsg += '• All eligible active-campaign records processed cleanly.';
+  }
 
   if (ui) {
     ui.alert('Outreach Completed', completionMsg, ui.ButtonSet.OK);
@@ -330,7 +684,6 @@ function dispatchOutreach_(item, provider, config, spreadsheet, msTokenCache) {
     const isDraftMode = p.indexOf('draft') >= 0;
 
     if (isLocal) {
-      // Local Agency ("Growth Target"): Use your logged-in Google Workspace GmailApp
       const mailOptions = {};
       if (senderName) mailOptions.name = senderName;
       if (replyToEmail && replyToEmail.indexOf('@') > 0) mailOptions.replyTo = replyToEmail;
@@ -714,7 +1067,6 @@ function dispatchMicrosoft365Outreach_(item, providerLower, config, spreadsheet,
       };
     }
 
-    // Direct Send: Send the created draft (saves automatically to Sent Items)
     const sendDraftUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) +
       '/messages/' + encodeURIComponent(draftId) + '/send';
     const sendDraftRes = UrlFetchApp.fetch(sendDraftUrl, {
@@ -743,12 +1095,10 @@ function dispatchMicrosoft365Outreach_(item, providerLower, config, spreadsheet,
     };
   }
 
-  // If Drafts Only failed, throw error immediately
   if (isDraftMode) {
     throw new Error(parseMicrosoftGraphError_(draftCode, draftText, 'create draft', senderEmail));
   }
 
-  // If Direct Send failed on /messages with 403 (client only granted Mail.Send without Mail.ReadWrite), fallback to /sendMail
   if (draftCode === 403) {
     const sendUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(senderEmail) + '/sendMail';
     const sendRes = UrlFetchApp.fetch(sendUrl, {
@@ -856,11 +1206,6 @@ function parseMicrosoftGraphError_(statusCode, bodyText, actionLabel, senderEmai
 
 /**
  * Dynamically resolves sender profile, provider configuration, and Client / Owner per Campaign ID.
- * Scans Campaigns (28 cols), Persona Mapper Settings (39 cols), and Campaign Configuration.
- *
- * @param {Spreadsheet} spreadsheet Active spreadsheet instance
- * @param {string} campaignId Target campaign identifier
- * @return {Object} Resolved settings object
  */
 function getCampaignSenderSettings_(spreadsheet, campaignId) {
   const settings = {
@@ -881,7 +1226,6 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
     return settings;
   }
 
-  // 1. Read from Campaigns tab (Locked 28 columns)
   const campSheet = spreadsheet.getSheetByName('Campaigns');
   if (campSheet && campSheet.getLastRow() > 1) {
     const campData = campSheet.getDataRange().getValues();
@@ -926,7 +1270,6 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
     }
   }
 
-  // 2. Fill missing fields from Persona Mapper Settings (Locked 39 columns)
   const pSheet = spreadsheet.getSheetByName('Persona Mapper Settings');
   if (pSheet && pSheet.getLastRow() > 1) {
     const pData = pSheet.getDataRange().getValues();
@@ -939,7 +1282,6 @@ function getCampaignSenderSettings_(spreadsheet, campaignId) {
     }
   }
 
-  // 3. Fill remaining blanks from Campaign Configuration if matching
   const configSheet = spreadsheet.getSheetByName('Campaign Configuration');
   if (configSheet && configSheet.getLastRow() > 1) {
     const cfgData = configSheet.getDataRange().getValues();
