@@ -2198,10 +2198,98 @@ function rejectSelectedProspect() {
 }
 
 /**
+ * Loads active suppression rules from "Lists & Settings" for manual approval guarding.
+ */
+function getApprovalSuppressionRules_(ss) {
+  const rules = { domains: {}, emails: {} };
+  if (!ss) return rules;
+  const listsSheet = ss.getSheetByName('Lists & Settings');
+  if (!listsSheet || listsSheet.getLastRow() <= 1) return rules;
+
+  const data = listsSheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    const listName = String(data[i][0] || '').trim().toLowerCase();
+    const val = String(data[i][1] || '').trim().toLowerCase();
+    const status = String(data[i][2] || '').trim().toLowerCase();
+    const isActive = (status === 'active' || status === 'true' || status === '');
+    const isSuppression = (
+      listName.indexOf('suppression') >= 0 ||
+      listName.indexOf('blacklist') >= 0 ||
+      listName.indexOf('opt-out') >= 0 ||
+      listName.indexOf('opt out') >= 0 ||
+      listName.indexOf('unsubscribe') >= 0 ||
+      listName.indexOf('competitor') >= 0
+    );
+    if (isActive && isSuppression && val) {
+      if (val.indexOf('@') >= 0) {
+        rules.emails[val] = true;
+      } else {
+        rules.domains[val.replace(/^@/, '')] = true;
+      }
+    }
+  }
+  return rules;
+}
+
+/**
+ * Checks whether a "Prospect Review Queue" row is suppressed or invalid and
+ * should be blocked from accidental manual approval.
+ */
+function getProspectApprovalBlockReason_(row, colMap, suppressionRules) {
+  const email = colMap.email > 0 ? String(row[colMap.email - 1] || '').trim() : '';
+  const emailLow = email.toLowerCase();
+  const emailDomain = emailLow.indexOf('@') >= 0 ? emailLow.split('@')[1] : '';
+  const emailVerif = colMap.emailVerif > 0 ? String(row[colMap.emailVerif - 1] || '').trim().toLowerCase() : '';
+  const compStatus = colMap.compliance > 0 ? String(row[colMap.compliance - 1] || '').trim() : '';
+  const compLow = compStatus.toLowerCase();
+  const suppCheck = colMap.suppression > 0 ? String(row[colMap.suppression - 1] || '').trim() : '';
+  const suppLow = suppCheck.toLowerCase();
+  const approvalStatus = colMap.approvalStatus > 0 ? String(row[colMap.approvalStatus - 1] || '').trim() : '';
+  const approvalLow = approvalStatus.toLowerCase();
+  const sendStatus = colMap.sendStatus > 0 ? String(row[colMap.sendStatus - 1] || '').trim() : '';
+  const sendLow = sendStatus.toLowerCase();
+
+  if (compLow.indexOf('failed') >= 0 || compLow.indexOf('suppressed') >= 0 || compLow.indexOf('blocked') >= 0) {
+    return 'Compliance Status is "' + compStatus + '"';
+  }
+  if (suppLow.indexOf('blocked') >= 0) {
+    return 'Suppression Check is "' + suppCheck + '"';
+  }
+  if (sendLow === 'suppressed - not sent') {
+    return 'Send Status is "Suppressed - Not Sent"';
+  }
+  if (approvalLow.indexOf('suppression') >= 0) {
+    return 'Human Approval Status is "' + approvalStatus + '"';
+  }
+  if (emailVerif === 'invalid') {
+    return 'Email Verification Status is "invalid"';
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLow)) {
+    return email ? ('Invalid Business Email syntax ("' + email + '")') : 'Missing Business Email';
+  }
+
+  const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@', 'office@', 'jobs@', 'careers@'];
+  for (let p = 0; p < rolePrefixes.length; p++) {
+    if (emailLow.indexOf(rolePrefixes[p]) === 0) {
+      return 'Role-based email address ("' + email + '")';
+    }
+  }
+
+  if (suppressionRules && suppressionRules.emails && suppressionRules.emails[emailLow]) {
+    return 'Email "' + email + '" is on active suppression list in Lists & Settings';
+  }
+  if (emailDomain && suppressionRules && suppressionRules.domains && suppressionRules.domains[emailDomain]) {
+    return 'Domain "' + emailDomain + '" is on active suppression list in Lists & Settings';
+  }
+
+  return '';
+}
+
+/**
  * Updates Review Status, Human Approval Status, Reviewer metadata, and Queue Status
  * across ALL selected visible prospect rows in "Prospect Review Queue" (supporting
  * both dragged selections and Ctrl/Cmd-clicked separate rows, while skipping rows
- * hidden by active filters).
+ * hidden by active filters). Blocks accidental approval of suppressed/invalid rows.
  */
 function updateSelectedProspectStatus(statusText) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -2252,8 +2340,7 @@ function updateSelectedProspectStatus(statusText) {
     } catch (e) {}
   }
 
-  const previewCols = Math.min(lastCol, 18);
-  const previewRows = sheet.getRange(2, 1, lastDataRow - 1, previewCols).getValues();
+  const allRows = sheet.getRange(2, 1, lastDataRow - 1, lastCol).getValues();
   const rowSet = {};
 
   for (let i = 0; i < ranges.length; i++) {
@@ -2273,7 +2360,7 @@ function updateSelectedProspectStatus(statusText) {
       } catch (e) {}
       if (isHidden) continue;
 
-      const rowPreview = previewRows[r - 2] || [];
+      const rowPreview = (allRows[r - 2] || []).slice(0, Math.min(lastCol, 18));
       const hasData = rowPreview.some(function(cell) {
         return cell !== '' && cell !== null && cell !== undefined;
       });
@@ -2300,43 +2387,107 @@ function updateSelectedProspectStatus(statusText) {
   const headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
     return String(h || '').trim();
   });
+  const normHeaders = headers.map(function(h) { return normalizeStudioKey(h); });
 
-  function resolveCol(headerName, fallbackCol) {
-    const idx = headers.indexOf(headerName);
-    return idx >= 0 ? idx + 1 : fallbackCol;
+  function resolveCol(headerNames, fallbackCol) {
+    const candidates = Array.isArray(headerNames) ? headerNames : [headerNames];
+    for (let c = 0; c < candidates.length; c++) {
+      const idx = headers.indexOf(candidates[c]);
+      if (idx >= 0) return idx + 1;
+    }
+    for (let c = 0; c < candidates.length; c++) {
+      const normIdx = normHeaders.indexOf(normalizeStudioKey(candidates[c]));
+      if (normIdx >= 0) return normIdx + 1;
+    }
+    return fallbackCol;
   }
 
-  const reviewStatusCol = resolveCol('Review Status', 18);
-  const reviewerCol = resolveCol('Reviewer', 19);
-  const reviewedAtCol = resolveCol('Reviewed At', 21);
-  const approvalStatusCol = resolveCol('Human Approval Status', 22);
-  const approvedByCol = resolveCol('Approved By', 23);
-  const approvedAtCol = resolveCol('Approved At', 24);
-  const queueStatusCol = resolveCol('Queue Status', 41);
+  const reviewStatusCol = resolveCol(['Review Status'], 18);
+  const reviewerCol = resolveCol(['Reviewer'], 19);
+  const reviewedAtCol = resolveCol(['Reviewed At'], 21);
+  const approvalStatusCol = resolveCol(['Human Approval Status'], 22);
+  const approvedByCol = resolveCol(['Approved By'], 23);
+  const approvedAtCol = resolveCol(['Approved At'], 24);
+  const queueStatusCol = resolveCol(['Queue Status'], 41);
 
-  targetRows.forEach(function(row) {
-    sheet.getRange(row, reviewStatusCol).setValue(statusText);
-    sheet.getRange(row, reviewerCol).setValue(user);
-    sheet.getRange(row, reviewedAtCol).setValue(now);
-    sheet.getRange(row, approvalStatusCol).setValue(statusText);
+  const guardColMap = {
+    email: resolveCol(['Business Email', 'Email'], 0),
+    emailVerif: resolveCol(['Email Verification Status'], 0),
+    sendStatus: resolveCol(['Send Status'], 25),
+    approvalStatus: approvalStatusCol,
+    compliance: resolveCol(['Compliance Status'], 42),
+    suppression: resolveCol(['Suppression Check'], 43)
+  };
+
+  const isApproving = (statusText === 'Approved');
+  const suppressionRules = isApproving ? getApprovalSuppressionRules_(ss) : null;
+  const updatedRows = [];
+  const skippedDetails = [];
+
+  targetRows.forEach(function(rowNum) {
+    if (isApproving) {
+      const rowData = allRows[rowNum - 2] || [];
+      const blockReason = getProspectApprovalBlockReason_(rowData, guardColMap, suppressionRules);
+      if (blockReason) {
+        const emailVal = guardColMap.email > 0 ? String(rowData[guardColMap.email - 1] || '').trim() : '';
+        skippedDetails.push('• Row ' + rowNum + (emailVal ? (' (' + emailVal + ')') : '') + ': ' + blockReason);
+        return;
+      }
+    }
+
+    sheet.getRange(rowNum, reviewStatusCol).setValue(statusText);
+    sheet.getRange(rowNum, reviewerCol).setValue(user);
+    sheet.getRange(rowNum, reviewedAtCol).setValue(now);
+    sheet.getRange(rowNum, approvalStatusCol).setValue(statusText);
 
     if (statusText === 'Approved') {
-      sheet.getRange(row, approvedByCol).setValue(user);
-      sheet.getRange(row, approvedAtCol).setValue(now);
+      sheet.getRange(rowNum, approvedByCol).setValue(user);
+      sheet.getRange(rowNum, approvedAtCol).setValue(now);
     } else if (statusText === 'Rejected') {
-      sheet.getRange(row, queueStatusCol).setValue('Rejected');
+      sheet.getRange(rowNum, queueStatusCol).setValue('Rejected');
     } else if (statusText === 'Needs Review') {
-      sheet.getRange(row, queueStatusCol).setValue('Ready for Review');
+      sheet.getRange(rowNum, queueStatusCol).setValue('Ready for Review');
     }
+
+    updatedRows.push(rowNum);
   });
 
   SpreadsheetApp.flush();
-  const rowPreviewLabel = targetRows.length <= 8
-    ? targetRows.join(', ')
-    : (targetRows.slice(0, 5).join(', ') + '...');
-  const toastMsg = targetRows.length === 1
-    ? ('Row ' + targetRows[0] + ' updated to: ' + statusText)
-    : ('Updated ' + targetRows.length + ' prospect rows (' + rowPreviewLabel + ') to: ' + statusText);
+
+  if (skippedDetails.length > 0) {
+    const maxPreview = 10;
+    const shownLines = skippedDetails.slice(0, maxPreview).join('\n');
+    const extraLine = skippedDetails.length > maxPreview
+      ? ('\n...and ' + (skippedDetails.length - maxPreview) + ' more skipped row(s).')
+      : '';
+
+    let alertTitle = '';
+    let alertBody = '';
+    if (updatedRows.length === 0) {
+      alertTitle = 'Approval Blocked (Suppressed / Invalid Rows)';
+      alertBody = 'No rows were approved because all ' + skippedDetails.length + ' selected row(s) are suppressed or have invalid emails:\n\n' +
+        shownLines + extraLine;
+    } else {
+      alertTitle = 'Partial Approval Completed';
+      alertBody = 'Approved ' + updatedRows.length + ' valid row(s).\n' +
+        'Skipped ' + skippedDetails.length + ' suppressed/invalid row(s):\n\n' +
+        shownLines + extraLine;
+    }
+
+    try {
+      SpreadsheetApp.getUi().alert(alertTitle, alertBody, SpreadsheetApp.getUi().ButtonSet.OK);
+    } catch (e) {
+      ss.toast(alertBody, alertTitle, 6);
+    }
+    return;
+  }
+
+  const rowPreviewLabel = updatedRows.length <= 8
+    ? updatedRows.join(', ')
+    : (updatedRows.slice(0, 5).join(', ') + '...');
+  const toastMsg = updatedRows.length === 1
+    ? ('Row ' + updatedRows[0] + ' updated to: ' + statusText)
+    : ('Updated ' + updatedRows.length + ' prospect rows (' + rowPreviewLabel + ') to: ' + statusText);
   ss.toast(toastMsg, 'Status Updated', 4);
 }
 
