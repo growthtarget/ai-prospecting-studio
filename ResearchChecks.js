@@ -4,10 +4,11 @@
  * OFFLINE UNIT TEST SUITE & GROUNDING VERIFICATION HARNESS
  * ============================================================================
  * File: ResearchChecks.js
- * 
+ *
  * Executes comprehensive offline unit tests across Gemini Grounding, OpenAI,
- * Tab 8 (Company Database - 10 cols, Col J = Campaign ID), and
- * Tab 9 (Research Evidence - 9 cols) without making live API calls or sheet writes.
+ * Company Database (10 cols, Col J = Campaign ID), Research Evidence (9 cols),
+ * and Campaign-Level Company & Persona Deduplication without making live API
+ * calls or sheet writes.
  * ============================================================================
  */
 
@@ -107,7 +108,7 @@ function runOfflineSampleChecks() {
   assert(preparedGemini.evidenceRows[0][7] === 'High', 'Gemini groundingChunk correctly verifies sourceUrl as High');
   assert(preparedGemini.evidenceRows[1][7] === 'Unknown', 'Gemini ungrounded source is downgraded to Unknown');
 
-  // 4. Test Scenario B Multi-Campaign Deduplication (Tab 8: 10 columns)
+  // 4. Test Scenario B Multi-Campaign & Variant Deduplication (Company Database: 10 columns)
   // [ID, CompanyName, Domain, Country, Industry, Size, Method, Date, Status, CampaignID]
   const newPlan = buildResearchSavePlan_([], preparedGemini);
   assert(newPlan.action === 'save', 'new company is eligible for saving');
@@ -121,6 +122,16 @@ function runOfflineSampleChecks() {
     ['EX-002', 'example manufacturing corp', 'other-domain.ca', 'Canada', 'Manufacturing', '500', 'AI', '2026-11-12', 'Discovered', 'CAMP-TEST-001']
   ], preparedGemini);
   assert(nameDuplicate.action === 'skip_duplicate' && nameDuplicate.matchReason === 'company name', 'company name duplicate in same campaign is skipped');
+
+  const parentheticalDuplicate = buildResearchSavePlan_([
+    ['EX-004', 'Example Manufacturing Corp (Affiliated Clean Division)', 'other-example.com', 'Canada', 'Manufacturing', '500', 'AI', '2026-11-12', 'Discovered', 'CAMP-TEST-001']
+  ], preparedGemini);
+  assert(parentheticalDuplicate.action === 'skip_duplicate' && parentheticalDuplicate.matchReason === 'company name', 'parenthetical division variant in same campaign is skipped');
+
+  const subsidiaryDuplicate = buildResearchSavePlan_([
+    ['EX-005', 'Example Inc.', 'examplecorp.com', 'Canada', 'Manufacturing', '500', 'AI', '2026-11-12', 'Discovered', 'CAMP-TEST-001']
+  ], preparedGemini);
+  assert(subsidiaryDuplicate.action === 'skip_duplicate' && subsidiaryDuplicate.matchReason === 'parent/subsidiary brand', 'parent/subsidiary brand+domain variant in same campaign is skipped');
 
   const otherCampaignTarget = buildResearchSavePlan_([
     ['EX-003', 'Example Manufacturing Corp', 'example.com', 'Canada', 'Manufacturing', '500', 'AI', '2026-11-12', 'Discovered', 'OTHER-CAMPAIGN-002']
@@ -173,7 +184,57 @@ function runOfflineSampleChecks() {
   assert(preparedPersona.evidenceRows[0][3] === 'Persona', 'Entity Type is marked Persona in Column D');
   assert(preparedPersona.evidenceRows[0][7] === 'High', 'persona grounding citation verified as High');
 
-  const result = 'Passed ' + checks + ' offline checks across Gemini Grounding, OpenAI Citations, Tab 8 (10-col), and Tab 9 (9-col).';
+  // 6. Test CompanyDiscovery & PersonaMapper Campaign-Level Deduplication Helpers
+  if (typeof isDuplicateCompanyInCampaign_ === 'function') {
+    const sampleCampRows = [
+      { 'Campaign ID': 'CMP-005', 'Company ID': 'CMP-074312', 'Company Name': 'Enbridge Gas Inc.', 'Domain': 'enbridgegas.com' }
+    ];
+    assert(
+      isDuplicateCompanyInCampaign_('Enbridge Gas Inc. (Affiliated Clean Infrastructure Division)', 'enbridge.com', sampleCampRows, 'CMP-005') === true,
+      'CompanyDiscovery catches parenthetical division variant in same campaign'
+    );
+    assert(
+      isDuplicateCompanyInCampaign_('Enbridge Gas Inc.', 'enbridgegas.com', sampleCampRows, 'EVA-CAN-001') === false,
+      'CompanyDiscovery Scenario B allows same company in different campaign'
+    );
+  }
+
+  if (typeof isDuplicatePersonaInCampaign_ === 'function') {
+    const sampleTracker = {
+      linkedinUrls: { 'linkedin.com/in/michele-harradence': true },
+      emails: { 'sarah.jenkins@carbonsolutionsgroup.com': true },
+      nameCompanyKeys: {
+        'sarah jenkins|id:cmp-064b23': true,
+        'sarah jenkins|name:carbon solutions': true
+      }
+    };
+    assert(
+      isDuplicatePersonaInCampaign_(
+        { name: 'Michele Harradence', linkedinUrl: 'https://linkedin.com/in/michele-harradence/' },
+        { 'Company ID': 'CMP-074312', 'Company Name': 'Enbridge Gas Inc.' },
+        sampleTracker
+      ) === true,
+      'PersonaMapper catches www vs non-www LinkedIn URL variant in same campaign'
+    );
+    assert(
+      isDuplicatePersonaInCampaign_(
+        { name: 'Sarah Jenkins', linkedinUrl: 'https://linkedin.com/in/sarah-jenkins-csg', businessEmail: 's.jenkins@carbonsolutionsgroup.com' },
+        { 'Company ID': 'CMP-064B23', 'Company Name': 'Carbon Solutions Group Canada' },
+        sampleTracker
+      ) === true,
+      'PersonaMapper catches same person under alternate email & LinkedIn slug in same campaign'
+    );
+    assert(
+      isDuplicatePersonaInCampaign_(
+        { name: 'Jane Doe', linkedinUrl: 'https://linkedin.com/in/janedoe-terrapin', businessEmail: 'jdoe@terrapingeothermics.com' },
+        { 'Company ID': 'CMP-6A7BC4', 'Company Name': 'Terrapin Geothermics' },
+        sampleTracker
+      ) === false,
+      'PersonaMapper allows distinct unmapped persona in same campaign'
+    );
+  }
+
+  const result = 'Passed ' + checks + ' offline checks across Gemini Grounding, OpenAI Citations, Tab 8 (10-col), Tab 9 (9-col), and Campaign Deduplication.';
   console.log(result);
   return result;
 }

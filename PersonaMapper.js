@@ -4,20 +4,23 @@
  * AGENT 2: PERSONA IDENTIFICATION, RESEARCH & EMAIL CURATION (CLIENT-ISOLATED)
  * ============================================================================
  * File: PersonaMapper.gs / PersonaMapper.js
- * 
+ *
  * CAPABILITIES:
  * 1. Multi-AI Support: Routes dynamically to GEMINI (Grounding) or OPENAI (GPT-4o)
  *    using strict Client-Scoped API keys (zero local fallback for clients).
  * 2. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
  *    Custom HTTPS keys strictly per Client / Owner (validated pre-flight before AI calls).
- * 3. Manual Queue Verification: Supports verifying selected visible rows in
+ * 3. Campaign-Level Anti-Duplication:
+ *    - Automatically skips companies in the same Campaign ID that already have mapped personas.
+ *    - Deduplicates personas per Campaign ID across normalized LinkedIn URLs,
+ *      Business Emails, and normalized Person Name + Company before spending verifier credits.
+ * 4. Manual Queue Verification: Supports verifying selected visible rows in
  *    "Prospect Review Queue" on demand and syncing results to "Persona Leads".
- * 4. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
- *    opt-out emails, and role-based accounts before queuing.
- * 5. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 cols).
- * 6. Grounding Evidence Logging: Persists verified decision-maker signals into Tab 10 "Research Evidence" (9 cols).
- * 7. API Usage & Cost Tracking: Logs LLM token costs and email verifier credit usage to "API_Usage_Log".
- * 8. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
+ * 5. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
+ *    opt-out emails, and role-based accounts before verification & queuing.
+ * 6. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 base cols).
+ * 7. Grounding Evidence Logging: Persists verified decision-maker signals into "Research Evidence" (9 cols).
+ * 8. API Usage & Cost Tracking: Logs LLM token costs and email verifier credit usage to "API_Usage_Log".
  * ============================================================================
  */
 
@@ -544,29 +547,53 @@ function runPersonaMapperFromSidebar(campaignId) {
     const modelChoice = resolvePersonaAiModel_(providerChoice, settings['AI Model']);
     const providerLabel = providerChoice === 'OPENAI' ? 'OpenAI (' + modelChoice + ')' : 'Google Gemini (' + modelChoice + ')';
 
-    const companies = getPersonaMapperCompanies_(spreadsheet, activeId, settings);
-    if (!companies.length) {
+    const allQualifiedCompanies = getPersonaMapperCompanies_(spreadsheet, activeId, settings, { skipAlreadyMapped: false });
+    if (!allQualifiedCompanies.length) {
       return { success: false, message: 'No qualified companies found for campaign ' + activeId + ' in Company Database. Run Step 1 first!' };
+    }
+
+    const unmappedCompanies = getPersonaMapperCompanies_(spreadsheet, activeId, settings, { skipAlreadyMapped: true });
+    const properties = PropertiesService.getDocumentProperties();
+    const cursorKey = 'PERSONA_MAPPER_CURSOR_' + activeId;
+
+    if (!unmappedCompanies.length) {
+      properties.deleteProperty(cursorKey);
+      return {
+        success: true,
+        count: 0,
+        allMapped: true,
+        message: 'All ' + allQualifiedCompanies.length + ' qualified company record(s) in campaign ' + activeId +
+          ' already have personas mapped in "Persona Leads". Increase Discovery Limit and run Step 1 to add new companies first.'
+      };
     }
 
     // Fail-fast before making any paid AI or Verifier API calls
     validatePersonaPreRunGuardrails_(spreadsheet, activeId, settings);
 
     const suppressionRules = loadSuppressionRulesFromSettings_(spreadsheet);
+    const existingPersonaTracker = getExistingCampaignPersonas_(spreadsheet, activeId);
+    const mappedTracker = getMappedCompanyTracker_(spreadsheet, activeId);
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
-    const properties = PropertiesService.getDocumentProperties();
-    const cursorKey = 'PERSONA_MAPPER_CURSOR_' + activeId;
-    let start = Number(properties.getProperty(cursorKey) || 0);
-    if (start >= companies.length) start = 0;
-    const end = Math.min(companies.length, start + batchLimit);
+    const batchCompanies = unmappedCompanies.slice(0, batchLimit);
     let processed = 0;
+    let skippedDuplicatePersonas = 0;
 
     const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
     const minConfidenceRank = resolveMinPersonaConfidenceRank_(settings['Minimum Persona Confidence']);
 
-    for (let index = start; index < end; index++) {
-      const company = companies[index];
+    for (let index = 0; index < batchCompanies.length; index++) {
+      const company = batchCompanies[index];
+      const companyId = String(company['Company ID'] || '').trim();
       const companyName = String(company['Company name'] || company['Company Name'] || '').trim();
+      const normCompName = normalizePersonaCompanyName_(companyName);
+
+      // Also guard against duplicate company rows within the same batch run
+      if ((companyId && mappedTracker.companyIds[companyId.toLowerCase()]) ||
+          (normCompName && mappedTracker.companyNames[normCompName])) {
+        Logger.log('Skipped duplicate/already-mapped company in batch for ' + activeId + ': ' + companyName + ' (' + companyId + ')');
+        continue;
+      }
+
       const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, activeId, companyName);
 
       const aiResponse = executeAiCall_({
@@ -599,13 +626,29 @@ function runPersonaMapperFromSidebar(campaignId) {
         const confidence = titleCaseSignal_(persona.confidence) || 'Medium';
         if (confidence === 'Low' || confidenceRank_(confidence) < minConfidenceRank) return;
         if (companyScore.score < minCompanyScore) return;
+
+        // Deduplicate per Campaign ID BEFORE calling paid email verifier
+        if (isDuplicatePersonaInCampaign_(persona, company, existingPersonaTracker)) {
+          skippedDuplicatePersonas++;
+          Logger.log('Skipped duplicate persona in ' + activeId + ': ' + (persona.name || '') + ' @ ' + companyName);
+          return;
+        }
+
         const fitScore = scorePersonaFit_(persona.fitDimensions || {});
-        const emailInfo = prepareEmailIntelligence_(persona, company, settings, spreadsheet);
+        const emailInfo = prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules);
+
+        if (emailInfo.businessEmail && isDuplicatePersonaInCampaign_(persona, company, existingPersonaTracker, emailInfo.businessEmail)) {
+          skippedDuplicatePersonas++;
+          Logger.log('Skipped duplicate persona email in ' + activeId + ': ' + emailInfo.businessEmail);
+          return;
+        }
+
         const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings);
         upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
         const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings, suppressionRules);
         upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
 
+        registerPersonaInCampaignTracker_(persona, company, existingPersonaTracker, emailInfo);
         recordPersonaGroundingEvidence_(spreadsheet, activeId, company, persona, grounding, settings['Persona Titles']);
       });
 
@@ -617,8 +660,9 @@ function runPersonaMapperFromSidebar(campaignId) {
         });
       }
 
+      if (companyId) mappedTracker.companyIds[companyId.toLowerCase()] = true;
+      if (normCompName) mappedTracker.companyNames[normCompName] = true;
       processed++;
-      properties.setProperty(cursorKey, String(index + 1));
     }
 
     if (typeof checkVerifierBalanceAndAlert_ === 'function') {
@@ -630,19 +674,23 @@ function runPersonaMapperFromSidebar(campaignId) {
       updateDashboardForActiveCampaign(activeId);
     }
 
-    if (end >= companies.length) {
-      properties.deleteProperty(cursorKey);
+    properties.deleteProperty(cursorKey);
+    const remainingUnmapped = Math.max(0, unmappedCompanies.length - batchCompanies.length);
+    const dupNote = skippedDuplicatePersonas > 0
+      ? (' (' + skippedDuplicatePersonas + ' duplicate persona(s) automatically skipped)')
+      : '';
+
+    if (remainingUnmapped === 0) {
       return {
         success: true,
         count: processed,
-        message: 'Persona Mapper completed ' + processed + ' company record(s) for "' + clientName + '" using ' + providerLabel + '! Leads staged in Review Queue & citations logged in Research Evidence.'
+        message: 'Persona Mapper completed ' + processed + ' unmapped company record(s) for "' + clientName + '" using ' + providerLabel + '!' + dupNote + ' Leads staged in Review Queue & citations logged in Research Evidence.'
       };
     } else {
-      properties.setProperty(cursorKey, String(end));
       return {
         success: true,
         count: processed,
-        message: 'Processed ' + processed + ' companies for "' + clientName + '" with ' + providerLabel + '. Click Step 2 again to run next batch.'
+        message: 'Processed ' + processed + ' unmapped company record(s) for "' + clientName + '" with ' + providerLabel + '.' + dupNote + ' ' + remainingUnmapped + ' unmapped company record(s) remaining—click Step 2 again to run next batch.'
       };
     }
   } catch (err) {
@@ -684,10 +732,23 @@ function runPersonaMapperForSelectedCampaign() {
     const modelChoice = resolvePersonaAiModel_(providerChoice, settings['AI Model']);
     const providerLabel = providerChoice === 'OPENAI' ? 'OpenAI (' + modelChoice + ')' : 'Google Gemini (' + modelChoice + ')';
 
-    const companies = getPersonaMapperCompanies_(spreadsheet, campaignId, settings);
-    if (!companies.length) {
+    const allQualifiedCompanies = getPersonaMapperCompanies_(spreadsheet, campaignId, settings, { skipAlreadyMapped: false });
+    if (!allQualifiedCompanies.length) {
       if (ui) ui.alert('No qualified companies found under campaign ' + campaignId + ' in Company Database yet. Run Step 1 first.');
       else Logger.log('No qualified companies found for campaign ' + campaignId);
+      return;
+    }
+
+    const unmappedCompanies = getPersonaMapperCompanies_(spreadsheet, campaignId, settings, { skipAlreadyMapped: true });
+    const properties = PropertiesService.getDocumentProperties();
+    const cursorKey = 'PERSONA_MAPPER_CURSOR_' + campaignId;
+
+    if (!unmappedCompanies.length) {
+      properties.deleteProperty(cursorKey);
+      const doneMsg = 'All ' + allQualifiedCompanies.length + ' qualified company record(s) in campaign ' + campaignId +
+        ' already have personas mapped in "Persona Leads".\n\nIncrease Discovery Limit and run Step 1 to add new companies first.';
+      if (ui) ui.alert('All Companies Already Mapped', doneMsg, ui.ButtonSet.OK);
+      else Logger.log(doneMsg);
       return;
     }
 
@@ -701,20 +762,28 @@ function runPersonaMapperForSelectedCampaign() {
     }
 
     const suppressionRules = loadSuppressionRulesFromSettings_(spreadsheet);
+    const existingPersonaTracker = getExistingCampaignPersonas_(spreadsheet, campaignId);
+    const mappedTracker = getMappedCompanyTracker_(spreadsheet, campaignId);
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
-    const properties = PropertiesService.getDocumentProperties();
-    const cursorKey = 'PERSONA_MAPPER_CURSOR_' + campaignId;
-    let start = Number(properties.getProperty(cursorKey) || 0);
-    if (start >= companies.length) start = 0;
-    const end = Math.min(companies.length, start + batchLimit);
+    const batchCompanies = unmappedCompanies.slice(0, batchLimit);
     let processed = 0;
+    let skippedDuplicatePersonas = 0;
 
     const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
     const minConfidenceRank = resolveMinPersonaConfidenceRank_(settings['Minimum Persona Confidence']);
 
-    for (let index = start; index < end; index++) {
-      const company = companies[index];
+    for (let index = 0; index < batchCompanies.length; index++) {
+      const company = batchCompanies[index];
+      const companyId = String(company['Company ID'] || '').trim();
       const companyName = String(company['Company name'] || company['Company Name'] || '').trim();
+      const normCompName = normalizePersonaCompanyName_(companyName);
+
+      if ((companyId && mappedTracker.companyIds[companyId.toLowerCase()]) ||
+          (normCompName && mappedTracker.companyNames[normCompName])) {
+        Logger.log('Skipped duplicate/already-mapped company in batch for ' + campaignId + ': ' + companyName + ' (' + companyId + ')');
+        continue;
+      }
+
       const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName);
 
       try {
@@ -748,13 +817,28 @@ function runPersonaMapperForSelectedCampaign() {
           const confidence = titleCaseSignal_(persona.confidence) || 'Medium';
           if (confidence === 'Low' || confidenceRank_(confidence) < minConfidenceRank) return;
           if (companyScore.score < minCompanyScore) return;
+
+          if (isDuplicatePersonaInCampaign_(persona, company, existingPersonaTracker)) {
+            skippedDuplicatePersonas++;
+            Logger.log('Skipped duplicate persona in ' + campaignId + ': ' + (persona.name || '') + ' @ ' + companyName);
+            return;
+          }
+
           const fitScore = scorePersonaFit_(persona.fitDimensions || {});
-          const emailInfo = prepareEmailIntelligence_(persona, company, settings, spreadsheet);
+          const emailInfo = prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules);
+
+          if (emailInfo.businessEmail && isDuplicatePersonaInCampaign_(persona, company, existingPersonaTracker, emailInfo.businessEmail)) {
+            skippedDuplicatePersonas++;
+            Logger.log('Skipped duplicate persona email in ' + campaignId + ': ' + emailInfo.businessEmail);
+            return;
+          }
+
           const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings);
           upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
           const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings, suppressionRules);
           upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
 
+          registerPersonaInCampaignTracker_(persona, company, existingPersonaTracker, emailInfo);
           recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, settings['Persona Titles']);
         });
 
@@ -766,8 +850,9 @@ function runPersonaMapperForSelectedCampaign() {
           });
         }
 
+        if (companyId) mappedTracker.companyIds[companyId.toLowerCase()] = true;
+        if (normCompName) mappedTracker.companyNames[normCompName] = true;
         processed++;
-        properties.setProperty(cursorKey, String(index + 1));
       } catch (error) {
         Logger.log('Persona Mapper paused on company: ' + error.message);
         if (ui) ui.alert('Persona Mapper paused: ' + error.message);
@@ -784,12 +869,16 @@ function runPersonaMapperForSelectedCampaign() {
       updateDashboardForActiveCampaign(campaignId);
     }
 
-    if (end >= companies.length) {
-      properties.deleteProperty(cursorKey);
-      if (ui) ui.alert('Persona Mapper completed ' + processed + ' company record(s) for "' + clientName + '" using ' + providerLabel + '. Leads staged in Prospect Review Queue & Grounding Evidence recorded.');
+    properties.deleteProperty(cursorKey);
+    const remainingUnmapped = Math.max(0, unmappedCompanies.length - batchCompanies.length);
+    const dupNote = skippedDuplicatePersonas > 0
+      ? (' (' + skippedDuplicatePersonas + ' duplicate persona(s) automatically skipped)')
+      : '';
+
+    if (remainingUnmapped === 0) {
+      if (ui) ui.alert('Persona Mapper completed ' + processed + ' unmapped company record(s) for "' + clientName + '" using ' + providerLabel + '.' + dupNote + ' Leads staged in Prospect Review Queue & Grounding Evidence recorded.');
     } else {
-      properties.setProperty(cursorKey, String(end));
-      if (ui) ui.alert('Persona Mapper processed ' + processed + ' company record(s) for "' + clientName + '". Run it again to continue next batch.');
+      if (ui) ui.alert('Persona Mapper processed ' + processed + ' unmapped company record(s) for "' + clientName + '".' + dupNote + ' ' + remainingUnmapped + ' unmapped company record(s) remaining—run it again to continue next batch.');
     }
   } finally {
     lock.releaseLock();
@@ -1117,11 +1206,20 @@ function executeAiCall_(options) {
   throw new Error('AI router not available for ' + provider);
 }
 
-function getPersonaMapperCompanies_(spreadsheet, campaignId, settings) {
+/**
+ * Returns qualified companies for the active Campaign ID.
+ * By default skips companies that already have mapped personas in "Persona Leads"
+ * or "Prospect Review Queue" for the same Campaign ID (Scenario B preserved).
+ */
+function getPersonaMapperCompanies_(spreadsheet, campaignId, settings, options) {
   const sheet = spreadsheet.getSheetByName('Company Database');
   if (!sheet) throw new Error('Company Database sheet was not found.');
 
+  const skipAlreadyMapped = !(options && options.skipAlreadyMapped === false);
+  const mappedTracker = skipAlreadyMapped ? getMappedCompanyTracker_(spreadsheet, campaignId) : null;
   const minScore = Number(settings && settings['Minimum Company Opportunity Score']) || 0;
+  const seenInDb = { companyIds: {}, companyNames: {} };
+
   return getPersonaMapperSheetRecords_(sheet).filter(function(row) {
     if (String(row['Campaign ID'] || '').trim() !== String(campaignId).trim()) return false;
 
@@ -1136,8 +1234,168 @@ function getPersonaMapperCompanies_(spreadsheet, campaignId, settings) {
 
     const score = Number(row['Company Opportunity Score'] || row['Score'] || row['initialScore'] || 0);
     if (minScore && score && score < minScore) return false;
+
+    const companyId = String(row['Company ID'] || '').trim().toLowerCase();
+    const companyName = String(row['Company Name'] || row['Company name'] || '').trim();
+    const normCompanyName = normalizePersonaCompanyName_(companyName);
+
+    if (skipAlreadyMapped && mappedTracker) {
+      if ((companyId && mappedTracker.companyIds[companyId]) ||
+          (normCompanyName && mappedTracker.companyNames[normCompanyName])) {
+        return false;
+      }
+    }
+
+    // Prevent processing duplicate company rows inside Company Database in the same Campaign ID
+    if ((companyId && seenInDb.companyIds[companyId]) ||
+        (normCompanyName && seenInDb.companyNames[normCompanyName])) {
+      return false;
+    }
+    if (companyId) seenInDb.companyIds[companyId] = true;
+    if (normCompanyName) seenInDb.companyNames[normCompanyName] = true;
+
     return true;
   });
+}
+
+/**
+ * Identifies all companies that already have personas mapped for a given Campaign ID
+ * across "Persona Leads" and "Prospect Review Queue".
+ */
+function getMappedCompanyTracker_(spreadsheet, campaignId) {
+  const tracker = { companyIds: {}, companyNames: {} };
+  const targetCamp = String(campaignId || '').trim();
+  if (!spreadsheet || !targetCamp) return tracker;
+
+  [PERSONA_MAPPER_SHEETS_.personas, PERSONA_MAPPER_SHEETS_.queue].forEach(function(sheetName) {
+    const sh = spreadsheet.getSheetByName(sheetName);
+    if (!sh || sh.getLastRow() <= 1) return;
+
+    const records = getPersonaMapperSheetRecords_(sh);
+    records.forEach(function(row) {
+      if (String(row['Campaign ID'] || '').trim() !== targetCamp) return;
+
+      const cid = String(row['Company ID'] || '').trim().toLowerCase();
+      const cname = normalizePersonaCompanyName_(row['Company Name'] || row['Company name'] || '');
+      if (cid) tracker.companyIds[cid] = true;
+      if (cname) tracker.companyNames[cname] = true;
+    });
+  });
+
+  return tracker;
+}
+
+/**
+ * Builds lookup sets of already-existing personas in the given Campaign ID across
+ * "Persona Leads" and "Prospect Review Queue" to enforce strict campaign-level deduplication.
+ */
+function getExistingCampaignPersonas_(spreadsheet, campaignId) {
+  const tracker = { linkedinUrls: {}, emails: {}, nameCompanyKeys: {} };
+  const targetCamp = String(campaignId || '').trim();
+  if (!spreadsheet || !targetCamp) return tracker;
+
+  [PERSONA_MAPPER_SHEETS_.personas, PERSONA_MAPPER_SHEETS_.queue].forEach(function(sheetName) {
+    const sh = spreadsheet.getSheetByName(sheetName);
+    if (!sh || sh.getLastRow() <= 1) return;
+
+    const records = getPersonaMapperSheetRecords_(sh);
+    records.forEach(function(row) {
+      if (String(row['Campaign ID'] || '').trim() !== targetCamp) return;
+
+      const normLi = normalizeLinkedInUrl_(row['LinkedIn URL'] || '');
+      if (normLi) tracker.linkedinUrls[normLi] = true;
+
+      const email = String(row['Business Email'] || '').trim().toLowerCase();
+      if (email) tracker.emails[email] = true;
+
+      const normName = normalizePersonaName_(row['Name'] || '');
+      const compId = String(row['Company ID'] || '').trim().toLowerCase();
+      const normComp = normalizePersonaCompanyName_(row['Company Name'] || row['Company name'] || '');
+
+      if (normName && compId) tracker.nameCompanyKeys[normName + '|id:' + compId] = true;
+      if (normName && normComp) tracker.nameCompanyKeys[normName + '|name:' + normComp] = true;
+    });
+  });
+
+  return tracker;
+}
+
+function isDuplicatePersonaInCampaign_(persona, company, tracker, extraEmail) {
+  if (!persona || !tracker) return false;
+
+  const normLi = normalizeLinkedInUrl_(persona.linkedinUrl || '');
+  if (normLi && tracker.linkedinUrls[normLi]) return true;
+
+  const email = String(extraEmail || persona.businessEmail || '').trim().toLowerCase();
+  if (email && tracker.emails[email]) return true;
+
+  const normName = normalizePersonaName_(persona.name || '');
+  const compId = String((company && company['Company ID']) || '').trim().toLowerCase();
+  const normComp = normalizePersonaCompanyName_((company && (company['Company Name'] || company['Company name'])) || '');
+
+  if (normName && compId && tracker.nameCompanyKeys[normName + '|id:' + compId]) return true;
+  if (normName && normComp && tracker.nameCompanyKeys[normName + '|name:' + normComp]) return true;
+
+  return false;
+}
+
+function registerPersonaInCampaignTracker_(persona, company, tracker, emailInfo) {
+  if (!persona || !tracker) return;
+
+  const normLi = normalizeLinkedInUrl_(persona.linkedinUrl || '');
+  if (normLi) tracker.linkedinUrls[normLi] = true;
+
+  const email = String((emailInfo && emailInfo.businessEmail) || persona.businessEmail || '').trim().toLowerCase();
+  if (email) tracker.emails[email] = true;
+
+  const normName = normalizePersonaName_(persona.name || '');
+  const compId = String((company && company['Company ID']) || '').trim().toLowerCase();
+  const normComp = normalizePersonaCompanyName_((company && (company['Company Name'] || company['Company name'])) || '');
+
+  if (normName && compId) tracker.nameCompanyKeys[normName + '|id:' + compId] = true;
+  if (normName && normComp) tracker.nameCompanyKeys[normName + '|name:' + normComp] = true;
+}
+
+function normalizeLinkedInUrl_(url) {
+  let clean = String(url || '').trim().toLowerCase();
+  if (!clean || clean.indexOf('linkedin.com') < 0) return '';
+  clean = clean.replace(/^https?:\/\//i, '');
+  clean = clean.replace(/^[a-z0-9-]+\.linkedin\.com\//i, 'linkedin.com/');
+  clean = clean.split('?')[0].split('#')[0].replace(/\/+$/, '');
+  return clean;
+}
+
+function normalizePersonaName_(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.,'"()]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizePersonaCompanyName_(name) {
+  let clean = String(name || '').trim().toLowerCase();
+  if (!clean) return '';
+
+  clean = clean.replace(/\([^)]*\)/g, ' ');
+  clean = clean.replace(/[.,'"&]+/g, ' ').replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const stopSuffixes = {
+    'inc': true, 'incorporated': true, 'corp': true, 'corporation': true,
+    'ltd': true, 'limited': true, 'llc': true, 'llp': true, 'lp': true,
+    'plc': true, 'gmbh': true, 'sa': true, 'ag': true, 'co': true,
+    'company': true, 'companies': true, 'of': true, 'group': true,
+    'holdings': true, 'canada': true, 'usa': true, 'us': true,
+    'division': true, 'subsidiary': true, 'branch': true
+  };
+
+  const words = clean.split(' ').filter(Boolean);
+  while (words.length > 1 && stopSuffixes[words[words.length - 1]]) {
+    words.pop();
+  }
+
+  return words.join(' ').trim();
 }
 
 function scoreCompanyOpportunity_(result, settings) {
@@ -1384,7 +1642,7 @@ function normalizeEmailVerificationStatus_(rawStatus) {
   return 'risky';
 }
 
-function prepareEmailIntelligence_(persona, company, settings, spreadsheet) {
+function prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules) {
   const candidate = String(persona.businessEmail || '').trim().toLowerCase();
   const method = String(persona.emailDiscoveryMethod || (candidate ? 'Public web source' : 'Not Found')).trim();
   const sourceUrl = String(persona.emailSourceUrl || '').trim();
@@ -1431,6 +1689,31 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet) {
   const companyDomain = extractPersonaDomainFromUrl_(company['Domain'] || company['Website'] || '');
   const domainMatches = Boolean(companyDomain && (domain === companyDomain || domain.endsWith('.' + companyDomain)));
   const confidence = titleCaseSignal_(persona.emailIdentityConfidence) || (domainMatches ? 'High' : 'Medium');
+
+  // Skip paid verifier API calls if role-based or already suppressed in Lists & Settings
+  const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@', 'office@', 'jobs@', 'careers@'];
+  const isRoleEmail = rolePrefixes.some(function(pre) { return candidate.startsWith(pre); });
+  const rules = suppressionRules || { domains: [], emails: [] };
+  const isSuppressedEmail = Boolean(rules.emails && rules.emails.indexOf(candidate) >= 0);
+  const isSuppressedDomain = Boolean(rules.domains && rules.domains.indexOf(domain) >= 0);
+
+  if (isRoleEmail || isSuppressedEmail || isSuppressedDomain) {
+    return {
+      businessEmail: candidate,
+      emailDomain: domain,
+      emailSourceUrl: sourceUrl,
+      emailDiscoveryMethod: normalizedMethod,
+      emailVerificationStatus: 'unverified',
+      emailVerificationDate: new Date().toISOString().split('T')[0],
+      emailVerificationProvider: settings['Email Verification Provider'] || 'ZeroBounce',
+      emailIdentityConfidence: confidence,
+      emailVerificationNotes: isRoleEmail
+        ? 'Skipped verification: role-based email blocked by Suppression Guard.'
+        : 'Skipped verification: email/domain already blocked in Lists & Settings.',
+      queueStatus: 'Email Verification Failed',
+      country: persona.country || ''
+    };
+  }
 
   const verifier = callConfiguredEmailVerifier_(candidate, settings, spreadsheet);
   const rawStatus = verifier.configured ? verifier.status : 'unverified';
@@ -1979,21 +2262,57 @@ function upsertPreservingNonEmpty_(sheet, headers, keyType, record) {
   const lastRow = sheet.getLastRow();
   const rows = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, headers.length).getValues() : [];
 
-  function same(row, header, value) {
+  function cellVal(row, header) {
     const index = headers.indexOf(header);
-    if (index < 0) return false;
-    return String(row[index] || '').trim().toLowerCase() === String(value || '').trim().toLowerCase();
+    return index >= 0 ? row[index] : '';
+  }
+
+  function same(row, header, value) {
+    return String(cellVal(row, header) || '').trim().toLowerCase() === String(value || '').trim().toLowerCase();
+  }
+
+  function sameNormalizedCompany(row) {
+    const recCompId = String(record['Company ID'] || '').trim().toLowerCase();
+    const rowCompId = String(cellVal(row, 'Company ID') || '').trim().toLowerCase();
+    if (recCompId && rowCompId && recCompId === rowCompId) return true;
+
+    const recCompName = normalizePersonaCompanyName_(record['Company Name'] || '');
+    const rowCompName = normalizePersonaCompanyName_(cellVal(row, 'Company Name') || '');
+    return Boolean(recCompName && rowCompName && recCompName === rowCompName);
   }
 
   function matches(row) {
     if (!same(row, 'Campaign ID', record['Campaign ID'])) return false;
+
     if (keyType === 'company') {
-      return record['Company ID'] ? same(row, 'Company ID', record['Company ID']) : same(row, 'Company Name', record['Company Name']);
+      return sameNormalizedCompany(row);
     }
-    if (keyType === 'persona') {
-      return record['LinkedIn URL'] ? same(row, 'LinkedIn URL', record['LinkedIn URL']) : same(row, 'Name', record['Name']) && same(row, 'Company Name', record['Company Name']);
+
+    const recNormLi = normalizeLinkedInUrl_(record['LinkedIn URL'] || '');
+    const rowNormLi = normalizeLinkedInUrl_(cellVal(row, 'LinkedIn URL') || '');
+    if (recNormLi && rowNormLi && recNormLi === rowNormLi) return true;
+
+    const recEmail = String(record['Business Email'] || '').trim().toLowerCase();
+    const rowEmail = String(cellVal(row, 'Business Email') || '').trim().toLowerCase();
+    if (recEmail && rowEmail && recEmail === rowEmail) return true;
+
+    if (keyType === 'queue') {
+      const recPid = String(record['Persona ID'] || '').trim();
+      const rowPid = String(cellVal(row, 'Persona ID') || '').trim();
+      if (recPid && rowPid) {
+        const normRecPid = normalizeLinkedInUrl_(recPid) || recPid.toLowerCase();
+        const normRowPid = normalizeLinkedInUrl_(rowPid) || rowPid.toLowerCase();
+        if (normRecPid === normRowPid) return true;
+      }
     }
-    return record['Persona ID'] ? same(row, 'Persona ID', record['Persona ID']) : same(row, 'Name', record['Name']) && same(row, 'Company Name', record['Company Name']);
+
+    const recNormName = normalizePersonaName_(record['Name'] || '');
+    const rowNormName = normalizePersonaName_(cellVal(row, 'Name') || '');
+    if (recNormName && rowNormName && recNormName === rowNormName && sameNormalizedCompany(row)) {
+      return true;
+    }
+
+    return false;
   }
 
   let targetRow = 0;

@@ -4,18 +4,21 @@
  * AGENT 1: COMPANY DISCOVERY & RESEARCH AGENT (CLIENT-ISOLATED MULTI-AI ENGINE)
  * ============================================================================
  * File: CompanyDiscovery.gs / CompanyDiscovery.js
- * 
+ *
  * CAPABILITIES:
  * 1. Multi-AI Support: Dynamically routes to GEMINI (with Grounding + Free-Tier Fallback)
  *    or OPENAI (GPT-4o) using strict Client-Scoped API keys.
  * 2. Multi-Client Intelligence: Resolves Client / Owner, CUSTOM_BUSINESS_NEEDS,
  *    CAMPAIGN_FOCUS, SEARCH_KEYWORDS, and targeting parameters reliably.
- * 3. Dual-Tab Population: Writes master entries to "Company Database" (stamped with Col J Campaign ID)
+ * 3. Total Campaign Cap Enforcement: Checks existing companies in the active
+ *    Campaign ID and discovers only the remaining slots needed to reach Discovery Limit.
+ * 4. Dual-Tab Population: Writes master entries to "Company Database" (stamped with Col J Campaign ID)
  *    AND populates all 25 columns of "Company Intelligence".
- * 4. Scenario B Deduplication: Isolates deduplication by Campaign ID.
- * 5. Grounding Evidence Logging: Stores audit citation URLs in Tab 10 "Research Evidence" (9 canonical columns).
- * 6. API Usage Tracking: Passes campaign ID, client context, and operation to ApiTracker.
- * 7. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
+ * 5. Scenario B Deduplication (Enhanced): Isolates deduplication by Campaign ID while
+ *    normalizing parentheticals, legal/regional suffixes, slash aliases, and parent/subsidiary
+ *    brand+domain variants (e.g., "Enbridge Gas Inc." vs "Enbridge Gas Inc. (Affiliated...)").
+ * 6. Grounding Evidence Logging: Stores audit citation URLs in "Research Evidence" (9 canonical columns).
+ * 7. API Usage Tracking: Passes campaign ID, client context, and operation to ApiTracker.
  * ============================================================================
  */
 
@@ -39,13 +42,39 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
     }
 
     const companyLimit = Math.min(25, Math.max(1, Number(config.companyLimit || 5)));
-    const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
+    const existingCompanies = getExistingCampaignCompanies_(spreadsheet, config.id);
+    const existingCount = existingCompanies.length;
+    const remainingNeeded = Math.max(0, companyLimit - existingCount);
+
+    if (remainingNeeded === 0) {
+      return {
+        success: true,
+        count: 0,
+        alreadyAtLimit: true,
+        message: 'No new companies added: Campaign ' + config.id + ' already has ' + existingCount +
+          ' discovered company record(s), meeting your Discovery Limit of ' + companyLimit +
+          '. Increase Discovery Limit above ' + existingCount + ' in the Control Panel to discover more.'
+      };
+    }
+
+    // Request a small candidate buffer on incremental runs in case an AI result deduplicates out,
+    // while strictly capping saved rows at remainingNeeded.
+    const promptCandidateCount = existingCount > 0
+      ? Math.min(25, remainingNeeded + 2)
+      : remainingNeeded;
+
+    const prompt = buildCompanyDiscoveryPrompt_(config, promptCandidateCount, existingCompanies, remainingNeeded);
 
     const provider = String(config.aiProvider || 'GEMINI').toUpperCase();
     const model = resolveAiModel_(provider, config.aiModel);
     const providerLabel = provider === 'OPENAI' ? 'OpenAI (' + model + ')' : 'Google Gemini (' + model + ')';
 
-    Logger.log('Launching Agent 1 with ' + providerLabel + ' for campaign: ' + config.id + ' (Client: ' + config.department + ')');
+    Logger.log(
+      'Launching Agent 1 with ' + providerLabel +
+      ' for campaign: ' + config.id +
+      ' (Client: ' + config.department + ', Existing: ' + existingCount +
+      ', Cap: ' + companyLimit + ', Remaining Needed: ' + remainingNeeded + ')'
+    );
 
     const aiResponse = executeAiDiscoveryCall_({
       campaignId: config.id,
@@ -70,7 +99,15 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
       };
     }
 
-    const addedCount = saveDiscoveredCompanies_(spreadsheet, config.id, discoveredCompanies, config, providerLabel, aiResponse);
+    const addedCount = saveDiscoveredCompanies_(
+      spreadsheet,
+      config.id,
+      discoveredCompanies,
+      config,
+      providerLabel,
+      aiResponse,
+      remainingNeeded
+    );
     updateCampaignDiscoveryCounts_(spreadsheet, config.id);
 
     if (typeof updateDashboardForActiveCampaign === 'function' &&
@@ -79,10 +116,21 @@ function runCompanyDiscoveryFromSidebar(campaignId) {
       updateDashboardForActiveCampaign(config.id);
     }
 
+    if (addedCount === 0) {
+      return {
+        success: false,
+        count: 0,
+        message: providerLabel + ' returned only duplicate/already-discovered companies for ' + config.id +
+          '. Try running Discovery again or broadening your criteria.'
+      };
+    }
+
     return {
       success: true,
       count: addedCount,
-      message: 'Discovered ' + addedCount + ' company record(s) using ' + providerLabel + ' for ' + config.department + '! Populated in "Company Database", "Company Intelligence", and "Research Evidence".'
+      message: 'Discovered ' + addedCount + ' net-new company record(s) (Campaign total: ' +
+        (existingCount + addedCount) + ' / ' + companyLimit + ') using ' + providerLabel +
+        ' for ' + config.department + '! Populated in "Company Database", "Company Intelligence", and "Research Evidence".'
     };
   } catch (error) {
     Logger.log('Discovery Error: ' + error.stack);
@@ -121,6 +169,20 @@ function runCompanyDiscoveryForSelectedCampaign() {
     }
 
     const companyLimit = Math.min(25, Math.max(1, Number(config.companyLimit || 5)));
+    const existingCompanies = getExistingCampaignCompanies_(spreadsheet, config.id);
+    const existingCount = existingCompanies.length;
+    const remainingNeeded = Math.max(0, companyLimit - existingCount);
+
+    if (remainingNeeded === 0) {
+      const limitMsg = 'Campaign ' + config.id + ' already has ' + existingCount +
+        ' discovered company record(s), meeting your Discovery Limit of ' + companyLimit + '.\n\n' +
+        'To discover more companies, increase Discovery Limit above ' + existingCount +
+        ' in the Campaign Control Panel (or remove unwanted/duplicate rows first).';
+      if (ui) ui.alert('Discovery Limit Reached', limitMsg, ui.ButtonSet.OK);
+      else Logger.log(limitMsg);
+      return;
+    }
+
     const provider = String(config.aiProvider || 'GEMINI').toUpperCase();
     const model = resolveAiModel_(provider, config.aiModel);
     const providerLabel = provider === 'OPENAI' ? 'OpenAI (' + model + ')' : 'Google Gemini (' + model + ')';
@@ -128,7 +190,7 @@ function runCompanyDiscoveryForSelectedCampaign() {
     if (ui) {
       ui.alert(
         'Starting Company Discovery (Agent 1)',
-        'Searching for up to ' + companyLimit + ' companies using ' + providerLabel + ' (Campaign: ' + config.id + '):\n' +
+        'Searching for ' + remainingNeeded + ' net-new company(s) (Existing: ' + existingCount + ', Target Cap: ' + companyLimit + ') using ' + providerLabel + ' (Campaign: ' + config.id + '):\n' +
         '• Client / Owner: ' + config.department + '\n' +
         '• Industry: ' + (config.industry || 'Any') + '\n' +
         '• Geography: ' + (config.country || 'Any') + '\n' +
@@ -138,7 +200,11 @@ function runCompanyDiscoveryForSelectedCampaign() {
       );
     }
 
-    const prompt = buildCompanyDiscoveryPrompt_(config, companyLimit);
+    const promptCandidateCount = existingCount > 0
+      ? Math.min(25, remainingNeeded + 2)
+      : remainingNeeded;
+
+    const prompt = buildCompanyDiscoveryPrompt_(config, promptCandidateCount, existingCompanies, remainingNeeded);
     const aiResponse = executeAiDiscoveryCall_({
       campaignId: config.id,
       clientName: config.department,
@@ -160,7 +226,15 @@ function runCompanyDiscoveryForSelectedCampaign() {
       return;
     }
 
-    const addedCount = saveDiscoveredCompanies_(spreadsheet, config.id, discoveredCompanies, config, providerLabel, aiResponse);
+    const addedCount = saveDiscoveredCompanies_(
+      spreadsheet,
+      config.id,
+      discoveredCompanies,
+      config,
+      providerLabel,
+      aiResponse,
+      remainingNeeded
+    );
     updateCampaignDiscoveryCounts_(spreadsheet, config.id);
 
     if (typeof updateDashboardForActiveCampaign === 'function' &&
@@ -170,12 +244,22 @@ function runCompanyDiscoveryForSelectedCampaign() {
     }
 
     if (ui) {
-      ui.alert(
-        'Company Discovery Complete',
-        'Discovered and added ' + addedCount + ' company record(s) to "Company Database", "Company Intelligence", and "Research Evidence" using ' + providerLabel + ' for ' + config.department + '.\n\n' +
-        'Next Step: Run "Agent 2: Persona Mapping" from the sidebar to find decision-makers and draft outreach.',
-        ui.ButtonSet.OK
-      );
+      if (addedCount === 0) {
+        ui.alert(
+          'No Net-New Companies Added',
+          providerLabel + ' returned only duplicate/already-discovered companies for ' + config.id + '.\nTry running Discovery again or broadening your criteria.',
+          ui.ButtonSet.OK
+        );
+      } else {
+        ui.alert(
+          'Company Discovery Complete',
+          'Discovered and added ' + addedCount + ' net-new company record(s) (Campaign total: ' +
+          (existingCount + addedCount) + ' / ' + companyLimit + ') to "Company Database", "Company Intelligence", and "Research Evidence" using ' +
+          providerLabel + ' for ' + config.department + '.\n\n' +
+          'Next Step: Run "Agent 2: Persona Mapping" from the sidebar to find decision-makers and draft outreach.',
+          ui.ButtonSet.OK
+        );
+      }
     } else {
       Logger.log('Company Discovery Complete: Added ' + addedCount + ' companies.');
     }
@@ -211,10 +295,13 @@ function extractDiscoveredCompaniesList_(aiResponse) {
 }
 
 /**
- * Builds the Structured Search Prompt for Gemini or OpenAI
+ * Builds the Structured Search Prompt for Gemini or OpenAI (with Campaign Exclusion List)
  */
-function buildCompanyDiscoveryPrompt_(config, limit) {
-  return [
+function buildCompanyDiscoveryPrompt_(config, limit, existingCompanies, remainingNeeded) {
+  const existingList = Array.isArray(existingCompanies) ? existingCompanies : [];
+  const targetNetNew = Number(remainingNeeded || limit || 1);
+
+  const lines = [
     'Act as the Senior B2B Account Research & Market Intelligence Agent.',
     'Your goal is to identify REAL, active, operating enterprise or mid-market companies matching the campaign profile below.',
     '',
@@ -230,36 +317,52 @@ function buildCompanyDiscoveryPrompt_(config, limit) {
     '• Target Minimum Fit Score: ' + (config.minCompanyScore || 80) + ' out of 100',
     '• Specific Business Needs / Buying Signals to Match: ',
     config.customBusinessNeeds || 'Scope 3 vendor emissions transparency, supply chain audits, vendor questionnaires',
-    '',
-    'DISCOVERY & QUALIFICATION RULES:',
-    '1. Identify REAL, established operating companies matching the target geography, industry, and size. If live web search is available, verify details with search; otherwise rely on verified knowledge of real companies and their official domains. Never invent fictional company names.',
-    '2. Return official root website URLs (e.g. "https://companyname.com").',
-    '3. Provide ' + limit + ' distinct real companies that best match the criteria (do not return an empty list unless criteria are impossible).',
-    '4. Score each company from 0 to 100 on how closely they exhibit the specified business needs, pain points, or buying signals.',
-    '5. Prioritize companies scoring ' + (config.minCompanyScore || 80) + ' or higher.',
-    '6. Include the official company URL or relevant public evidence URL in "sourceUrl".',
-    '',
-    'Return ONLY a valid, parsable JSON object with NO markdown formatting, matching this exact schema:',
-    '{',
-    '  "companies": [',
-    '    {',
-    '      "companyName": "Exact Operating Name",',
-    '      "website": "https://companydomain.com",',
-    '      "headquarters": "City, Country",',
-    '      "industry": "Specific Industry Sector",',
-    '      "companySize": "Estimated employee count (e.g. 150 employees)",',
-    '      "businessSummary": "1-2 sentence description of primary business activities",',
-    '      "businessTriggers": "Specific pain points or buying triggers detected matching the campaign needs",',
-    '      "solutionFit": "High, Medium, or Low",',
-    '      "companyOpportunityScore": 90,',
-    '      "companyOpportunity": "Core commercial opportunity or bottleneck to address",',
-    '      "digitalSignals": "Cloud systems, ERP/TMS, tooling, or modernization signals detected",',
-    '      "scoreRationale": "Clear explanation of why this company matches qualification criteria",',
-    '      "sourceUrl": "Direct URL where company profile or trigger was verified"',
-    '    }',
-    '  ]',
-    '}'
-  ].join('\n');
+    ''
+  ];
+
+  if (existingList.length > 0) {
+    lines.push('ALREADY DISCOVERED IN THIS CAMPAIGN — STRICT EXCLUSION LIST:');
+    existingList.forEach(function(item) {
+      lines.push('• ' + item.companyName + (item.domain ? ' (' + item.domain + ')' : ''));
+    });
+    lines.push('CRITICAL EXCLUSION RULE: Do NOT return any company listed above, nor any division, subsidiary, business unit, affiliate, parent company, or alternate domain belonging to those same organizations.');
+    lines.push('');
+  }
+
+  lines.push('DISCOVERY & QUALIFICATION RULES:');
+  lines.push('1. Identify REAL, established operating companies matching the target geography, industry, and size. If live web search is available, verify details with search; otherwise rely on verified knowledge of real companies and their official domains. Never invent fictional company names.');
+  lines.push('2. Return official root website URLs (e.g. "https://companyname.com").');
+  if (existingList.length > 0 && limit > targetNetNew) {
+    lines.push('3. Provide ' + limit + ' distinct net-new real companies ranked highest fit first (so at least ' + targetNetNew + ' unique company qualifies without overlapping the exclusion list).');
+  } else {
+    lines.push('3. Provide ' + limit + ' distinct real companies that best match the criteria (do not return an empty list unless criteria are impossible).');
+  }
+  lines.push('4. Score each company from 0 to 100 on how closely they exhibit the specified business needs, pain points, or buying signals.');
+  lines.push('5. Prioritize companies scoring ' + (config.minCompanyScore || 80) + ' or higher.');
+  lines.push('6. Include the official company URL or relevant public evidence URL in "sourceUrl".');
+  lines.push('');
+  lines.push('Return ONLY a valid, parsable JSON object with NO markdown formatting, matching this exact schema:');
+  lines.push('{');
+  lines.push('  "companies": [');
+  lines.push('    {');
+  lines.push('      "companyName": "Exact Operating Name",');
+  lines.push('      "website": "https://companydomain.com",');
+  lines.push('      "headquarters": "City, Country",');
+  lines.push('      "industry": "Specific Industry Sector",');
+  lines.push('      "companySize": "Estimated employee count (e.g. 150 employees)",');
+  lines.push('      "businessSummary": "1-2 sentence description of primary business activities",');
+  lines.push('      "businessTriggers": "Specific pain points or buying triggers detected matching the campaign needs",');
+  lines.push('      "solutionFit": "High, Medium, or Low",');
+  lines.push('      "companyOpportunityScore": 90,');
+  lines.push('      "companyOpportunity": "Core commercial opportunity or bottleneck to address",');
+  lines.push('      "digitalSignals": "Cloud systems, ERP/TMS, tooling, or modernization signals detected",');
+  lines.push('      "scoreRationale": "Clear explanation of why this company matches qualification criteria",');
+  lines.push('      "sourceUrl": "Direct URL where company profile or trigger was verified"');
+  lines.push('    }');
+  lines.push('  ]');
+  lines.push('}');
+
+  return lines.join('\n');
 }
 
 /**
@@ -292,9 +395,9 @@ function executeAiDiscoveryCall_(options) {
 
 /**
  * Saves discovered companies into "Company Database", "Company Intelligence", and "Research Evidence".
- * Guarantees Column J is "Campaign ID" and enforces Scenario B deduplication.
+ * Guarantees Column J is "Campaign ID", enforces Scenario B + variant deduplication, and honors maxToAdd cap.
  */
-function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config, providerLabel, aiResponse) {
+function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, config, providerLabel, aiResponse, maxToAdd) {
   let dbSheet = spreadsheet.getSheetByName('Company Database');
   let intelSheet = spreadsheet.getSheetByName('Company Intelligence');
   const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
@@ -352,6 +455,7 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   });
 
   const existingDbRecords = getDiscoverySheetRecords_(dbSheet);
+  const existingIntelRecords = getDiscoverySheetRecords_(intelSheet);
   const intelHeaders = intelSheet.getRange(1, 1, 1, intelSheet.getLastColumn()).getValues()[0];
   const dbHeaders = dbSheet.getRange(1, 1, 1, dbSheet.getLastColumn()).getValues()[0];
 
@@ -363,6 +467,10 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   const defaultSearchQuery = searchQueries.length > 0
     ? searchQueries.join('; ')
     : (config.department + ' Target Discovery: ' + (config.industry || '') + ' ' + (config.country || ''));
+
+  const addCap = (maxToAdd !== undefined && maxToAdd !== null && Number(maxToAdd) > 0)
+    ? Number(maxToAdd)
+    : 0;
 
   let addedCount = 0;
   const now = new Date();
@@ -378,27 +486,22 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   const isEsg = /\b(esg|scope\s*3|csrd|sustainability|emissions|ghg|clean\s*energy|cleantech|gri)\b/.test(esgSignalText);
 
   discoveredCompanies.forEach(function(item) {
+    if (addCap > 0 && addedCount >= addCap) return;
     if (!item || typeof item !== 'object') return;
 
     const companyName = String(item.companyName || item.name || item.company_name || item.organization || '').trim();
+    if (!companyName) return;
+
     const website = String(item.website || item.url || item.domain || item.websiteUrl || '').trim();
     const domain = extractDiscoveryDomainFromUrl_(website);
 
-    const isDuplicate = existingDbRecords.some(function(row) {
-      const rowCampaign = String(row['Campaign ID'] || '').trim();
-      const rowDomain = extractDiscoveryDomainFromUrl_(row['Domain'] || row['Website'] || '');
-      const rowName = String(row['Company Name'] || row['Company name'] || '').trim().toLowerCase();
-
-      return (rowCampaign === campaignId) && (
-        (domain && rowDomain && domain === rowDomain) ||
-        (rowName && rowName === companyName.toLowerCase())
-      );
-    });
-
-    if (isDuplicate || !companyName) return;
+    if (isDuplicateCompanyInCampaign_(companyName, domain, existingDbRecords, campaignId)) {
+      Logger.log('Skipped duplicate/variant company in ' + campaignId + ': ' + companyName + ' (' + domain + ')');
+      return;
+    }
 
     const companyId = 'CMP-' + Utilities.getUuid().slice(0, 6).toUpperCase();
-    const score = Number(item.companyOpportunityScore || item.fitScore || item.score || item.initialScore || 85);
+    const score = Math.round(Number(item.companyOpportunityScore || item.fitScore || item.score || item.initialScore || 85));
     const status = score >= (config.minCompanyScore || 80) ? 'Qualified' : 'Disqualified';
 
     const hq = String(item.headquarters || item.country || item.location || config.country || '').trim();
@@ -420,38 +523,55 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
     };
     dbSheet.appendRow(buildDiscoveryRowFromHeaders_(dbHeaders, dbRecord));
 
+    // Track immediately inside existingDbRecords so within-batch duplicates are also blocked.
+    existingDbRecords.push({
+      'Campaign ID': campaignId,
+      'Company ID': companyId,
+      'Company Name': companyName,
+      'Domain': domain || website
+    });
+
     const fitLabel = status === 'Disqualified'
       ? 'Low'
       : (score >= 85 ? 'High' : (score >= 70 ? 'Medium' : 'Low'));
 
-    const intelRecord = {
-      'Campaign ID': campaignId,
-      'Campaign Name': config.name || config.id,
-      'Company ID': companyId,
-      'Company Name': companyName,
-      'Country': hq,
-      'Industry': ind,
-      'Company Size': empSize,
-      'ESG Frameworks': isEsg ? 'CSRD, CDP, GHG Protocol' : 'N/A (Enterprise Stack)',
-      'Reporting Obligations': isEsg ? 'Mandatory Tier 1 Scope 3 Reporting' : 'Standard Regulatory Compliance',
-      'ESG Reporting Maturity': isEsg ? 'Developing / Spreadsheet-reliant' : 'N/A',
-      'Supply Chain Profile': 'Multi-tier supplier & infrastructure network',
-      'Scope 3 Exposure': isEsg ? 'High (Supply Chain Emissions)' : 'N/A',
-      'Sustainability Data Needs': isEsg ? 'Automated vendor ESG data ingestion' : 'System observability & audit automation',
-      'Digital Transformation Signals': item.digitalSignals || item.digitalTransformationSignals || item.businessSummary || 'Cloud infrastructure detected',
-      'ESG Governance': isEsg ? 'Director of Sustainability' : 'VP of Engineering / Operations',
-      'Business Triggers': item.businessTriggers || item.triggers || item.businessSummary || String(config.customBusinessNeeds || '').slice(0, 150),
-      'eValuater Solution Fit': fitLabel,
-      'Company Opportunity Score': score,
-      'Company Opportunity': item.companyOpportunity || item.businessSummary || 'Operational improvement opportunity',
-      'Evidence URLs': sourceUrl,
-      'Evidence Checked Date': dateStr,
-      'Verification Status': 'Verified',
-      'Human Review Status': 'Accepted',
-      'Last Enriched At': now.toLocaleString(),
-      'Company Score Rationale': item.scoreRationale || ('Qualified based on ' + config.department + ' criteria via ' + providerLabel + '.')
-    };
-    intelSheet.appendRow(buildDiscoveryRowFromHeaders_(intelHeaders, intelRecord));
+    if (!isDuplicateCompanyInCampaign_(companyName, domain, existingIntelRecords, campaignId)) {
+      const intelRecord = {
+        'Campaign ID': campaignId,
+        'Campaign Name': config.name || config.id,
+        'Company ID': companyId,
+        'Company Name': companyName,
+        'Country': hq,
+        'Industry': ind,
+        'Company Size': empSize,
+        'ESG Frameworks': isEsg ? 'CSRD, CDP, GHG Protocol' : 'N/A (Enterprise Stack)',
+        'Reporting Obligations': isEsg ? 'Mandatory Tier 1 Scope 3 Reporting' : 'Standard Regulatory Compliance',
+        'ESG Reporting Maturity': isEsg ? 'Developing / Spreadsheet-reliant' : 'N/A',
+        'Supply Chain Profile': 'Multi-tier supplier & infrastructure network',
+        'Scope 3 Exposure': isEsg ? 'High (Supply Chain Emissions)' : 'N/A',
+        'Sustainability Data Needs': isEsg ? 'Automated vendor ESG data ingestion' : 'System observability & audit automation',
+        'Digital Transformation Signals': item.digitalSignals || item.digitalTransformationSignals || item.businessSummary || 'Cloud infrastructure detected',
+        'ESG Governance': isEsg ? 'Director of Sustainability' : 'VP of Engineering / Operations',
+        'Business Triggers': item.businessTriggers || item.triggers || item.businessSummary || String(config.customBusinessNeeds || '').slice(0, 150),
+        'eValuater Solution Fit': fitLabel,
+        'Company Opportunity Score': score,
+        'Company Opportunity': item.companyOpportunity || item.businessSummary || 'Operational improvement opportunity',
+        'Evidence URLs': sourceUrl,
+        'Evidence Checked Date': dateStr,
+        'Verification Status': 'Verified',
+        'Human Review Status': 'Accepted',
+        'Last Enriched At': now.toLocaleString(),
+        'Company Score Rationale': item.scoreRationale || ('Qualified based on ' + config.department + ' criteria via ' + providerLabel + '.')
+      };
+      intelSheet.appendRow(buildDiscoveryRowFromHeaders_(intelHeaders, intelRecord));
+
+      existingIntelRecords.push({
+        'Campaign ID': campaignId,
+        'Company ID': companyId,
+        'Company Name': companyName,
+        'Domain': domain || website
+      });
+    }
 
     if (evidenceSheet && sourceUrl) {
       const normUrl = typeof normalizeSourceUrl_ === 'function' ? normalizeSourceUrl_(sourceUrl) : sourceUrl.replace(/\/+$/, '');
@@ -476,6 +596,171 @@ function saveDiscoveredCompanies_(spreadsheet, campaignId, discoveredCompanies, 
   });
 
   return addedCount;
+}
+
+/**
+ * Reads existing companies already discovered for a specific Campaign ID from "Company Database".
+ */
+function getExistingCampaignCompanies_(spreadsheet, campaignId) {
+  const dbSheet = spreadsheet.getSheetByName('Company Database');
+  if (!dbSheet || dbSheet.getLastRow() <= 1) return [];
+
+  const targetCamp = String(campaignId || '').trim();
+  const records = getDiscoverySheetRecords_(dbSheet);
+  const seenKeys = {};
+  const list = [];
+
+  records.forEach(function(row) {
+    const rowCampaign = String(row['Campaign ID'] || '').trim();
+    if (!targetCamp || rowCampaign !== targetCamp) return;
+
+    const companyName = String(row['Company Name'] || row['Company name'] || '').trim();
+    const domain = extractDiscoveryDomainFromUrl_(row['Domain'] || row['Website'] || '');
+    if (!companyName && !domain) return;
+
+    const dedupKey = normalizeCompanyNameForDedup_(companyName) + '|' + domain;
+    if (seenKeys[dedupKey]) return;
+    seenKeys[dedupKey] = true;
+
+    list.push({
+      companyId: String(row['Company ID'] || '').trim(),
+      companyName: companyName,
+      domain: domain
+    });
+  });
+
+  return list;
+}
+
+/**
+ * Checks whether a candidate company is a duplicate or division/brand variant of an existing
+ * company in the SAME Campaign ID (Scenario B keeps separate campaigns cleanly isolated).
+ */
+function isDuplicateCompanyInCampaign_(companyName, domain, existingRecords, campaignId) {
+  const targetCamp = String(campaignId || '').trim();
+  const candDomain = extractDiscoveryDomainFromUrl_(domain || '');
+  const candStem = extractDomainBrandStem_(candDomain);
+  const candVariants = getCompanyNameVariantsForDedup_(companyName);
+  const candPrimaryNorm = candVariants.length ? candVariants[0] : '';
+  const candFirstWord = candPrimaryNorm ? candPrimaryNorm.split(' ')[0] : '';
+
+  return (existingRecords || []).some(function(row) {
+    const rowCampaign = String(row['Campaign ID'] || '').trim();
+    if (rowCampaign !== targetCamp) return false;
+
+    const rowDomain = extractDiscoveryDomainFromUrl_(row['Domain'] || row['Website'] || '');
+    if (candDomain && rowDomain && candDomain === rowDomain) {
+      return true;
+    }
+
+    const rowName = String(row['Company Name'] || row['Company name'] || '').trim();
+    const rowVariants = getCompanyNameVariantsForDedup_(rowName);
+
+    for (let i = 0; i < candVariants.length; i++) {
+      if (rowVariants.indexOf(candVariants[i]) >= 0) {
+        return true;
+      }
+    }
+
+    const rowPrimaryNorm = rowVariants.length ? rowVariants[0] : '';
+    const rowStem = extractDomainBrandStem_(rowDomain);
+
+    // Same root domain stem across different TLDs (e.g. .com vs .ca) when primary brand word aligns
+    if (candStem && rowStem && candStem === rowStem && candStem.length >= 6) {
+      const rowFirstWord = rowPrimaryNorm ? rowPrimaryNorm.split(' ')[0] : '';
+      if (candFirstWord && rowFirstWord && candFirstWord.length >= 4 && candFirstWord === rowFirstWord) {
+        return true;
+      }
+    }
+
+    // Parent/subsidiary brand prefix match (e.g. "Enbridge Inc." + enbridge.com vs "Enbridge Gas Inc." + enbridgegas.com)
+    if (candPrimaryNorm && rowPrimaryNorm && candStem && rowStem) {
+      const shorterName = candPrimaryNorm.length <= rowPrimaryNorm.length ? candPrimaryNorm : rowPrimaryNorm;
+      const longerName = candPrimaryNorm.length > rowPrimaryNorm.length ? candPrimaryNorm : rowPrimaryNorm;
+      const shorterStem = candStem.length <= rowStem.length ? candStem : rowStem;
+      const longerStem = candStem.length > rowStem.length ? candStem : rowStem;
+
+      if (shorterName.length >= 5 &&
+          !isGenericCompanyPrefixWord_(shorterName) &&
+          (longerName === shorterName || longerName.indexOf(shorterName + ' ') === 0) &&
+          shorterStem.length >= 5 &&
+          longerStem.indexOf(shorterStem) === 0) {
+        return true;
+      }
+    }
+
+    return false;
+  });
+}
+
+function getCompanyNameVariantsForDedup_(name) {
+  const raw = String(name || '').trim();
+  if (!raw) return [];
+
+  const variants = [];
+  const fullNorm = normalizeCompanyNameForDedup_(raw);
+  if (fullNorm) variants.push(fullNorm);
+
+  if (raw.indexOf('/') >= 0) {
+    raw.split('/').forEach(function(part) {
+      const normPart = normalizeCompanyNameForDedup_(part);
+      if (normPart && normPart.length >= 4 && variants.indexOf(normPart) < 0) {
+        variants.push(normPart);
+      }
+    });
+  }
+
+  return variants;
+}
+
+function normalizeCompanyNameForDedup_(name) {
+  let clean = String(name || '').trim().toLowerCase();
+  if (!clean) return '';
+
+  // Remove parenthetical qualifiers such as "(Affiliated Clean Infrastructure Division)"
+  clean = clean.replace(/\([^)]*\)/g, ' ');
+  clean = clean.replace(/[.,'"&]+/g, ' ').replace(/[-_/]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const stopSuffixes = {
+    'inc': true, 'incorporated': true, 'corp': true, 'corporation': true,
+    'ltd': true, 'limited': true, 'llc': true, 'llp': true, 'lp': true,
+    'plc': true, 'gmbh': true, 'sa': true, 'ag': true, 'co': true,
+    'company': true, 'companies': true, 'of': true, 'group': true,
+    'holdings': true, 'canada': true, 'usa': true, 'us': true,
+    'division': true, 'subsidiary': true, 'branch': true
+  };
+
+  const words = clean.split(' ').filter(Boolean);
+  while (words.length > 1 && stopSuffixes[words[words.length - 1]]) {
+    words.pop();
+  }
+
+  return words.join(' ').trim();
+}
+
+function extractDomainBrandStem_(domain) {
+  const clean = extractDiscoveryDomainFromUrl_(domain);
+  if (!clean) return '';
+  const parts = clean.split('.').filter(Boolean);
+  if (parts.length === 1) return parts[0];
+
+  const secondLevelPrefixes = { 'co': true, 'com': true, 'org': true, 'net': true, 'gov': true, 'edu': true };
+  if (parts.length >= 3 &&
+      secondLevelPrefixes[parts[parts.length - 2]] &&
+      parts[parts.length - 1].length === 2) {
+    return parts[parts.length - 3];
+  }
+  return parts[parts.length - 2];
+}
+
+function isGenericCompanyPrefixWord_(word) {
+  const generic = {
+    'american': true, 'canadian': true, 'north': true, 'south': true, 'east': true, 'west': true,
+    'global': true, 'national': true, 'united': true, 'clean': true, 'green': true, 'energy': true,
+    'power': true, 'solar': true, 'carbon': true, 'pacific': true, 'atlantic': true, 'western': true,
+    'eastern': true, 'northern': true, 'southern': true, 'first': true, 'premier': true
+  };
+  return Boolean(generic[String(word || '').trim().toLowerCase()]);
 }
 
 function resolveAiModel_(provider, configuredModel) {
