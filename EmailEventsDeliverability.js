@@ -15,9 +15,12 @@
  *    and Microsoft 365 / Exchange Online (Graph API v1.0) using strict
  *    CLIENT_{NAME}_* isolation with zero fallback and optional Client/Campaign
  *    scoping for Control Panel syncs.
- * 4. Exposes queryEmailDeliverabilityMetrics(clientFilter, campaignFilter)
- *    and syncEmailDeliverabilityFromSidebar(clientFilter, campaignFilter) so
- *    ControlPanel.html queries and syncs cleanly without blocking modal alerts.
+ * 4. Automatically promotes sent Gmail/M365 drafts to "Sent" safely, filters
+ *    DSN bounce messages strictly by sender/subject, auto-suppresses Hard
+ *    bounces into "Lists & Settings", and updates "Prospect Review Queue" &
+ *    "Dashboard" suppression indicators cleanly.
+ * 5. Exposes queryEmailDeliverabilityMetrics(clientFilter, campaignFilter)
+ *    and syncEmailDeliverabilityFromSidebar(clientFilter, campaignFilter).
  * ============================================================================
  */
 
@@ -141,17 +144,14 @@ function setupEmailDeliverabilityDashboardTab_(ss) {
     sheet = spreadsheet.insertSheet(DELIVERABILITY_DASHBOARD_SHEET_NAME);
   }
 
-  // Preserve user's active filter selections if already set
   const prevClient = String(sheet.getRange('B3').getValue() || '').trim();
   const prevCampaign = String(sheet.getRange('D3').getValue() || '').trim();
 
-  // Remove old charts before rebuilding cleanly
   const existingCharts = sheet.getCharts();
   for (let i = 0; i < existingCharts.length; i++) {
     sheet.removeChart(existingCharts[i]);
   }
 
-  // Break any old merges in rows 1-85 before re-laying out
   sheet.getRange('A1:J85').breakApart();
   sheet.getRange('A1:J85').clearContent().clearFormat();
 
@@ -403,7 +403,6 @@ function setupEmailDeliverabilityDashboardTab_(ss) {
   sheet.getRange('B51:E80').setNumberFormat('0');
   sheet.getRange('A51:E80').setBorder(true, true, true, true, true, true, '#dadce0', SpreadsheetApp.BorderStyle.SOLID);
 
-  // Column widths
   sheet.setColumnWidth(1, 150);
   sheet.setColumnWidth(2, 145);
   sheet.setColumnWidth(3, 130);
@@ -417,10 +416,8 @@ function setupEmailDeliverabilityDashboardTab_(ss) {
   sheet.setColumnWidth(11, 24);
   sheet.setFrozenRows(3);
 
-  // Refresh dynamic dropdowns on B3 & D3
   refreshDeliverabilityFilterDropdowns_(spreadsheet);
 
-  // 8. Build Embedded Charts in Column L (Cols 12+)
   const campChart = sheet.newChart()
     .asColumnChart()
     .addRange(sheet.getRange('A14:F29'))
@@ -564,7 +561,6 @@ function syncDeliverabilityTabFilters_(ss, clientFilter, campaignFilter) {
 /**
  * Server-side query API used by ControlPanel.html (and internal callers) to query
  * EmailEvents directly using the existing Client / Owner and Campaign filters.
- * Never mutates client configuration or leaks secrets.
  */
 function queryEmailDeliverabilityMetrics(clientFilter, campaignFilter) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -711,8 +707,171 @@ function normalizeDeliverabilityEventType_(rawType) {
 }
 
 /**
+ * Identifies Pilot sandbox event rows so sandbox simulations never pollute live suppression lists.
+ */
+function isPilotDeliverabilityEvent_(eventId, clientId, campaignId) {
+  const eIdUp = String(eventId || '').trim().toUpperCase();
+  const campUp = String(campaignId || '').trim().toUpperCase();
+  const clientLow = String(clientId || '').trim().toLowerCase();
+  return (
+    eIdUp.indexOf('PILOT-') === 0 ||
+    campUp.indexOf('PILOT-') === 0 ||
+    clientLow === 'pilot acme'
+  );
+}
+
+/**
+ * Automatically adds Hard-bounced email addresses to "Lists & Settings"
+ * under List name = "Suppression - Email", Active status = "Active".
+ */
+function autoSuppressHardBounces_(ss, hardBounceRecipients) {
+  if (!ss || !Array.isArray(hardBounceRecipients) || hardBounceRecipients.length === 0) {
+    return 0;
+  }
+
+  let listsSheet = ss.getSheetByName('Lists & Settings');
+  if (!listsSheet) {
+    listsSheet = ss.insertSheet('Lists & Settings');
+    listsSheet.appendRow(['List name', 'Value', 'Active status']);
+  } else if (listsSheet.getLastRow() === 0) {
+    listsSheet.appendRow(['List name', 'Value', 'Active status']);
+  }
+
+  const existingEmails = {};
+  if (listsSheet.getLastRow() > 1) {
+    const data = listsSheet.getRange(2, 1, listsSheet.getLastRow() - 1, 3).getValues();
+    for (let i = 0; i < data.length; i++) {
+      const listName = String(data[i][0] || '').trim().toLowerCase();
+      const val = String(data[i][1] || '').trim().toLowerCase();
+      if (!val || val.indexOf('@') < 0) continue;
+      if (listName.indexOf('suppression') >= 0 ||
+          listName.indexOf('blacklist') >= 0 ||
+          listName.indexOf('opt-out') >= 0 ||
+          listName.indexOf('competitor') >= 0) {
+        existingEmails[val] = true;
+      }
+    }
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const rowsToAdd = [];
+
+  for (let i = 0; i < hardBounceRecipients.length; i++) {
+    const email = String(hardBounceRecipients[i] || '').trim().toLowerCase();
+    if (!email || !emailRegex.test(email)) continue;
+    if (email.indexOf('mailer-daemon') >= 0 || email.indexOf('postmaster') >= 0) continue;
+    if (existingEmails[email]) continue;
+
+    existingEmails[email] = true;
+    rowsToAdd.push(['Suppression - Email', email, 'Active']);
+  }
+
+  if (rowsToAdd.length === 0) return 0;
+
+  const insertAt = listsSheet.getLastRow() + 1;
+  listsSheet.getRange(insertAt, 1, rowsToAdd.length, 3).setValues(rowsToAdd);
+
+  if (typeof sortListsAndSettingsTab_ === 'function') {
+    try {
+      sortListsAndSettingsTab_(ss);
+    } catch (e) {
+      Logger.log('sortListsAndSettingsTab_ notice during hard-bounce suppression: ' + e.message);
+    }
+  }
+
+  Logger.log('Auto-suppressed ' + rowsToAdd.length + ' hard-bounced email(s) into Lists & Settings.');
+  return rowsToAdd.length;
+}
+
+/**
+ * Updates "Prospect Review Queue" for Hard-bounced emails so Compliance Status
+ * ("Failed - Suppressed") and Suppression Check ("Blocked: Email in Lists & Settings")
+ * stay accurate and Dashboard "Suppressed / Blocked Records" updates immediately.
+ * Preserves "Sent" on rows already sent while suppressing any unsent duplicates.
+ */
+function syncQueueWithHardBounceSuppressions_(ss, hardBounceMap) {
+  if (!ss || !hardBounceMap) return 0;
+  const emails = Object.keys(hardBounceMap);
+  if (emails.length === 0) return 0;
+
+  const qSheet = ss.getSheetByName('Prospect Review Queue');
+  if (!qSheet || qSheet.getLastRow() < 2) return 0;
+
+  const lastCol = qSheet.getLastColumn();
+  const headers = qSheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
+
+  function colNum(names) {
+    for (let i = 0; i < names.length; i++) {
+      const idx = headers.indexOf(names[i]);
+      if (idx >= 0) return idx + 1;
+    }
+    return 0;
+  }
+
+  const campCol = colNum(['Campaign ID']);
+  const emailCol = colNum(['Business Email']);
+  const reviewCol = colNum(['Review Status']);
+  const approvalCol = colNum(['Human Approval Status']);
+  const sendStatusCol = colNum(['Send Status']);
+  const sendErrorCol = colNum(['Send Error', 'Last Error']);
+  const complianceCol = colNum(['Compliance Status']);
+  const suppressionCol = colNum(['Suppression Check']);
+
+  if (!emailCol) return 0;
+
+  const data = qSheet.getRange(2, 1, qSheet.getLastRow() - 1, lastCol).getValues();
+  let updatedCount = 0;
+
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const rowNum = i + 2;
+    const cid = campCol ? String(row[campCol - 1] || '').trim() : '';
+    if (cid && cid.toUpperCase().indexOf('PILOT-') === 0) continue;
+
+    const email = String(row[emailCol - 1] || '').trim().toLowerCase();
+    if (!email || !hardBounceMap[email]) continue;
+
+    const bounceInfo = hardBounceMap[email];
+    const currComp = complianceCol ? String(row[complianceCol - 1] || '').trim() : '';
+    const currSupp = suppressionCol ? String(row[suppressionCol - 1] || '').trim() : '';
+    const currSendStatus = sendStatusCol ? String(row[sendStatusCol - 1] || '').trim().toLowerCase() : '';
+    const currSendErr = sendErrorCol ? String(row[sendErrorCol - 1] || '').trim() : '';
+
+    let rowChanged = false;
+
+    if (complianceCol && currComp !== 'Failed - Suppressed') {
+      qSheet.getRange(rowNum, complianceCol).setValue('Failed - Suppressed');
+      rowChanged = true;
+    }
+    if (suppressionCol && currSupp !== 'Blocked: Email in Lists & Settings') {
+      qSheet.getRange(rowNum, suppressionCol).setValue('Blocked: Email in Lists & Settings');
+      rowChanged = true;
+    }
+
+    const noteText = 'Hard Bounced (' + (bounceInfo.smtpCode || '550') + ') — Auto-Suppressed in Lists & Settings';
+    if (sendErrorCol && currSendErr.indexOf('Hard Bounced') < 0) {
+      qSheet.getRange(rowNum, sendErrorCol).setValue(noteText);
+      rowChanged = true;
+    }
+
+    // Only reject/suppress Send Status if this row has NOT already been Sent / Pushed
+    if (currSendStatus !== 'sent' && currSendStatus !== 'pushed to sequencer' && currSendStatus !== 'suppressed - not sent') {
+      if (reviewCol) qSheet.getRange(rowNum, reviewCol).setValue('Rejected');
+      if (approvalCol) qSheet.getRange(rowNum, approvalCol).setValue('Rejected (Suppression Guard)');
+      if (sendStatusCol) qSheet.getRange(rowNum, sendStatusCol).setValue('Suppressed - Not Sent');
+      rowChanged = true;
+    }
+
+    if (rowChanged) updatedCount++;
+  }
+
+  return updatedCount;
+}
+
+/**
  * Writes a single EmailEvent atomically (used inline by EmailSender.js on Sent).
- * Idempotent: skips if event_id already exists in EmailEvents.
  */
 function recordEmailEvent_(eventObj, spreadsheet) {
   if (!eventObj) return false;
@@ -824,8 +983,6 @@ function syncEmailDeliverabilityEvents() {
 
 /**
  * Silent Sidebar Entry Point (never blocks ControlPanel.html with a modal ui.alert).
- * Respects the Client / Campaign scope selected in ControlPanel.html (or defaults to the
- * currently active campaign & client if called with no arguments).
  */
 function syncEmailDeliverabilityFromSidebar(clientFilter, campaignFilter) {
   let resolvedClient = (clientFilter !== undefined && clientFilter !== null) ? String(clientFilter).trim() : '';
@@ -847,12 +1004,6 @@ function syncEmailDeliverabilityFromSidebar(clientFilter, campaignFilter) {
 
 /**
  * MASTER INGESTION RUNNER
- * 1. Promotes manually sent drafts from Gmail & Microsoft 365 into Sent events.
- * 2. Polls Gmail (local & ClientGmailRelay.gs) and Microsoft 365 (Graph API) per client
- *    with strict zero-fallback credential isolation and optional Client/Campaign scoping.
- * 3. Parses SMTP DSN bounces (Hard/Soft) and Replies.
- * 4. Confirms Delivered events (via Exchange Message Trace or 4h no-bounce grace window),
- *    deduplicates against already-delivered message IDs, and reconciles late bounces cleanly.
  */
 function runEmailDeliverabilitySync_(silentMode, options) {
   let ui = null;
@@ -902,10 +1053,11 @@ function runEmailDeliverabilitySync_(silentMode, options) {
     const existingEventIds = {};
     const sentEvents = [];
     const bouncedByMsgId = {};
-    const bouncedByRecipient = {};
+    const bouncedByCampRecip = {};
     const deliveredByMsgId = {};
     const deliveredByRecipient = {};
     const assumedDeliveredRowByMsgKey = {};
+    const hardBounceMap = {};
 
     const lastEventRow = eventsSheet.getLastRow();
     if (lastEventRow > 1) {
@@ -920,12 +1072,15 @@ function runEmailDeliverabilitySync_(silentMode, options) {
         const eType = String(row[5] || '').trim();
         const eDate = row[6];
         const recip = String(row[7] || '').trim().toLowerCase();
+        const smtpCode = String(row[8] || '').trim();
+        const bounceType = String(row[9] || '').trim().toLowerCase();
         const reason = String(row[10] || '').trim();
 
         if (eId) existingEventIds[eId] = true;
 
         const msgIdLow = msgId.toLowerCase();
         const recipKey = (clientId + '::' + recip).toLowerCase();
+        const campRecipKey = (clientId + '::' + campId + '::' + recip).toLowerCase();
 
         if (eType === 'Sent') {
           sentEvents.push({
@@ -938,7 +1093,15 @@ function runEmailDeliverabilitySync_(silentMode, options) {
           });
         } else if (eType === 'Bounced') {
           if (msgIdLow) bouncedByMsgId[msgIdLow] = true;
-          if (recip) bouncedByRecipient[recipKey] = true;
+          if (recip) bouncedByCampRecip[campRecipKey] = true;
+
+          if (bounceType === 'hard' && recip && !isPilotDeliverabilityEvent_(eId, clientId, campId)) {
+            const inClientScope = !filterByClient || clientId.toLowerCase() === rawClientFilter.toLowerCase();
+            const inCampScope = !filterByCamp || campId.toLowerCase() === rawCampFilter.toLowerCase();
+            if (inClientScope && inCampScope) {
+              hardBounceMap[recip] = { smtpCode: smtpCode || '550', reason: reason };
+            }
+          }
         } else if (eType === 'Delivered') {
           if (msgIdLow) deliveredByMsgId[msgIdLow] = true;
           if (recip) deliveredByRecipient[recipKey] = true;
@@ -986,8 +1149,8 @@ function runEmailDeliverabilitySync_(silentMode, options) {
 
       const msgIdLow = msgId.toLowerCase();
       const recipKey = (clientId + '::' + recip).toLowerCase();
+      const campRecipKey = (clientId + '::' + campId + '::' + recip).toLowerCase();
 
-      // Prevent duplicate Delivered rows for the same message (or same recipient if no message ID)
       if (eType === 'Delivered') {
         if ((msgIdLow && deliveredByMsgId[msgIdLow]) || (!msgIdLow && recip && deliveredByRecipient[recipKey])) {
           return false;
@@ -1028,7 +1191,10 @@ function runEmailDeliverabilitySync_(silentMode, options) {
         if (recip) deliveredByRecipient[recipKey] = true;
       } else if (eType === 'Bounced') {
         if (msgIdLow) bouncedByMsgId[msgIdLow] = true;
-        if (recip) bouncedByRecipient[recipKey] = true;
+        if (recip) bouncedByCampRecip[campRecipKey] = true;
+        if (bounceType === 'Hard' && recip && !isPilotDeliverabilityEvent_(eId, clientId, campId)) {
+          hardBounceMap[recip] = { smtpCode: smtpCode || '550', reason: reason };
+        }
         const msgKey = (clientId + '::' + (msgId || recip)).toLowerCase();
         if (assumedDeliveredRowByMsgKey[msgKey]) {
           assumedRowsToDelete[assumedDeliveredRowByMsgKey[msgKey]] = true;
@@ -1079,10 +1245,13 @@ function runEmailDeliverabilitySync_(silentMode, options) {
 
       const msgIdLow = String(s.provider_message_id || '').toLowerCase();
       const recipKey = (s.client_id + '::' + s.recipient).toLowerCase();
+      const campRecipKey = (s.client_id + '::' + s.campaign_id + '::' + s.recipient).toLowerCase();
+
+      if (bouncedByCampRecip[campRecipKey]) continue;
       if (msgIdLow) {
         if (bouncedByMsgId[msgIdLow] || deliveredByMsgId[msgIdLow]) continue;
       } else {
-        if (bouncedByRecipient[recipKey] || deliveredByRecipient[recipKey]) continue;
+        if (deliveredByRecipient[recipKey]) continue;
       }
 
       stageNewEvent({
@@ -1112,6 +1281,21 @@ function runEmailDeliverabilitySync_(silentMode, options) {
       eventsSheet.getRange(insertAt, 1, pendingNewRows.length, EMAIL_EVENTS_HEADERS.length).setValues(pendingNewRows);
     }
 
+    // Auto-suppress Hard-bounced emails into Lists & Settings + sync Prospect Review Queue status
+    const hardBounceEmails = Object.keys(hardBounceMap);
+    const autoSuppressedCount = autoSuppressHardBounces_(ss, hardBounceEmails);
+    const queueSuppressedUpdated = syncQueueWithHardBounceSuppressions_(ss, hardBounceMap);
+
+    if ((queueInfo.promotedCount > 0 || queueSuppressedUpdated > 0) &&
+        typeof updateDashboardForActiveCampaign === 'function' &&
+        typeof getStudioActiveCampaignId_ === 'function') {
+      try {
+        updateDashboardForActiveCampaign(getStudioActiveCampaignId_());
+      } catch (dashErr) {
+        Logger.log('Dashboard refresh after sync notice: ' + dashErr.message);
+      }
+    }
+
     refreshDeliverabilityFilterDropdowns_(ss);
     SpreadsheetApp.flush();
 
@@ -1121,15 +1305,21 @@ function runEmailDeliverabilitySync_(silentMode, options) {
 
     const summary = 'Synced ' + pendingNewRows.length + ' new event(s) across ' +
       mailboxTargets.length + ' mailbox target(s)' + scopeLabel + '.' +
+      (queueInfo.promotedCount > 0 ? ('\nPromoted ' + queueInfo.promotedCount + ' sent draft(s) in Prospect Review Queue.') : '') +
+      (autoSuppressedCount > 0 ? ('\nAuto-suppressed ' + autoSuppressedCount + ' hard-bounced email(s) in Lists & Settings.') : '') +
+      (queueSuppressedUpdated > 0 ? ('\nMarked ' + queueSuppressedUpdated + ' hard-bounced row(s) as Suppressed in Prospect Review Queue.') : '') +
       (clientNotes.length > 0 ? ('\nSkipped: ' + clientNotes.join(' | ')) : '');
 
     if (ui) ui.alert('Email Deliverability Sync Complete', summary, ui.ButtonSet.OK);
     else Logger.log(summary);
 
     return {
-      success: clientNotes.length === 0 || pendingNewRows.length > 0,
+      success: clientNotes.length === 0 || pendingNewRows.length > 0 || autoSuppressedCount > 0 || queueSuppressedUpdated > 0,
       hasWarnings: clientNotes.length > 0,
       addedCount: pendingNewRows.length,
+      promotedCount: queueInfo.promotedCount,
+      autoSuppressedCount: autoSuppressedCount,
+      queueSuppressedUpdated: queueSuppressedUpdated,
       targetsChecked: mailboxTargets.length,
       clientFilter: scopeOpts.rawClientFilter,
       campaignFilter: scopeOpts.rawCampFilter,
@@ -1151,7 +1341,8 @@ function readQueueTrackingContext_(ss) {
     cols: {},
     draftRows: [],
     byMsgId: {},
-    byRecipient: {}
+    byRecipient: {},
+    promotedCount: 0
   };
 
   const qSheet = ss.getSheetByName('Prospect Review Queue');
@@ -1378,52 +1569,80 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
 
     try {
       // 1. Promote any local Gmail drafts that the user sent manually
-      clientDrafts.forEach(function(draftItem) {
-        try {
-          const draftObj = GmailApp.getDraft(draftItem.msgId);
-          if (!draftObj) {
-            const sentThreads = GmailApp.search('in:sent to:' + draftItem.email + ' newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd', 0, 5);
-            if (sentThreads && sentThreads.length > 0) {
-              const msgs = sentThreads[0].getMessages();
-              const lastMsg = msgs[msgs.length - 1];
-              let rfcId = '';
-              try { rfcId = lastMsg ? (lastMsg.getHeader('Message-ID') || '') : ''; } catch (e) {}
-              const sentMsgId = rfcId || (lastMsg ? lastMsg.getId() : draftItem.msgId);
-              const sentAt = lastMsg ? lastMsg.getDate() : new Date();
+      if (clientDrafts.length > 0) {
+        const activeDraftIds = {};
+        GmailApp.getDrafts().forEach(function(d) {
+          activeDraftIds[d.getId()] = true;
+        });
 
-              promoteQueueDraftToSent_(queueInfo, draftItem, sentMsgId, sentAt);
-              stageNewEvent({
-                client_id: clientName,
-                campaign_id: draftItem.campaignId,
-                provider: 'Gmail',
-                provider_message_id: sentMsgId,
-                event_type: 'Sent',
-                event_date: sentAt,
-                recipient: draftItem.email,
-                smtp_code: '250 2.0.0',
-                reason: 'Promoted from Gmail Draft to Sent'
-              });
-              trackedRecipients[draftItem.email] = true;
-              sentByMsgId[sentMsgId.toLowerCase()] = { campaign_id: draftItem.campaignId, recipient: draftItem.email, event_date: sentAt, provider_message_id: sentMsgId };
+        clientDrafts.forEach(function(draftItem) {
+          if (activeDraftIds[draftItem.msgId]) return;
+
+          const sentThreads = GmailApp.search('in:sent to:' + draftItem.email + ' newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd', 0, 5);
+          if (sentThreads && sentThreads.length > 0) {
+            const msgs = sentThreads[0].getMessages();
+            let matchedSentMsg = null;
+            for (let m = msgs.length - 1; m >= 0; m--) {
+              const mTo = String(msgs[m].getTo() || '').toLowerCase();
+              const mFrom = extractEmailAddress_(msgs[m].getFrom());
+              if (mTo.indexOf(draftItem.email) >= 0 && mFrom.indexOf('mailer-daemon') < 0 && mFrom.indexOf('postmaster') < 0) {
+                matchedSentMsg = msgs[m];
+                break;
+              }
             }
-          }
-        } catch (draftErr) {
-          const dMsg = String(draftErr && draftErr.message ? draftErr.message : draftErr);
-          if (dMsg.indexOf('does not have permission') >= 0 || dMsg.indexOf('Required permissions') >= 0) {
-            throw draftErr;
-          }
-          Logger.log('Local draft check notice (' + draftItem.msgId + '): ' + dMsg);
-        }
-      });
+            if (!matchedSentMsg) matchedSentMsg = msgs[msgs.length - 1];
 
-      // 2. Poll Gmail DSN bounce messages
+            let rfcId = '';
+            try { rfcId = matchedSentMsg ? (matchedSentMsg.getHeader('Message-ID') || '') : ''; } catch (e) {}
+            const sentMsgId = rfcId || (matchedSentMsg ? matchedSentMsg.getId() : draftItem.msgId);
+            const sentAt = matchedSentMsg ? matchedSentMsg.getDate() : new Date();
+
+            promoteQueueDraftToSent_(queueInfo, draftItem, sentMsgId, sentAt);
+            stageNewEvent({
+              client_id: clientName,
+              campaign_id: draftItem.campaignId,
+              provider: 'Gmail',
+              provider_message_id: sentMsgId,
+              event_type: 'Sent',
+              event_date: sentAt,
+              recipient: draftItem.email,
+              smtp_code: '250 2.0.0',
+              reason: 'Promoted from Gmail Draft to Sent'
+            });
+            trackedRecipients[draftItem.email] = true;
+            const sentObj = {
+              campaign_id: draftItem.campaignId,
+              recipient: draftItem.email,
+              event_date: sentAt,
+              provider_message_id: sentMsgId
+            };
+            sentByMsgId[sentMsgId.toLowerCase()] = sentObj;
+            sentByRecipient[draftItem.email] = sentObj;
+          }
+        });
+      }
+
+      // 2. Poll Gmail DSN bounce messages (strictly inspect actual DSN/NDR messages)
       const bounceThreads = GmailApp.search('from:(mailer-daemon OR postmaster) newer_than:' + DELIVERABILITY_LOOKBACK_DAYS + 'd', 0, 50);
       bounceThreads.forEach(function(thread) {
         const msgs = thread.getMessages();
         msgs.forEach(function(msg) {
+          const msgFromAddr = extractEmailAddress_(msg.getFrom());
+          const msgSubj = String(msg.getSubject() || '');
+          const msgSubjLow = msgSubj.toLowerCase();
+          const isDsnMsg = (
+            msgFromAddr.indexOf('mailer-daemon') >= 0 ||
+            msgFromAddr.indexOf('postmaster') >= 0 ||
+            msgSubjLow.indexOf('delivery status notification') >= 0 ||
+            msgSubjLow.indexOf('undeliverable') === 0 ||
+            msgSubjLow.indexOf('mail delivery failed') >= 0 ||
+            msgSubjLow.indexOf('returned mail') >= 0
+          );
+          if (!isDsnMsg) return;
+
           let raw = '';
           try { raw = msg.getRawContent(); } catch (e) { raw = msg.getPlainBody() || ''; }
-          const parsedBounce = parseSmtpBounceDetails_(msg.getSubject(), msg.getPlainBody() || '', raw);
+          const parsedBounce = parseSmtpBounceDetails_(msgSubj, msg.getPlainBody() || '', raw);
           const recip = parsedBounce.recipient;
           if (!recip) return;
 
@@ -1534,7 +1753,6 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
     throw new Error(parsed && parsed.error ? parsed.error : 'Relay pollEvents failed (upgrade ClientGmailRelay.gs to v2.2+).');
   }
 
-  // Process promoted drafts from client Workspace
   (parsed.promotedDrafts || []).forEach(function(pd) {
     const matchDraft = clientDrafts.find(function(d) { return d.msgId === pd.draftId || d.email === String(pd.recipient || '').toLowerCase(); });
     const campId = (pd.campaignId || (matchDraft ? matchDraft.campaignId : ''));
@@ -1562,7 +1780,6 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
     }
   });
 
-  // Process bounces from client Workspace
   (parsed.bounces || []).forEach(function(b) {
     const recip = String(b.recipient || '').toLowerCase();
     const matchSent = (b.originalMessageId && sentByMsgId[String(b.originalMessageId).toLowerCase()]) || sentByRecipient[recip];
@@ -1585,7 +1802,6 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
     });
   });
 
-  // Process replies from client Workspace
   (parsed.replies || []).forEach(function(r) {
     const recip = String(r.recipient || '').toLowerCase();
     const matchSent = sentByRecipient[recip];
@@ -1610,7 +1826,6 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
 
 /**
  * Polls Microsoft 365 / Exchange Online events via Microsoft Graph API v1.0
- * using strict CLIENT_{NAME}_MS_* credentials (or local MS_* for Growth Target).
  */
 function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCache, stageNewEvent, ss, scopeOpts) {
   const clientName = target.clientName;
@@ -1855,8 +2070,11 @@ function promoteQueueDraftToSent_(queueInfo, draftItem, sentMsgId, sentAt) {
       sh.getRange(draftItem.rowIndex, queueInfo.cols.sentAt + 1).setValue((sentAt || new Date()).toLocaleString());
     }
     if (queueInfo.cols.msgId >= 0 && sentMsgId) {
-      sh.getRange(draftItem.rowIndex, queueInfo.cols.msgId + 1).setValue(sentMsgId);
+      const msgCell = sh.getRange(draftItem.rowIndex, queueInfo.cols.msgId + 1);
+      msgCell.setNumberFormat('@');
+      msgCell.setValue(sentMsgId);
     }
+    queueInfo.promotedCount = (queueInfo.promotedCount || 0) + 1;
   } catch (e) {
     Logger.log('Could not promote queue draft row ' + draftItem.rowIndex + ': ' + e.message);
   }
@@ -1891,9 +2109,17 @@ function parseSmtpBounceDetails_(subject, plainBody, rawContent) {
 
   // 2. Extract original Message-ID
   let originalMessageId = '';
-  const msgIdMatch = combined.match(/(?:In-Reply-To|Original-Message-ID|Message-ID):\s*(<[^>]+>)/i);
-  if (msgIdMatch && msgIdMatch[1]) {
-    originalMessageId = msgIdMatch[1].trim();
+  const inReplyMatch = combined.match(/In-Reply-To:\s*(<[^>]+>)/i) ||
+    combined.match(/Original-Message-ID:\s*(<[^>]+>)/i);
+  if (inReplyMatch && inReplyMatch[1]) {
+    originalMessageId = inReplyMatch[1].trim();
+  } else {
+    const rfcIdx = combined.toLowerCase().indexOf('message/rfc822');
+    const tailSection = rfcIdx >= 0 ? combined.slice(rfcIdx) : '';
+    const embeddedMsgId = tailSection.match(/Message-ID:\s*(<[^>]+>)/i);
+    if (embeddedMsgId && embeddedMsgId[1]) {
+      originalMessageId = embeddedMsgId[1].trim();
+    }
   }
 
   // 3. Extract SMTP Code (e.g. "550 5.1.1", "451 4.7.1", "554", etc.)
