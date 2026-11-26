@@ -17,8 +17,9 @@
  *    scoping for Control Panel syncs.
  * 4. Automatically promotes sent Gmail/M365 drafts to "Sent" safely, filters
  *    DSN bounce messages strictly by sender/subject, auto-suppresses Hard
- *    bounces into "Lists & Settings", and updates "Prospect Review Queue" &
- *    "Dashboard" suppression indicators cleanly.
+ *    bounces ("Suppression - Email") and Opt-Out / Unsubscribe replies
+ *    ("Suppression - Opt-Out Email") into "Lists & Settings", and updates
+ *    "Prospect Review Queue" & "Dashboard" suppression indicators cleanly.
  * 5. Exposes queryEmailDeliverabilityMetrics(clientFilter, campaignFilter)
  *    and syncEmailDeliverabilityFromSidebar(clientFilter, campaignFilter).
  * ============================================================================
@@ -721,11 +722,105 @@ function isPilotDeliverabilityEvent_(eventId, clientId, campaignId) {
 }
 
 /**
- * Automatically adds Hard-bounced email addresses to "Lists & Settings"
- * under List name = "Suppression - Email", Active status = "Active".
+ * Strips quoted reply history and outbound opt-out boilerplate so ONLY the
+ * prospect's new reply text is scanned for opt-out / unsubscribe keywords.
  */
-function autoSuppressHardBounces_(ss, hardBounceRecipients) {
-  if (!ss || !Array.isArray(hardBounceRecipients) || hardBounceRecipients.length === 0) {
+function extractNewReplyTextOnly_(rawReplyBody) {
+  let text = String(rawReplyBody || '');
+  if (!text) return '';
+
+  // Remove HTML quote blocks (Gmail / Outlook / Exchange) before stripping tags
+  text = text
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<div[^>]*class\s*=\s*["']?[^"'>]*gmail_quote[^"'>]*["']?[^>]*>[\s\S]*/gi, '\n')
+    .replace(/<div[^>]*id\s*=\s*["']?divRplyFwdMsg["']?[^>]*>[\s\S]*/gi, '\n')
+    .replace(/<blockquote\b[\s\S]*?<\/blockquote>/gi, '\n')
+    .replace(/<hr\b[^>]*>[\s\S]*(?=<b\b[^>]*>\s*From:|\bFrom:\s)/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|tr|li|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;|&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/\r\n?/g, '\n');
+
+  // Remove our own standard CASL opt-out footer if quoted without '>' markers
+  text = text.replace(
+    /If this isn't relevant or you'd prefer not to receive future emails from us,?\s*simply reply\s*"?Unsubscribe"?\s*or\s*"?Opt out"?[\s\S]{0,160}?promptly\.?/gi,
+    ''
+  );
+
+  // Truncate at standard reply/forward thread boundaries
+  const threadSplitPatterns = [
+    /\n\s*On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|\d{1,4}[\/.-]\d{1,2}|[A-Z][a-z]{2,8}\s+\d{1,2})[\s\S]{0,220}?\bwrote:\s*(?:\n|$)/i,
+    /\n\s*-{2,}\s*Original Message\s*-{2,}/i,
+    /\n\s*_{5,}\s*(?:\n|$)/,
+    /\n\s*Begin forwarded message:/i,
+    /\n\s*From:\s+[^\n]+\n\s*(?:Sent|Date):\s+/i
+  ];
+
+  for (let i = 0; i < threadSplitPatterns.length; i++) {
+    const m = text.match(threadSplitPatterns[i]);
+    if (m && typeof m.index === 'number') {
+      text = text.slice(0, m.index);
+    }
+  }
+
+  // Drop individual quoted lines (starting with '>')
+  const keptLines = text.split('\n').filter(function(line) {
+    return !/^\s*>+/.test(line);
+  });
+
+  return keptLines.join('\n').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Detects explicit opt-out / unsubscribe requests in the reply subject or
+ * newly written reply body (ignoring quoted original outreach text).
+ */
+function detectOptOutUnsubscribeReply_(subject, replyBody) {
+  const cleanSubj = String(subject || '').trim();
+  const cleanNewBody = extractNewReplyTextOnly_(replyBody);
+  const candidateText = (cleanSubj + '\n' + cleanNewBody).trim();
+
+  if (!candidateText) {
+    return { isOptOut: false, matchedKeyword: '' };
+  }
+
+  const optOutPatterns = [
+    /\bunsubscribe\b/i,
+    /\bopt[\s-]?out\b/i,
+    /\bremove\s+(?:me|my\s+(?:email|address|name|contact)|us)\b/i,
+    /\btake\s+(?:me|us|my\s+(?:email|address))\s+off\b/i,
+    /\bdo\s+not\s+(?:contact|email|message|reach\s+out(?:\s+to)?)\s+(?:me|us)\b/i,
+    /\bdon'?t\s+(?:contact|email|message)\s+(?:me|us)\b/i,
+    /\bplease\s+stop\s+(?:emailing|contacting|messaging|sending)\b/i,
+    /\bstop\s+(?:emailing|contacting|messaging|sending\s+(?:me|us|these))\b/i
+  ];
+
+  for (let i = 0; i < optOutPatterns.length; i++) {
+    const m = candidateText.match(optOutPatterns[i]);
+    if (m && m[0]) {
+      return {
+        isOptOut: true,
+        matchedKeyword: String(m[0]).trim().toLowerCase()
+      };
+    }
+  }
+
+  return { isOptOut: false, matchedKeyword: '' };
+}
+
+/**
+ * Shared helper that adds emails into "Lists & Settings" under a validated
+ * suppression list name without duplicating existing suppressed addresses.
+ */
+function appendSuppressedEmailsToLists_(ss, emails, listNameLabel, logVerb) {
+  if (!ss || !Array.isArray(emails) || emails.length === 0) {
     return 0;
   }
 
@@ -747,6 +842,8 @@ function autoSuppressHardBounces_(ss, hardBounceRecipients) {
       if (listName.indexOf('suppression') >= 0 ||
           listName.indexOf('blacklist') >= 0 ||
           listName.indexOf('opt-out') >= 0 ||
+          listName.indexOf('opt out') >= 0 ||
+          listName.indexOf('unsubscribe') >= 0 ||
           listName.indexOf('competitor') >= 0) {
         existingEmails[val] = true;
       }
@@ -756,14 +853,14 @@ function autoSuppressHardBounces_(ss, hardBounceRecipients) {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const rowsToAdd = [];
 
-  for (let i = 0; i < hardBounceRecipients.length; i++) {
-    const email = String(hardBounceRecipients[i] || '').trim().toLowerCase();
+  for (let i = 0; i < emails.length; i++) {
+    const email = String(emails[i] || '').trim().toLowerCase();
     if (!email || !emailRegex.test(email)) continue;
     if (email.indexOf('mailer-daemon') >= 0 || email.indexOf('postmaster') >= 0) continue;
     if (existingEmails[email]) continue;
 
     existingEmails[email] = true;
-    rowsToAdd.push(['Suppression - Email', email, 'Active']);
+    rowsToAdd.push([listNameLabel, email, 'Active']);
   }
 
   if (rowsToAdd.length === 0) return 0;
@@ -775,12 +872,28 @@ function autoSuppressHardBounces_(ss, hardBounceRecipients) {
     try {
       sortListsAndSettingsTab_(ss);
     } catch (e) {
-      Logger.log('sortListsAndSettingsTab_ notice during hard-bounce suppression: ' + e.message);
+      Logger.log('sortListsAndSettingsTab_ notice during ' + (logVerb || 'suppression') + ': ' + e.message);
     }
   }
 
-  Logger.log('Auto-suppressed ' + rowsToAdd.length + ' hard-bounced email(s) into Lists & Settings.');
+  Logger.log('Auto-suppressed ' + rowsToAdd.length + ' ' + (logVerb || 'email(s)') + ' into Lists & Settings (' + listNameLabel + ').');
   return rowsToAdd.length;
+}
+
+/**
+ * Automatically adds Hard-bounced email addresses to "Lists & Settings"
+ * under List name = "Suppression - Email", Active status = "Active".
+ */
+function autoSuppressHardBounces_(ss, hardBounceRecipients) {
+  return appendSuppressedEmailsToLists_(ss, hardBounceRecipients, 'Suppression - Email', 'hard-bounced email(s)');
+}
+
+/**
+ * Automatically adds Opt-Out / Unsubscribe reply addresses to "Lists & Settings"
+ * under List name = "Suppression - Opt-Out Email", Active status = "Active".
+ */
+function autoSuppressOptOutReplies_(ss, optOutRecipients) {
+  return appendSuppressedEmailsToLists_(ss, optOutRecipients, 'Suppression - Opt-Out Email', 'opt-out/unsubscribe reply email(s)');
 }
 
 /**
@@ -857,6 +970,92 @@ function syncQueueWithHardBounceSuppressions_(ss, hardBounceMap) {
     }
 
     // Only reject/suppress Send Status if this row has NOT already been Sent / Pushed
+    if (currSendStatus !== 'sent' && currSendStatus !== 'pushed to sequencer' && currSendStatus !== 'suppressed - not sent') {
+      if (reviewCol) qSheet.getRange(rowNum, reviewCol).setValue('Rejected');
+      if (approvalCol) qSheet.getRange(rowNum, approvalCol).setValue('Rejected (Suppression Guard)');
+      if (sendStatusCol) qSheet.getRange(rowNum, sendStatusCol).setValue('Suppressed - Not Sent');
+      rowChanged = true;
+    }
+
+    if (rowChanged) updatedCount++;
+  }
+
+  return updatedCount;
+}
+
+/**
+ * Updates "Prospect Review Queue" for Opt-Out / Unsubscribe replies so
+ * Compliance Status ("Failed - Suppressed") and Suppression Check
+ * ("Blocked: Email in Lists & Settings") stay accurate and unsent duplicates
+ * are immediately rejected/suppressed while preserving "Sent" on already-sent rows.
+ */
+function syncQueueWithOptOutSuppressions_(ss, optOutMap) {
+  if (!ss || !optOutMap) return 0;
+  const emails = Object.keys(optOutMap);
+  if (emails.length === 0) return 0;
+
+  const qSheet = ss.getSheetByName('Prospect Review Queue');
+  if (!qSheet || qSheet.getLastRow() < 2) return 0;
+
+  const lastCol = qSheet.getLastColumn();
+  const headers = qSheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
+
+  function colNum(names) {
+    for (let i = 0; i < names.length; i++) {
+      const idx = headers.indexOf(names[i]);
+      if (idx >= 0) return idx + 1;
+    }
+    return 0;
+  }
+
+  const campCol = colNum(['Campaign ID']);
+  const emailCol = colNum(['Business Email']);
+  const reviewCol = colNum(['Review Status']);
+  const approvalCol = colNum(['Human Approval Status']);
+  const sendStatusCol = colNum(['Send Status']);
+  const sendErrorCol = colNum(['Send Error', 'Last Error']);
+  const complianceCol = colNum(['Compliance Status']);
+  const suppressionCol = colNum(['Suppression Check']);
+
+  if (!emailCol) return 0;
+
+  const data = qSheet.getRange(2, 1, qSheet.getLastRow() - 1, lastCol).getValues();
+  let updatedCount = 0;
+
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const rowNum = i + 2;
+    const cid = campCol ? String(row[campCol - 1] || '').trim() : '';
+    if (cid && cid.toUpperCase().indexOf('PILOT-') === 0) continue;
+
+    const email = String(row[emailCol - 1] || '').trim().toLowerCase();
+    if (!email || !optOutMap[email]) continue;
+
+    const optInfo = optOutMap[email];
+    const currComp = complianceCol ? String(row[complianceCol - 1] || '').trim() : '';
+    const currSupp = suppressionCol ? String(row[suppressionCol - 1] || '').trim() : '';
+    const currSendStatus = sendStatusCol ? String(row[sendStatusCol - 1] || '').trim().toLowerCase() : '';
+    const currSendErr = sendErrorCol ? String(row[sendErrorCol - 1] || '').trim() : '';
+
+    let rowChanged = false;
+
+    if (complianceCol && currComp !== 'Failed - Suppressed') {
+      qSheet.getRange(rowNum, complianceCol).setValue('Failed - Suppressed');
+      rowChanged = true;
+    }
+    if (suppressionCol && currSupp !== 'Blocked: Email in Lists & Settings') {
+      qSheet.getRange(rowNum, suppressionCol).setValue('Blocked: Email in Lists & Settings');
+      rowChanged = true;
+    }
+
+    const noteText = 'Opt-Out / Unsubscribe Reply (' + (optInfo.keyword || 'unsubscribe') + ') — Auto-Suppressed in Lists & Settings';
+    if (sendErrorCol && currSendErr.indexOf('Opt-Out') < 0 && currSendErr.indexOf('Hard Bounced') < 0) {
+      qSheet.getRange(rowNum, sendErrorCol).setValue(noteText);
+      rowChanged = true;
+    }
+
     if (currSendStatus !== 'sent' && currSendStatus !== 'pushed to sequencer' && currSendStatus !== 'suppressed - not sent') {
       if (reviewCol) qSheet.getRange(rowNum, reviewCol).setValue('Rejected');
       if (approvalCol) qSheet.getRange(rowNum, approvalCol).setValue('Rejected (Suppression Guard)');
@@ -1058,6 +1257,7 @@ function runEmailDeliverabilitySync_(silentMode, options) {
     const deliveredByRecipient = {};
     const assumedDeliveredRowByMsgKey = {};
     const hardBounceMap = {};
+    const optOutMap = {};
 
     const lastEventRow = eventsSheet.getLastRow();
     if (lastEventRow > 1) {
@@ -1100,6 +1300,15 @@ function runEmailDeliverabilitySync_(silentMode, options) {
             const inCampScope = !filterByCamp || campId.toLowerCase() === rawCampFilter.toLowerCase();
             if (inClientScope && inCampScope) {
               hardBounceMap[recip] = { smtpCode: smtpCode || '550', reason: reason };
+            }
+          }
+        } else if (eType === 'Replied') {
+          if (recip && !isPilotDeliverabilityEvent_(eId, clientId, campId) &&
+              reason.toLowerCase().indexOf('opt-out/unsubscribe detected') >= 0) {
+            const inClientScope = !filterByClient || clientId.toLowerCase() === rawClientFilter.toLowerCase();
+            const inCampScope = !filterByCamp || campId.toLowerCase() === rawCampFilter.toLowerCase();
+            if (inClientScope && inCampScope) {
+              optOutMap[recip] = { keyword: 'unsubscribe', reason: reason };
             }
           }
         } else if (eType === 'Delivered') {
@@ -1199,6 +1408,10 @@ function runEmailDeliverabilitySync_(silentMode, options) {
         if (assumedDeliveredRowByMsgKey[msgKey]) {
           assumedRowsToDelete[assumedDeliveredRowByMsgKey[msgKey]] = true;
         }
+      } else if (eType === 'Replied') {
+        if (evt.isOptOut && recip && !isPilotDeliverabilityEvent_(eId, clientId, campId)) {
+          optOutMap[recip] = { keyword: evt.optOutKeyword || 'unsubscribe', reason: reason };
+        }
       }
       return true;
     }
@@ -1281,12 +1494,18 @@ function runEmailDeliverabilitySync_(silentMode, options) {
       eventsSheet.getRange(insertAt, 1, pendingNewRows.length, EMAIL_EVENTS_HEADERS.length).setValues(pendingNewRows);
     }
 
-    // Auto-suppress Hard-bounced emails into Lists & Settings + sync Prospect Review Queue status
+    // Auto-suppress Hard-bounced emails & Opt-Out/Unsubscribe replies into Lists & Settings + Prospect Review Queue
     const hardBounceEmails = Object.keys(hardBounceMap);
-    const autoSuppressedCount = autoSuppressHardBounces_(ss, hardBounceEmails);
-    const queueSuppressedUpdated = syncQueueWithHardBounceSuppressions_(ss, hardBounceMap);
+    const optOutEmails = Object.keys(optOutMap);
+    const autoSuppressedBounces = autoSuppressHardBounces_(ss, hardBounceEmails);
+    const autoSuppressedOptOuts = autoSuppressOptOutReplies_(ss, optOutEmails);
+    const totalAutoSuppressed = autoSuppressedBounces + autoSuppressedOptOuts;
 
-    if ((queueInfo.promotedCount > 0 || queueSuppressedUpdated > 0) &&
+    const queueBouncesUpdated = syncQueueWithHardBounceSuppressions_(ss, hardBounceMap);
+    const queueOptOutsUpdated = syncQueueWithOptOutSuppressions_(ss, optOutMap);
+    const totalQueueSuppressedUpdated = queueBouncesUpdated + queueOptOutsUpdated;
+
+    if ((queueInfo.promotedCount > 0 || totalQueueSuppressedUpdated > 0) &&
         typeof updateDashboardForActiveCampaign === 'function' &&
         typeof getStudioActiveCampaignId_ === 'function') {
       try {
@@ -1306,20 +1525,22 @@ function runEmailDeliverabilitySync_(silentMode, options) {
     const summary = 'Synced ' + pendingNewRows.length + ' new event(s) across ' +
       mailboxTargets.length + ' mailbox target(s)' + scopeLabel + '.' +
       (queueInfo.promotedCount > 0 ? ('\nPromoted ' + queueInfo.promotedCount + ' sent draft(s) in Prospect Review Queue.') : '') +
-      (autoSuppressedCount > 0 ? ('\nAuto-suppressed ' + autoSuppressedCount + ' hard-bounced email(s) in Lists & Settings.') : '') +
-      (queueSuppressedUpdated > 0 ? ('\nMarked ' + queueSuppressedUpdated + ' hard-bounced row(s) as Suppressed in Prospect Review Queue.') : '') +
+      (autoSuppressedBounces > 0 ? ('\nAuto-suppressed ' + autoSuppressedBounces + ' hard-bounced email(s) in Lists & Settings.') : '') +
+      (autoSuppressedOptOuts > 0 ? ('\nAuto-suppressed ' + autoSuppressedOptOuts + ' opt-out/unsubscribe email(s) in Lists & Settings.') : '') +
+      (totalQueueSuppressedUpdated > 0 ? ('\nMarked ' + totalQueueSuppressedUpdated + ' suppressed row(s) in Prospect Review Queue.') : '') +
       (clientNotes.length > 0 ? ('\nSkipped: ' + clientNotes.join(' | ')) : '');
 
     if (ui) ui.alert('Email Deliverability Sync Complete', summary, ui.ButtonSet.OK);
     else Logger.log(summary);
 
     return {
-      success: clientNotes.length === 0 || pendingNewRows.length > 0 || autoSuppressedCount > 0 || queueSuppressedUpdated > 0,
+      success: clientNotes.length === 0 || pendingNewRows.length > 0 || totalAutoSuppressed > 0 || totalQueueSuppressedUpdated > 0,
       hasWarnings: clientNotes.length > 0,
       addedCount: pendingNewRows.length,
       promotedCount: queueInfo.promotedCount,
-      autoSuppressedCount: autoSuppressedCount,
-      queueSuppressedUpdated: queueSuppressedUpdated,
+      autoSuppressedCount: totalAutoSuppressed,
+      autoSuppressedOptOuts: autoSuppressedOptOuts,
+      queueSuppressedUpdated: totalQueueSuppressedUpdated,
       targetsChecked: mailboxTargets.length,
       clientFilter: scopeOpts.rawClientFilter,
       campaignFilter: scopeOpts.rawCampFilter,
@@ -1667,7 +1888,7 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
         });
       });
 
-      // 3. Poll prospect replies matching tracked recipients
+      // 3. Poll prospect replies matching tracked recipients + Unsubscribe Reply Guard
       const recipList = Object.keys(trackedRecipients);
       if (recipList.length > 0) {
         const myEmail = (function() {
@@ -1681,10 +1902,21 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
           const replyThreads = GmailApp.search(query, 0, 50);
           replyThreads.forEach(function(thread) {
             thread.getMessages().forEach(function(msg) {
+              try {
+                if (msg.isDraft()) return;
+              } catch (e) {}
+
               const sender = extractEmailAddress_(msg.getFrom());
               if (!sender || sender === myEmail || !trackedRecipients[sender]) return;
               const matchSent = sentByRecipient[sender] || { campaign_id: (queueInfo.byRecipient[sender] ? queueInfo.byRecipient[sender].campaignId : '') };
               if (!matchSent || !matchSent.campaign_id) return;
+
+              const msgSubj = String(msg.getSubject() || '');
+              const msgPlain = String(msg.getPlainBody() || '');
+              const optOutCheck = detectOptOutUnsubscribeReply_(msgSubj, msgPlain);
+              const reasonText = optOutCheck.isOptOut
+                ? ('Reply received (Opt-Out/Unsubscribe detected — Auto-Suppressed): ' + msgSubj.slice(0, 120))
+                : ('Reply received: ' + msgSubj.slice(0, 120));
 
               stageNewEvent({
                 client_id: clientName,
@@ -1695,7 +1927,9 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
                 event_date: msg.getDate(),
                 recipient: sender,
                 smtp_code: '',
-                reason: 'Reply received: ' + String(msg.getSubject() || '').slice(0, 120),
+                reason: reasonText,
+                isOptOut: optOutCheck.isOptOut,
+                optOutKeyword: optOutCheck.matchedKeyword,
                 fallbackSeed: msg.getId()
               });
             });
@@ -1809,6 +2043,13 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
     const campId = matchSent ? matchSent.campaign_id : (qMatch ? qMatch.campaignId : '');
     if (!campId || !recip) return;
 
+    const rSubj = String(r.subject || '');
+    const rBody = String(r.bodySnippet || r.plainBody || r.body || '');
+    const optOutCheck = detectOptOutUnsubscribeReply_(rSubj, rBody);
+    const reasonText = optOutCheck.isOptOut
+      ? ('Reply received (Opt-Out/Unsubscribe detected — Auto-Suppressed): ' + rSubj.slice(0, 120))
+      : (r.reason || ('Reply received: ' + rSubj.slice(0, 120)));
+
     stageNewEvent({
       client_id: clientName,
       campaign_id: campId,
@@ -1818,7 +2059,9 @@ function syncGmailMailboxEvents_(target, sentEvents, queueInfo, stageNewEvent, s
       event_date: r.eventDate ? new Date(r.eventDate) : new Date(),
       recipient: recip,
       smtp_code: '',
-      reason: r.reason || ('Reply received: ' + String(r.subject || '').slice(0, 120)),
+      reason: reasonText,
+      isOptOut: optOutCheck.isOptOut,
+      optOutKeyword: optOutCheck.matchedKeyword,
       fallbackSeed: r.messageId || ''
     });
   });
@@ -1969,7 +2212,7 @@ function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCa
     Logger.log('Exchange Message Trace skipped (' + clientName + '): ' + traceErr.message);
   }
 
-  // 3. Poll Mailbox Messages via Mail.ReadWrite for Exchange NDR Bounces & Prospect Replies
+  // 3. Poll Mailbox Messages via Mail.ReadWrite for Exchange NDR Bounces & Prospect Replies (+ Unsubscribe Guard)
   let nextUrl = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(mailbox) +
     '/messages?$filter=' + encodeURIComponent('receivedDateTime ge ' + startIso) +
     '&$top=100&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,bodyPreview,body';
@@ -1996,7 +2239,8 @@ function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCa
 
       const subj = String(msg.subject || '');
       const subjLow = subj.toLowerCase();
-      const bodyText = stripHtmlTags_((msg.body && msg.body.content) || msg.bodyPreview || '');
+      const rawBodyHtmlOrText = (msg.body && msg.body.content) || msg.bodyPreview || '';
+      const bodyText = stripHtmlTags_(rawBodyHtmlOrText);
       const msgDate = msg.receivedDateTime ? new Date(msg.receivedDateTime) : new Date();
 
       const isNdr = (
@@ -2037,6 +2281,11 @@ function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCa
         const matchSent = sentByRecipient[fromAddr] || (qMatch ? { campaign_id: qMatch.campaignId } : null);
         if (!matchSent || !matchSent.campaign_id) return;
 
+        const optOutCheck = detectOptOutUnsubscribeReply_(subj, rawBodyHtmlOrText);
+        const reasonText = optOutCheck.isOptOut
+          ? ('Reply received (Opt-Out/Unsubscribe detected — Auto-Suppressed): ' + subj.slice(0, 120))
+          : ('Reply received: ' + subj.slice(0, 120));
+
         stageNewEvent({
           client_id: clientName,
           campaign_id: matchSent.campaign_id,
@@ -2046,7 +2295,9 @@ function syncMicrosoft365MailboxEvents_(target, sentEvents, queueInfo, msTokenCa
           event_date: msgDate,
           recipient: fromAddr,
           smtp_code: '',
-          reason: 'Reply received: ' + subj.slice(0, 120),
+          reason: reasonText,
+          isOptOut: optOutCheck.isOptOut,
+          optOutKeyword: optOutCheck.matchedKeyword,
           fallbackSeed: msg.id
         });
       }

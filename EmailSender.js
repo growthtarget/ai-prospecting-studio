@@ -14,9 +14,11 @@
  * 3. Active Campaign Scope Guard: Processes ONLY the Active Campaign so approved
  *    leads from other clients/campaigns are never dispatched accidentally.
  * 4. Runtime Suppression, Duplicate-Send & Daily Send-Limit Guardrails + Pacing.
- * 5. Deliverability Event Capture: Captures Draft / Message IDs in Prospect Review Queue
+ * 5. CASL / B2B Opt-Out Compliance Footer: Automatically appends client-scoped
+ *    sender identification and an opt-out instruction when not already present.
+ * 6. Deliverability Event Capture: Captures Draft / Message IDs in Prospect Review Queue
  *    (AT:AV) and records inline "Sent" events to EmailEvents.
- * 6. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
+ * 7. Headless Safe: Gracefully executes in both UI dialog and silent background/sidebar modes.
  * ============================================================================
  */
 
@@ -95,6 +97,8 @@ function loadSenderSuppressionRules_(ss) {
       listName.indexOf('suppression') >= 0 ||
       listName.indexOf('blacklist') >= 0 ||
       listName.indexOf('opt-out') >= 0 ||
+      listName.indexOf('opt out') >= 0 ||
+      listName.indexOf('unsubscribe') >= 0 ||
       listName.indexOf('competitor') >= 0
     );
     if (isActive && isSuppression && val) {
@@ -232,9 +236,136 @@ function countClientSendsToday_(ss, clientName, queueData, campIdCol, emailCol, 
 }
 
 /**
+ * Resolves an optional client-scoped non-throwing configuration value from Script Properties.
+ * Strictly respects Client / Owner boundaries (external clients never fall back to local defaults).
+ */
+function getOptionalClientSenderProp_(keyCandidates, config, spreadsheet) {
+  const clientName = (config && config.clientName) ? String(config.clientName).trim() : 'Growth Target';
+  const campaignId = (config && config.campaignId) ? String(config.campaignId).trim() : '';
+
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const res = resolveClientScopedSecret_(
+      keyCandidates,
+      { campaignId: campaignId, clientName: clientName },
+      { throwOnMissing: false, allowAgentSettingsForLocal: true, spreadsheet: spreadsheet }
+    );
+    if (res && res.key && isValidSenderSecretValue_(res.key)) {
+      return String(res.key).trim();
+    }
+    return '';
+  }
+
+  const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
+  const prefix = (!isLocal && typeof normalizeClientPropertyPrefix_ === 'function')
+    ? normalizeClientPropertyPrefix_(clientName)
+    : (!isLocal ? ('CLIENT_' + clientName.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_') : '');
+  const sp = PropertiesService.getScriptProperties().getProperties();
+
+  for (let i = 0; i < keyCandidates.length; i++) {
+    const rawKey = isLocal ? keyCandidates[i] : (prefix + keyCandidates[i]);
+    const normTarget = String(rawKey).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    for (let k in sp) {
+      if (isLocal && String(k).toUpperCase().indexOf('CLIENT_') === 0) continue;
+      if (k.toUpperCase().replace(/[^A-Z0-9]/g, '') === normTarget && isValidSenderSecretValue_(sp[k])) {
+        return String(sp[k]).trim();
+      }
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Checks whether CASL / B2B Opt-Out Footer injection is enabled for this client.
+ * Defaults to true for compliance; can be disabled per-client via [CLIENT_{NAME}_]OPT_OUT_FOOTER_ENABLED = false.
+ */
+function isClientOptOutFooterEnabled_(config, spreadsheet) {
+  const flag = getOptionalClientSenderProp_(
+    ['OPT_OUT_FOOTER_ENABLED', 'CASL_FOOTER_ENABLED'],
+    config,
+    spreadsheet
+  );
+  if (!flag) return true;
+  const low = flag.toLowerCase();
+  return !(low === 'false' || low === 'no' || low === '0' || low === 'off' || low === 'disabled');
+}
+
+/**
+ * Checks if an email body already includes an opt-out or unsubscribe instruction
+ * so footers are never appended twice.
+ */
+function hasExistingOptOutNotice_(bodyText) {
+  const text = String(bodyText || '');
+  if (!text) return false;
+  return /\b(unsubscribe|opt[\s-]?out|remove\s+(?:you|your\s+(?:email|address)|me)\s+from|stop\s+receiving|prefer\s+not\s+to\s+(?:hear|receive)|don't\s+want\s+to\s+receive|future\s+outreach)\b/i.test(text);
+}
+
+/**
+ * Builds a clean, CASL-aligned B2B sender identification and opt-out footer.
+ * Never leaks local agency details into external client emails.
+ */
+function buildCaslOptOutFooter_(config, spreadsheet) {
+  const cfg = config || {};
+  const customFooter = getOptionalClientSenderProp_(
+    ['OPT_OUT_FOOTER_TEXT', 'CASL_FOOTER_TEXT'],
+    cfg,
+    spreadsheet
+  );
+  if (customFooter) {
+    return customFooter;
+  }
+
+  const senderName = String(cfg.senderName || '').trim();
+  const orgName = String(cfg.senderCompany || cfg.clientName || '').trim();
+  const contactEmail = String(cfg.replyToEmail || cfg.senderEmail || '').trim();
+  const mailingAddress = getOptionalClientSenderProp_(
+    ['CASL_MAILING_ADDRESS', 'COMPANY_MAILING_ADDRESS', 'MAILING_ADDRESS'],
+    cfg,
+    spreadsheet
+  );
+
+  const idParts = [];
+  if (senderName && orgName && senderName.toLowerCase() !== orgName.toLowerCase()) {
+    idParts.push(senderName + ', ' + orgName);
+  } else if (orgName) {
+    idParts.push(orgName);
+  } else if (senderName) {
+    idParts.push(senderName);
+  }
+  if (mailingAddress) {
+    idParts.push(mailingAddress);
+  }
+  if (contactEmail && contactEmail.indexOf('@') > 0) {
+    idParts.push(contactEmail);
+  }
+
+  const lines = ['--'];
+  if (idParts.length > 0) {
+    lines.push(idParts.join(' | '));
+  }
+  lines.push('If this isn\'t relevant or you\'d prefer not to receive future emails from us, simply reply "Unsubscribe" or "Opt out" and we will remove your address promptly.');
+
+  return lines.join('\n');
+}
+
+/**
+ * Appends the CASL / B2B Opt-Out Footer to outbound copy if enabled and not already present.
+ */
+function appendCaslOptOutFooter_(bodyText, config, spreadsheet) {
+  const rawBody = String(bodyText || '').replace(/\s+$/, '');
+  if (!rawBody) return rawBody;
+  if (!isClientOptOutFooterEnabled_(config, spreadsheet)) return rawBody;
+  if (hasExistingOptOutNotice_(rawBody)) return rawBody;
+
+  const footer = buildCaslOptOutFooter_(config, spreadsheet);
+  if (!footer) return rawBody;
+  return rawBody + '\n\n' + footer;
+}
+
+/**
  * Core outreach processor.
  * Enforces Active Campaign scoping, runtime suppression checks, duplicate-send protection,
- * daily send limits, and pacing between dispatches.
+ * daily send limits, CASL/opt-out footer compliance, and pacing between dispatches.
  *
  * @param {boolean} forceDrafts When true, routes all approved prospects to Drafts Only mode
  */
@@ -539,8 +670,19 @@ function processOutreachQueue_(forceDrafts) {
       Utilities.sleep(250);
     }
 
+    const compliantBody = appendCaslOptOutFooter_(item.body, campaignConfig, spreadsheet);
+    const dispatchItem = {
+      rowIndex: item.rowIndex,
+      campaignId: item.campaignId,
+      email: item.email,
+      subject: item.subject,
+      body: compliantBody,
+      leadName: item.leadName,
+      companyName: item.companyName
+    };
+
     try {
-      const dispatchResult = dispatchOutreach_(item, rawProvider, campaignConfig, spreadsheet, msTokenCache) || {};
+      const dispatchResult = dispatchOutreach_(dispatchItem, rawProvider, campaignConfig, spreadsheet, msTokenCache) || {};
 
       let finalStatus = 'Sent';
       if (isMicrosoft365Provider_(lowerProv)) {
