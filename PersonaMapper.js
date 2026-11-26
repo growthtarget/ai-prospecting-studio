@@ -10,12 +10,14 @@
  *    using strict Client-Scoped API keys (zero local fallback for clients).
  * 2. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
  *    Custom HTTPS keys strictly per Client / Owner (validated pre-flight before AI calls).
- * 3. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
+ * 3. Manual Queue Verification: Supports verifying selected visible rows in
+ *    "Prospect Review Queue" on demand and syncing results to "Persona Leads".
+ * 4. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
  *    opt-out emails, and role-based accounts before queuing.
- * 4. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 cols).
- * 5. Grounding Evidence Logging: Persists verified decision-maker signals into Tab 10 "Research Evidence" (9 cols).
- * 6. API Usage & Cost Tracking: Logs LLM token costs and email verifier credit usage to "API_Usage_Log".
- * 7. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
+ * 5. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 cols).
+ * 6. Grounding Evidence Logging: Persists verified decision-maker signals into Tab 10 "Research Evidence" (9 cols).
+ * 7. API Usage & Cost Tracking: Logs LLM token costs and email verifier credit usage to "API_Usage_Log".
+ * 8. High-Contrast Headers: Sets clean Dark Navy font (#174ea6) on Light Blue (#e8f0fe).
  * ============================================================================
  */
 
@@ -54,6 +56,467 @@ function validatePersonaPreRunGuardrails_(spreadsheet, campaignId, settings) {
         throw new Error(
           'Custom HTTPS email verifier for "' + clientName + '" requires a valid https:// Email Verification Endpoint before running Persona Mapper.'
         );
+      }
+    }
+  }
+}
+
+/**
+ * Manual Queue Email Verifier:
+ * Verifies selected visible rows in "Prospect Review Queue" outside the AI agent workflow
+ * using the campaign's configured verifier (ZeroBounce, MillionVerifier, NeverBounce, Custom HTTPS),
+ * syncs results to "Persona Leads", auto-suppresses invalid emails, and warns if an invalid
+ * email already has a staged draft in Gmail / Microsoft 365.
+ */
+function verifySelectedProspectEmails() {
+  let ui = null;
+  try { ui = SpreadsheetApp.getUi(); } catch (e) {}
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  if (!ss) return;
+
+  const qSheet = ss.getActiveSheet ? ss.getActiveSheet() : null;
+  if (!qSheet || qSheet.getName() !== PERSONA_MAPPER_SHEETS_.queue) {
+    const msg = 'Please switch to the "Prospect Review Queue" tab and select one or more visible prospect rows before running email verification.';
+    if (ui) ui.alert(msg);
+    else Logger.log(msg);
+    return;
+  }
+
+  const lastRow = qSheet.getLastRow();
+  const lastCol = qSheet.getLastColumn();
+  if (lastRow <= 1 || lastCol < 1) {
+    const emptyMsg = 'No prospect rows found in Prospect Review Queue.';
+    if (ui) ui.alert(emptyMsg);
+    else Logger.log(emptyMsg);
+    return;
+  }
+
+  let ranges = [];
+  try {
+    const rangeList = qSheet.getActiveRangeList ? qSheet.getActiveRangeList() : null;
+    if (rangeList) ranges = rangeList.getRanges() || [];
+  } catch (e) {}
+  if (!ranges || ranges.length === 0) {
+    try {
+      const single = qSheet.getActiveRange ? qSheet.getActiveRange() : null;
+      if (single) ranges = [single];
+    } catch (e) {}
+  }
+  if (!ranges || ranges.length === 0) {
+    try {
+      const activeCell = qSheet.getActiveCell ? qSheet.getActiveCell() : null;
+      if (activeCell) ranges = [activeCell];
+    } catch (e) {}
+  }
+
+  const allRows = qSheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const rowSet = {};
+
+  for (let i = 0; i < ranges.length; i++) {
+    const rng = ranges[i];
+    if (!rng) continue;
+    const startR = Math.max(2, rng.getRow());
+    const endR = Math.min(lastRow, rng.getRow() + rng.getNumRows() - 1);
+    for (let r = startR; r <= endR; r++) {
+      if (rowSet[r]) continue;
+      let isHidden = false;
+      try {
+        if ((typeof qSheet.isRowHiddenByFilter === 'function' && qSheet.isRowHiddenByFilter(r)) ||
+            (typeof qSheet.isRowHiddenByUser === 'function' && qSheet.isRowHiddenByUser(r))) {
+          isHidden = true;
+        }
+      } catch (e) {}
+      if (isHidden) continue;
+
+      const rowPreview = (allRows[r - 2] || []).slice(0, Math.min(lastCol, 18));
+      const hasData = rowPreview.some(function(cell) {
+        return cell !== '' && cell !== null && cell !== undefined;
+      });
+      if (hasData) rowSet[r] = true;
+    }
+  }
+
+  const targetRows = Object.keys(rowSet).map(Number).sort(function(a, b) { return a - b; });
+  if (targetRows.length === 0) {
+    const selMsg = 'Please select one or more visible prospect rows (row 2 or below) in Prospect Review Queue.';
+    if (ui) ui.alert(selMsg);
+    else Logger.log(selMsg);
+    return;
+  }
+
+  const headers = qSheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
+  const normHeaders = headers.map(function(h) {
+    return String(h || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  });
+
+  function colIdx(candidates) {
+    for (let i = 0; i < candidates.length; i++) {
+      const idx = headers.indexOf(candidates[i]);
+      if (idx >= 0) return idx;
+    }
+    for (let i = 0; i < candidates.length; i++) {
+      const normTarget = String(candidates[i]).toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const nIdx = normHeaders.indexOf(normTarget);
+      if (nIdx >= 0) return nIdx;
+    }
+    return -1;
+  }
+
+  const campCol = colIdx(['Campaign ID']);
+  const personaIdCol = colIdx(['Persona ID']);
+  const nameCol = colIdx(['Name', 'Persona Name']);
+  const emailCol = colIdx(['Business Email', 'Email']);
+  const domainCol = colIdx(['Email Domain']);
+  const reviewCol = colIdx(['Review Status']);
+  const approvalCol = colIdx(['Human Approval Status']);
+  const sendStatusCol = colIdx(['Send Status']);
+  const sendErrorCol = colIdx(['Send Error', 'Last Error']);
+  const verifStatusCol = colIdx(['Email Verification Status']);
+  const verifDateCol = colIdx(['Email Verification Date']);
+  const verifProvCol = colIdx(['Email Verification Provider']);
+  const verifNotesCol = colIdx(['Email Verification Notes']);
+  const queueStatusCol = colIdx(['Queue Status']);
+  const complianceCol = colIdx(['Compliance Status']);
+  const suppressionCol = colIdx(['Suppression Check']);
+
+  if (emailCol < 0 || verifStatusCol < 0) {
+    const schemaMsg = 'Required columns ("Business Email" / "Email Verification Status") not found in Prospect Review Queue.';
+    if (ui) ui.alert(schemaMsg);
+    else Logger.log(schemaMsg);
+    return;
+  }
+
+  const fallbackActiveCid = typeof getStudioActiveCampaignId_ === 'function' ? getStudioActiveCampaignId_() : '';
+  const settingsCache = {};
+  const uniqueCampaignIds = [];
+
+  targetRows.forEach(function(rNum) {
+    const row = allRows[rNum - 2] || [];
+    const cid = (campCol >= 0 ? String(row[campCol] || '').trim() : '') || fallbackActiveCid || 'DEFAULT';
+    if (!settingsCache[cid]) {
+      settingsCache[cid] = getPersonaMapperSettings_(ss, cid);
+      uniqueCampaignIds.push(cid);
+    }
+  });
+
+  // Pre-flight guardrails before making any API call
+  try {
+    uniqueCampaignIds.forEach(function(cid) {
+      const st = settingsCache[cid];
+      const clientName = st['Department'] || 'Growth Target';
+      const prov = String(st['Email Verification Provider'] || 'ZeroBounce').trim();
+
+      if (prov.toLowerCase() === 'none') {
+        throw new Error(
+          'Campaign "' + cid + '" currently has Email Verification Provider set to "None".\n\n' +
+          'Open the Campaign Control Panel (Section 5), select ZeroBounce (or your verifier), click "Save Campaign Settings", and try again.'
+        );
+      }
+
+      validatePersonaPreRunGuardrails_(ss, cid, st);
+
+      const resolvedKey = resolveVerifierApiKey_(ss, st);
+      if (!resolvedKey) {
+        const isLocal = typeof isLocalAgencyClient_ === 'function' ? isLocalAgencyClient_(clientName) : true;
+        const propHint = isLocal ? 'VERIFIER_API_KEY (or ZEROBOUNCE_API_KEY)' : ('CLIENT_' + clientName.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_VERIFIER_API_KEY');
+        throw new Error(
+          'No ' + prov + ' API key found for "' + clientName + '".\n\n' +
+          'Add ' + propHint + ' in Extensions > Apps Script > Project Settings > Script Properties.'
+        );
+      }
+    });
+  } catch (preErr) {
+    if (ui) ui.alert('Verification Pre-Check Blocked', preErr.message, ui.ButtonSet.OK);
+    else Logger.log('Verification Pre-Check Blocked: ' + preErr.message);
+    return;
+  }
+
+  const primarySettings = settingsCache[uniqueCampaignIds[0]] || {};
+  const primaryProvider = String(primarySettings['Email Verification Provider'] || 'ZeroBounce').trim();
+  const primaryClient = String(primarySettings['Department'] || 'Growth Target').trim();
+
+  if (ui) {
+    const confirm = ui.alert(
+      'Verify Selected Prospect Emails',
+      'Verify ' + targetRows.length + ' selected visible row(s) using ' + primaryProvider + '?\n' +
+      '• Client / Owner: ' + primaryClient + '\n' +
+      '• Campaign(s): ' + uniqueCampaignIds.join(', ') + '\n\n' +
+      'This will use 1 verification credit per valid-syntax email and update both Prospect Review Queue & Persona Leads.',
+      ui.ButtonSet.YES_NO
+    );
+    if (confirm !== ui.Button.YES) return;
+  }
+
+  const todayIso = new Date().toISOString().split('T')[0];
+  let validCount = 0;
+  let softWarnCount = 0;
+  let invalidCount = 0;
+  let errorCount = 0;
+  const invalidEmailsToSuppress = [];
+  const staleDraftWarnings = [];
+  const personaSyncUpdates = [];
+  const checkedCampaignClients = {};
+
+  targetRows.forEach(function(rowNum) {
+    const row = allRows[rowNum - 2] || [];
+    const cid = (campCol >= 0 ? String(row[campCol] || '').trim() : '') || fallbackActiveCid || 'DEFAULT';
+    const settings = settingsCache[cid];
+    const clientName = settings['Department'] || 'Growth Target';
+    checkedCampaignClients[cid] = clientName;
+
+    const rawEmail = String(row[emailCol] || '').trim().toLowerCase();
+    const personaId = personaIdCol >= 0 ? String(row[personaIdCol] || '').trim() : '';
+    const leadName = nameCol >= 0 ? String(row[nameCol] || '').trim() : '';
+    const currSendStatus = sendStatusCol >= 0 ? String(row[sendStatusCol] || '').trim() : '';
+    const currSendLow = currSendStatus.toLowerCase();
+    const hadStagedDraft = (currSendLow === 'draft created' || currSendLow === 'draft created in gmail');
+    const isAlreadyDispatched = (currSendLow === 'sent' || currSendLow === 'pushed to sequencer');
+
+    const atIdx = rawEmail.lastIndexOf('@');
+    const domain = atIdx > 0 ? rawEmail.slice(atIdx + 1) : '';
+    const isValidSyntax = Boolean(domain && /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(rawEmail));
+    const isPersonal = Boolean(domain && isPersonalEmailDomain_(domain));
+
+    let normStatus = 'unverified';
+    let providerUsed = String(settings['Email Verification Provider'] || 'ZeroBounce').trim();
+    let notesText = '';
+    let isApiError = false;
+
+    if (!rawEmail || !isValidSyntax || isPersonal) {
+      normStatus = 'invalid';
+      notesText = !rawEmail
+        ? 'Missing Business Email.'
+        : (isPersonal ? 'Personal domain rejected; business email required.' : 'Email syntax invalid.');
+    } else {
+      const verif = callConfiguredEmailVerifier_(rawEmail, settings, ss);
+      providerUsed = verif.provider || providerUsed;
+      normStatus = normalizeEmailVerificationStatus_(verif.configured ? verif.status : 'unverified');
+      notesText = verif.notes || '';
+
+      const nLow = notesText.toLowerCase();
+      if (!verif.configured || nLow.indexOf('verification request error') >= 0 || nLow.indexOf(' status ') >= 0 || nLow.indexOf(' http ') >= 0) {
+        if (normStatus === 'unverified') {
+          isApiError = true;
+        }
+      }
+    }
+
+    if (domainCol >= 0 && domain) {
+      qSheet.getRange(rowNum, domainCol + 1).setValue(domain);
+    }
+    qSheet.getRange(rowNum, verifStatusCol + 1).setValue(normStatus);
+    if (verifDateCol >= 0) qSheet.getRange(rowNum, verifDateCol + 1).setValue(todayIso);
+    if (verifProvCol >= 0 && providerUsed) qSheet.getRange(rowNum, verifProvCol + 1).setValue(providerUsed);
+
+    if (isApiError) {
+      errorCount++;
+      if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(notesText);
+    } else if (normStatus === 'invalid') {
+      invalidCount++;
+      if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(notesText);
+      if (queueStatusCol >= 0) qSheet.getRange(rowNum, queueStatusCol + 1).setValue('Email Verification Failed');
+
+      const isPilot = cid.toUpperCase().indexOf('PILOT-') === 0;
+      if (isValidSyntax && !isPersonal && !isPilot) {
+        invalidEmailsToSuppress.push(rawEmail);
+        if (complianceCol >= 0) qSheet.getRange(rowNum, complianceCol + 1).setValue('Failed - Suppressed');
+        if (suppressionCol >= 0) qSheet.getRange(rowNum, suppressionCol + 1).setValue('Blocked: Email in Lists & Settings');
+      } else {
+        if (complianceCol >= 0) qSheet.getRange(rowNum, complianceCol + 1).setValue('Failed - Invalid Syntax');
+        if (suppressionCol >= 0) qSheet.getRange(rowNum, suppressionCol + 1).setValue('Blocked: Bad Email Syntax');
+      }
+
+      if (!isAlreadyDispatched) {
+        if (reviewCol >= 0) qSheet.getRange(rowNum, reviewCol + 1).setValue('Rejected');
+        if (approvalCol >= 0) qSheet.getRange(rowNum, approvalCol + 1).setValue('Rejected (Suppression Guard)');
+        if (sendStatusCol >= 0) qSheet.getRange(rowNum, sendStatusCol + 1).setValue('Suppressed - Not Sent');
+      }
+
+      if (sendErrorCol >= 0) {
+        const errNote = 'Blocked: ' + providerUsed + ' reported status is invalid' +
+          (hadStagedDraft ? ' — DELETE staged draft from mailbox!' : '');
+        qSheet.getRange(rowNum, sendErrorCol + 1).setValue(errNote);
+      }
+
+      if (hadStagedDraft) {
+        staleDraftWarnings.push('• Row ' + rowNum + ' (' + rawEmail + ')');
+      }
+    } else if (normStatus === 'catch-all' || normStatus === 'risky') {
+      softWarnCount++;
+      const warnNote = 'Soft Warning: Server status is ' + normStatus + (notesText ? (' (' + notesText + ')') : '') + '.';
+      if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(warnNote);
+      if (queueStatusCol >= 0) {
+        const qCurr = String(row[queueStatusCol] || '').trim();
+        if (!qCurr || qCurr === 'Email Verification Failed' || qCurr === 'Email Research Required') {
+          qSheet.getRange(rowNum, queueStatusCol + 1).setValue('Ready for Review');
+        }
+      }
+      notesText = warnNote;
+    } else {
+      validCount++;
+      if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(notesText || (providerUsed + ': valid'));
+      if (queueStatusCol >= 0) {
+        const qCurr = String(row[queueStatusCol] || '').trim();
+        if (!qCurr || qCurr === 'Email Verification Failed' || qCurr === 'Email Research Required') {
+          qSheet.getRange(rowNum, queueStatusCol + 1).setValue('Ready for Review');
+        }
+      }
+    }
+
+    personaSyncUpdates.push({
+      campaignId: cid,
+      personaId: personaId,
+      email: rawEmail,
+      name: leadName,
+      status: normStatus,
+      date: todayIso,
+      provider: providerUsed,
+      notes: notesText,
+      rejectPersona: (!isApiError && normStatus === 'invalid')
+    });
+  });
+
+  // Auto-suppress valid-syntax invalid emails into Lists & Settings
+  if (invalidEmailsToSuppress.length > 0) {
+    if (typeof appendSuppressedEmailsToLists_ === 'function') {
+      appendSuppressedEmailsToLists_(ss, invalidEmailsToSuppress, 'Suppression - Email', 'invalid verified email(s)');
+    } else {
+      suppressInvalidVerifiedEmails_(ss, invalidEmailsToSuppress);
+    }
+  }
+
+  // Sync verification statuses back to "Persona Leads"
+  syncVerifiedEmailToPersonaLeads_(ss, personaSyncUpdates);
+
+  // Trigger low-balance check per verified client/campaign
+  Object.keys(checkedCampaignClients).forEach(function(cid) {
+    if (typeof checkVerifierBalanceAndAlert_ === 'function') {
+      checkVerifierBalanceAndAlert_(cid, checkedCampaignClients[cid]);
+    }
+  });
+
+  if (typeof updateDashboardForActiveCampaign === 'function' && typeof getStudioActiveCampaignId_ === 'function') {
+    try {
+      updateDashboardForActiveCampaign(getStudioActiveCampaignId_());
+    } catch (dashErr) {
+      Logger.log('Dashboard refresh notice after manual verification: ' + dashErr.message);
+    }
+  }
+
+  SpreadsheetApp.flush();
+
+  let summary = 'Verified ' + targetRows.length + ' selected prospect email(s) via ' + primaryProvider + ':\n\n' +
+    '• Valid: ' + validCount + '\n' +
+    '• Soft Warning (catch-all / risky): ' + softWarnCount + '\n' +
+    '• Invalid (Blocked & Suppressed): ' + invalidCount + '\n';
+  if (errorCount > 0) {
+    summary += '• Request Errors (Unverified): ' + errorCount + ' (Check Email Verification Notes)\n';
+  }
+  if (staleDraftWarnings.length > 0) {
+    summary += '\n⚠️ ACTION REQUIRED — Existing Drafts Found:\n' +
+      'The following invalid email(s) already had a draft created in your mailbox. Please delete/discard them in Gmail / Microsoft 365 Drafts so they are not sent:\n' +
+      staleDraftWarnings.join('\n');
+  }
+
+  if (ui) ui.alert('Manual Email Verification Complete', summary, ui.ButtonSet.OK);
+  else Logger.log(summary);
+}
+
+/**
+ * Fallback suppression helper when appending invalid verified emails into Lists & Settings.
+ */
+function suppressInvalidVerifiedEmails_(ss, emails) {
+  if (!ss || !Array.isArray(emails) || emails.length === 0) return 0;
+  let sheet = ss.getSheetByName('Lists & Settings');
+  if (!sheet) {
+    sheet = ss.insertSheet('Lists & Settings');
+    sheet.appendRow(['List name', 'Value', 'Active status']);
+  }
+  const existing = {};
+  if (sheet.getLastRow() > 1) {
+    const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+    for (let i = 0; i < data.length; i++) {
+      const listName = String(data[i][0] || '').trim().toLowerCase();
+      const val = String(data[i][1] || '').trim().toLowerCase();
+      if (val && (listName.indexOf('suppression') >= 0 || listName.indexOf('opt-out') >= 0 || listName.indexOf('blacklist') >= 0)) {
+        existing[val] = true;
+      }
+    }
+  }
+  const toAdd = [];
+  emails.forEach(function(em) {
+    const clean = String(em || '').trim().toLowerCase();
+    if (clean && !existing[clean]) {
+      existing[clean] = true;
+      toAdd.push(['Suppression - Email', clean, 'Active']);
+    }
+  });
+  if (toAdd.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, toAdd.length, 3).setValues(toAdd);
+    if (typeof sortListsAndSettingsTab_ === 'function') {
+      try { sortListsAndSettingsTab_(ss); } catch (e) {}
+    }
+  }
+  return toAdd.length;
+}
+
+/**
+ * Syncs manual email verification results back into matching "Persona Leads" rows.
+ */
+function syncVerifiedEmailToPersonaLeads_(ss, updates) {
+  if (!ss || !Array.isArray(updates) || updates.length === 0) return;
+  const pSheet = ss.getSheetByName(PERSONA_MAPPER_SHEETS_.personas);
+  if (!pSheet || pSheet.getLastRow() < 2) return;
+
+  const lastCol = pSheet.getLastColumn();
+  const headers = pSheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
+    return String(h || '').trim();
+  });
+
+  const campCol = headers.indexOf('Campaign ID');
+  const personaIdCol = headers.indexOf('Persona ID');
+  const nameCol = headers.indexOf('Name');
+  const emailCol = headers.indexOf('Business Email');
+  const reviewCol = headers.indexOf('Review Status');
+  const verifStatusCol = headers.indexOf('Email Verification Status');
+  const verifDateCol = headers.indexOf('Email Verification Date');
+  const verifProvCol = headers.indexOf('Email Verification Provider');
+  const verifNotesCol = headers.indexOf('Email Verification Notes');
+
+  if (campCol < 0 || verifStatusCol < 0) return;
+
+  const rows = pSheet.getRange(2, 1, pSheet.getLastRow() - 1, lastCol).getValues();
+  for (let u = 0; u < updates.length; u++) {
+    const upd = updates[u];
+    const targetCid = String(upd.campaignId || '').trim().toLowerCase();
+    const targetPid = String(upd.personaId || '').trim().toLowerCase();
+    const targetEmail = String(upd.email || '').trim().toLowerCase();
+    const targetName = String(upd.name || '').trim().toLowerCase();
+
+    for (let r = 0; r < rows.length; r++) {
+      const rCid = String(rows[r][campCol] || '').trim().toLowerCase();
+      if (rCid !== targetCid) continue;
+
+      const rPid = personaIdCol >= 0 ? String(rows[r][personaIdCol] || '').trim().toLowerCase() : '';
+      const rEmail = emailCol >= 0 ? String(rows[r][emailCol] || '').trim().toLowerCase() : '';
+      const rName = nameCol >= 0 ? String(rows[r][nameCol] || '').trim().toLowerCase() : '';
+
+      const matched = (targetPid && rPid && rPid === targetPid) ||
+        (targetEmail && rEmail && rEmail === targetEmail) ||
+        (targetName && rName && rName === targetName);
+
+      if (!matched) continue;
+
+      const rowNum = r + 2;
+      pSheet.getRange(rowNum, verifStatusCol + 1).setValue(upd.status);
+      if (verifDateCol >= 0) pSheet.getRange(rowNum, verifDateCol + 1).setValue(upd.date);
+      if (verifProvCol >= 0 && upd.provider) pSheet.getRange(rowNum, verifProvCol + 1).setValue(upd.provider);
+      if (verifNotesCol >= 0) pSheet.getRange(rowNum, verifNotesCol + 1).setValue(upd.notes);
+      if (upd.rejectPersona && reviewCol >= 0) {
+        pSheet.getRange(rowNum, reviewCol + 1).setValue('Rejected');
       }
     }
   }

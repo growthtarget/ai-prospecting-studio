@@ -713,7 +713,7 @@ function parseSafeCampaignNumeric_(val) {
 }
 
 /**
- * Master onOpen Trigger: Clean menu with isolated audit & deliverability controls.
+ * Master onOpen Trigger: Clean menu with isolated audit, verification & deliverability controls.
  * Note: Outreach functions live in EmailSender.js to avoid global namespace collisions.
  */
 function onOpen() {
@@ -732,6 +732,7 @@ function onOpen() {
     .addItem('👤 2. Run Persona Mapper', 'runPersonaMapperForSelectedCampaign')
     .addSeparator()
     .addItem('📋 Go to Prospect Review Queue', 'navigateToReviewQueueSheet')
+    .addItem('🔎 Verify Selected Prospect Emails', 'verifySelectedProspectEmails')
     .addItem('✅ Approve Selected Prospect', 'approveSelectedProspect')
     .addItem('✏️ Mark Selected: Needs Editing', 'markSelectedProspectNeedsEditing')
     .addItem('❌ Reject Selected Prospect', 'rejectSelectedProspect')
