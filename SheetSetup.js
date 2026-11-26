@@ -25,7 +25,7 @@ function setupAllSheetsAndDropdowns() {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
   if (!ss) return;
 
-  // 1. Setup Dashboard if brand new (non-destructive if already populated)
+  // 1. Setup Dashboard if brand new (or upgrade standard KPI/Rollup labels non-destructively)
   setupDashboardTabIfEmpty_(ss);
 
   // 2. Setup Lists & Settings first so active "Client - Account" rows are seeded, sorted & ready
@@ -98,6 +98,18 @@ function setupAllSheetsAndDropdowns() {
   }
   if (typeof setupEmailDeliverabilityDashboardTab_ === 'function') {
     setupEmailDeliverabilityDashboardTab_(ss);
+  }
+
+  // Refresh live Dashboard KPIs (including Email Verifier row) if an active campaign exists
+  const dashSheet = ss.getSheetByName('Dashboard');
+  const activeIdInB2 = dashSheet ? String(dashSheet.getRange('B2').getValue() || '').trim() : '';
+  if (activeIdInB2 && activeIdInB2 !== 'No Active Campaign' && activeIdInB2 !== 'Select Campaign' &&
+      typeof updateDashboardForActiveCampaign === 'function') {
+    try {
+      updateDashboardForActiveCampaign(activeIdInB2);
+    } catch (dashErr) {
+      Logger.log('Dashboard refresh notice during setup: ' + dashErr.message);
+    }
   }
 
   SpreadsheetApp.flush();
@@ -426,9 +438,61 @@ function migrateLegacyClientNames_(ss) {
   }
 }
 
+/**
+ * Non-destructively updates legacy "Gmail" KPI/Rollup labels to provider-neutral
+ * "Outreach Drafts Created" and seeds Row 14 ("Email Verifier Configured") if blank.
+ */
+function syncDashboardStandardLabels_(sheet) {
+  if (!sheet || sheet.getLastRow() < 4) return;
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
+  const maxKpiScan = Math.min(sheet.getLastRow(), 15);
+  const kpiLabels = sheet.getRange(4, 1, maxKpiScan - 3, 1).getValues();
+  let hasVerifierRow = false;
+
+  for (let i = 0; i < kpiLabels.length; i++) {
+    const rowNum = 4 + i;
+    const rawLabel = String(kpiLabels[i][0] || '').trim();
+    const normLabel = rawLabel.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+    if (rawLabel === 'Gmail Outreach Drafts Created' || normLabel === 'GMAILOUTREACHDRAFTSCREATED') {
+      sheet.getRange(rowNum, 1).setValue('Outreach Drafts Created');
+      const currStatus = String(sheet.getRange(rowNum, 3).getValue() || '').trim();
+      if (currStatus === 'Ready in Gmail Drafts') {
+        sheet.getRange(rowNum, 3).setValue('Outreach Ready');
+      }
+    }
+    if (normLabel.indexOf('EMAILVERIFIER') >= 0 || normLabel.indexOf('VERIFIERCONFIGURED') >= 0) {
+      hasVerifierRow = true;
+    }
+  }
+
+  if (!hasVerifierRow) {
+    const a14 = String(sheet.getRange(14, 1).getValue() || '').trim();
+    if (!a14) {
+      sheet.getRange('A13:D13').copyTo(
+        sheet.getRange('A14:D14'),
+        SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+        false
+      );
+      sheet.getRange(14, 1, 1, 4).setValues([['Email Verifier Configured', 'ZeroBounce', 'Standby', now]]);
+    }
+  }
+
+  if (sheet.getLastRow() >= 17) {
+    const a17 = String(sheet.getRange('A17').getValue() || '').trim();
+    const f17 = String(sheet.getRange('F17').getValue() || '').trim();
+    if (a17 === 'Campaign ID' && f17 === 'Gmail Drafts') {
+      sheet.getRange('F17').setValue('Outreach Drafts Created');
+    }
+  }
+}
+
 function setupDashboardTabIfEmpty_(ss) {
   const sheet = getOrCreateSheet(ss, 'Dashboard');
-  if (sheet.getLastRow() > 0) return;
+  if (sheet.getLastRow() > 0) {
+    syncDashboardStandardLabels_(sheet);
+    return;
+  }
 
   const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
   sheet.getRange('A1').setValue('🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD');
@@ -447,15 +511,16 @@ function setupDashboardTabIfEmpty_(ss) {
     ['Company Discovery Limit', '0 Companies', 'Standby', now],
     ['Companies Discovered & Qualified', 0, 'Standby', now],
     ['Persona Leads Identified', 0, 'Standby', now],
-    ['Gmail Outreach Drafts Created', 0, 'Standby', now],
+    ['Outreach Drafts Created', 0, 'Standby', now],
     ['Suppressed / Blocked Records', 0, 'Standby', now],
     ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', 0, now],
-    ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now]
+    ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now],
+    ['Email Verifier Configured', 'ZeroBounce', 'Standby', now]
   ];
   sheet.getRange(4, 1, kpis.length, 4).setValues(kpis);
   sheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
   sheet.getRange(17, 1, 1, 7)
-    .setValues([['Campaign ID', 'Campaign Name', 'Department', 'Status', 'Companies Found', 'Gmail Drafts', 'Last Run']])
+    .setValues([['Campaign ID', 'Campaign Name', 'Department', 'Status', 'Companies Found', 'Outreach Drafts Created', 'Last Run']])
     .setFontWeight('bold').setBackground('#dadce0').setFontColor('#202124');
 }
 

@@ -11,7 +11,7 @@
  *      plus EmailEvents & Email Deliverability.
  *    - Updates "Campaign Configuration" strictly preserving the locked 38 parameters.
  *    - Generates 39-column row in "Persona Mapper Settings" for PILOT-CMP-001.
- *    - Restores and populates "Dashboard" with the complete 10-row KPI table.
+ *    - Restores and populates "Dashboard" with the complete 11-row KPI table.
  *    - Populates "Campaigns" (28 master cols), "Company Database" (Col J Campaign ID),
  *      "Company Intelligence" (25 cols), "Persona Leads" (29 cols),
  *      "Research Evidence" (9 canonical cols), "Prospect Review Queue" (45 cols),
@@ -231,7 +231,7 @@ function validateRequiredTabs(ss) {
 }
 
 /**
- * Seeds 8 clean sandbox events in "EmailEvents" for PILOT-CMP-001 ("Pilot Acme")
+ * Seeds 11 clean sandbox events in "EmailEvents" for PILOT-CMP-001 ("Pilot Acme")
  * so all Email Deliverability tiles, rates, SMTP error charts & daily volume charts can be verified.
  */
 function writePilotDeliverabilityEvents_(ss, config) {
@@ -1055,6 +1055,18 @@ function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCoun
 
   const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
 
+  let verifierStatus = 'Key Not Configured';
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const verifKeyInfo = resolveClientScopedSecret_(
+      ['ZEROBOUNCE_API_KEY', 'VERIFIER_API_KEY', 'EMAIL_VERIFICATION_API_KEY'],
+      { campaignId: config.CAMPAIGN_ID, clientName: config.DEPARTMENT },
+      { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: ss }
+    );
+    verifierStatus = verifKeyInfo.key
+      ? 'Connected'
+      : ('Missing: ' + verifKeyInfo.expectedProperty);
+  }
+
   sheet.getRange('A1').setValue('🎯 AI PROSPECTING STUDIO – MASTER DASHBOARD');
   sheet.getRange('B1').setValue('Campaign');
   sheet.getRange('C1').setValue(config.CAMPAIGN_NAME);
@@ -1074,14 +1086,22 @@ function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCoun
     ['Company Discovery Limit', config.COMPANY_LIMIT + ' Companies', 'Enforced Limit', now],
     ['Companies Discovered & Qualified', companiesCount, companiesCount > 0 ? 'Discovery Complete' : 'Pending Discovery', now],
     ['Persona Leads Identified', leadsCount, leadsCount > 0 ? 'Mapping Complete' : 'Pending Mapping', now],
-    ['Gmail Outreach Drafts Created', draftsCount, draftsCount > 0 ? 'Ready in Gmail Drafts' : 'No Drafts Yet', now],
+    ['Outreach Drafts Created', draftsCount, draftsCount > 0 ? 'Outreach Ready' : 'No Drafts Yet', now],
     ['Suppressed / Blocked Records', blockedCount, 'Suppression Active', now],
     ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', draftsCount, now],
-    ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now]
+    ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now],
+    ['Email Verifier Configured', 'ZeroBounce', verifierStatus, now]
   ];
+  if (!String(sheet.getRange('A14').getValue() || '').trim()) {
+    sheet.getRange('A13:D13').copyTo(
+      sheet.getRange('A14:D14'),
+      SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+      false
+    );
+  }
   sheet.getRange(4, 1, kpiData.length, 4).setValues(kpiData);
 
-  sheet.getRange('A14:D15').clearContent();
+  sheet.getRange('A15:D15').clearContent();
 
   sheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
 
@@ -1091,7 +1111,7 @@ function updatePilotDashboard(ss, config, companiesCount, leadsCount, draftsCoun
     'Department',
     'Status',
     'Companies Found',
-    'Gmail Drafts',
+    'Outreach Drafts Created',
     'Last Run'
   ];
   sheet.getRange(17, 1, 1, 7)
@@ -1677,12 +1697,21 @@ function cleanupPilotDataFromRealSheets() {
         ['Company Discovery Limit', '0 Companies', 'Standby', now],
         ['Companies Discovered & Qualified', 0, 'Standby', now],
         ['Persona Leads Identified', 0, 'Standby', now],
-        ['Gmail Outreach Drafts Created', 0, 'Standby', now],
+        ['Outreach Drafts Created', 0, 'Standby', now],
         ['Suppressed / Blocked Records', 0, 'Standby', now],
         ['Email Dispatch Channel', 'Workspace Gmail (Drafts Only)', 0, now],
-        ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now]
+        ['Primary AI Model Configured', 'Gemini gemini-3.8-flash + Search Grounding', 'Connected', now],
+        ['Email Verifier Configured', 'ZeroBounce', 'Standby', now]
       ];
+      if (!String(dashSheet.getRange('A14').getValue() || '').trim()) {
+        dashSheet.getRange('A13:D13').copyTo(
+          dashSheet.getRange('A14:D14'),
+          SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+          false
+        );
+      }
       dashSheet.getRange(4, 1, standbyData.length, 4).setValues(standbyData);
+      dashSheet.getRange('A15:D15').clearContent();
 
       dashSheet.getRange('A16').setValue('Campaign Performance Rollup').setFontWeight('bold').setFontSize(12);
       const rollupHeaders = [
@@ -1691,7 +1720,7 @@ function cleanupPilotDataFromRealSheets() {
         'Department',
         'Status',
         'Companies Found',
-        'Gmail Drafts',
+        'Outreach Drafts Created',
         'Last Run'
       ];
       dashSheet.getRange(17, 1, 1, 7)

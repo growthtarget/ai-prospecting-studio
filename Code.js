@@ -1169,6 +1169,7 @@ function getSidebarInitialData() {
     if (activeConfigDict['CAMPAIGNNAME']) c.name = String(activeConfigDict['CAMPAIGNNAME']);
     if (activeConfigDict['DEPARTMENT']) c.department = String(activeConfigDict['DEPARTMENT']);
     if (activeConfigDict['MAXCOMPANIES']) c.limit = Number(activeConfigDict['MAXCOMPANIES']) || 5;
+    if (activeConfigDict['EMAILVERIFICATIONPROVIDER']) c.emailVerifier = String(activeConfigDict['EMAILVERIFICATIONPROVIDER']);
     if (activeConfigDict['EMAILSENDERPROVIDER']) c.emailSenderProvider = String(activeConfigDict['EMAILSENDERPROVIDER']);
     if (!c.senderEmail && (activeConfigDict['SENDEREMAIL'] || activeConfigDict['SENDERMAILBOX'])) {
       c.senderEmail = String(activeConfigDict['SENDEREMAIL'] || activeConfigDict['SENDERMAILBOX']).trim();
@@ -1498,7 +1499,7 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
 }
 
 /**
- * EXACT 4-COLUMN DASHBOARD UPDATER (Client-Aware API Key Check)
+ * EXACT 4-COLUMN DASHBOARD UPDATER (Client-Aware AI & Email Verifier Key Checks)
  */
 function updateDashboardForActiveCampaign(payloadOrId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1524,6 +1525,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   let dept = payload.department || '';
   let limit = payload.limit || '';
   let dispatchChannel = payload.emailSenderProvider || '';
+  let verifierProvider = payload.emailVerifier || '';
 
   const campSheet = ss.getSheetByName('Campaigns');
   if (campSheet && campSheet.getLastRow() > 1) {
@@ -1533,6 +1535,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         if (!status || status === 'Active') status = String(cData[cr][3] || status).trim();
         if (!dept && cData[cr][2]) dept = String(cData[cr][2]).trim();
         if (!limit && cData[cr][7]) limit = cData[cr][7];
+        if (!verifierProvider && cData[cr][19]) verifierProvider = String(cData[cr][19]).trim();
         if (!dispatchChannel && cData[cr][21]) dispatchChannel = String(cData[cr][21]).trim();
         break;
       }
@@ -1554,6 +1557,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         const k = normalizeStudioKey(cfgData[cr][0]);
         if (!dept && (k === 'DEPARTMENT' || k === 'OPERATINGDEPARTMENT')) dept = String(cfgData[cr][1]).trim();
         if (!limit && (k === 'MAXCOMPANIES' || k === 'DISCOVERYLIMIT')) limit = cfgData[cr][1];
+        if (!verifierProvider && k === 'EMAILVERIFICATIONPROVIDER') verifierProvider = String(cfgData[cr][1]).trim();
         if (!dispatchChannel && (k === 'EMAILSENDERPROVIDER' || k === 'DISPATCHMODE')) dispatchChannel = String(cfgData[cr][1]).trim();
       }
     }
@@ -1562,6 +1566,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   dept = dept || resolveCampaignClientName_(cid, '', ss);
   limit = limit || 5;
   dispatchChannel = dispatchChannel || 'Workspace Gmail (Drafts Only)';
+  verifierProvider = verifierProvider || 'ZeroBounce';
   const limitDisplay = String(limit).includes('Companies') ? limit : (limit + ' Companies');
 
   const campName = payload.name || payload.campaignName || cid;
@@ -1583,6 +1588,32 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   const keyStatus = keyInfo.key
     ? 'Connected'
     : (keyInfo.isLocal ? 'Key Not Configured' : 'Missing: ' + keyInfo.expectedProperty);
+
+  // Client-scoped Email Verifier key check (matches ApiTracker.js / PersonaMapper.js priority order)
+  const verifLow = verifierProvider.toLowerCase();
+  let verifierDisplay = verifierProvider;
+  let verifierStatus = '';
+
+  if (verifLow === 'none') {
+    verifierDisplay = 'None (Verification Disabled)';
+    verifierStatus = 'Skipped';
+  } else {
+    const verifCandidateKeys = [];
+    if (verifLow.indexOf('zerobounce') >= 0) verifCandidateKeys.push('ZEROBOUNCE_API_KEY');
+    else if (verifLow.indexOf('millionverifier') >= 0) verifCandidateKeys.push('MILLIONVERIFIER_API_KEY');
+    else if (verifLow.indexOf('neverbounce') >= 0) verifCandidateKeys.push('NEVERBOUNCE_API_KEY');
+    else if (verifLow.indexOf('custom') >= 0) verifCandidateKeys.push('CUSTOM_VERIFIER_API_KEY');
+    verifCandidateKeys.push('VERIFIER_API_KEY', 'EMAIL_VERIFICATION_API_KEY');
+
+    const verifKeyInfo = resolveClientScopedSecret_(
+      verifCandidateKeys,
+      { campaignId: cid, clientName: dept },
+      { throwOnMissing: false, allowAgentSettingsForLocal: keyInfo.isLocal, spreadsheet: ss }
+    );
+    verifierStatus = verifKeyInfo.key
+      ? 'Connected'
+      : (verifKeyInfo.isLocal ? 'Key Not Configured' : ('Missing: ' + verifKeyInfo.expectedProperty));
+  }
 
   const nowTimestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
 
@@ -1644,6 +1675,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   dashSheet.getRange('D1').setValue(status);
   dashSheet.getRange('B2').setValue(cid);
 
+  let verifierRowUpdated = false;
   const kpiMaxRow = Math.min(dashSheet.getLastRow(), 15);
   if (kpiMaxRow >= 4) {
     const labels = dashSheet.getRange(4, 1, kpiMaxRow - 3, 1).getValues();
@@ -1676,9 +1708,12 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         dashSheet.getRange(rowNum, 2).setValue(personasCount);
         dashSheet.getRange(rowNum, 3).setValue(personasCount > 0 ? 'Mapping Complete' : 'Pending Mapping');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
-      } else if (label.includes('GMAILOUTREACH') || label.includes('DRAFTSCREATED')) {
+      } else if (label.includes('GMAILOUTREACH') || label.includes('OUTREACHDRAFTS') || label.includes('DRAFTSCREATED')) {
+        if (String(labels[r][0] || '').trim() !== 'Outreach Drafts Created') {
+          dashSheet.getRange(rowNum, 1).setValue('Outreach Drafts Created');
+        }
         dashSheet.getRange(rowNum, 2).setValue(draftsCount);
-        dashSheet.getRange(rowNum, 3).setValue(draftsCount > 0 ? 'Ready in Gmail Drafts' : 'No Drafts Yet');
+        dashSheet.getRange(rowNum, 3).setValue(draftsCount > 0 ? 'Outreach Ready' : 'No Drafts Yet');
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
       } else if (label.includes('SUPPRESSED') || label.includes('BLOCKED')) {
         dashSheet.getRange(rowNum, 2).setValue(suppressedCount);
@@ -1692,7 +1727,33 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         dashSheet.getRange(rowNum, 2).setValue(aiLabel);
         dashSheet.getRange(rowNum, 3).setValue(keyStatus);
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
+      } else if (label.includes('EMAILVERIFIER') || label.includes('VERIFIERCONFIGURED')) {
+        dashSheet.getRange(rowNum, 1).setValue('Email Verifier Configured');
+        dashSheet.getRange(rowNum, 2).setValue(verifierDisplay);
+        dashSheet.getRange(rowNum, 3).setValue(verifierStatus);
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
+        verifierRowUpdated = true;
       }
+    }
+  }
+
+  // Safely initialize Row 14 ("Email Verifier Configured") on existing Dashboards without shifting Row 16+
+  if (!verifierRowUpdated) {
+    const row14Existing = normalizeStudioKey(dashSheet.getRange(14, 1).getValue());
+    if (!row14Existing || row14Existing.includes('EMAILVERIFIER') || row14Existing.includes('VERIFIERCONFIGURED')) {
+      if (!row14Existing) {
+        dashSheet.getRange('A13:D13').copyTo(
+          dashSheet.getRange('A14:D14'),
+          SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+          false
+        );
+      }
+      dashSheet.getRange(14, 1, 1, 4).setValues([[
+        'Email Verifier Configured',
+        verifierDisplay,
+        verifierStatus,
+        nowTimestamp
+      ]]);
     }
   }
 
@@ -1706,7 +1767,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
       'Department',
       'Status',
       'Companies Found',
-      'Gmail Drafts',
+      'Outreach Drafts Created',
       'Last Run'
     ];
     dashSheet.getRange(17, 1, 1, 7)
