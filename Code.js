@@ -754,9 +754,10 @@ function onOpen() {
 /**
  * Native onEdit Trigger:
  * 1. Syncs Dashboard (D1/C4 Status, B2 Campaign ID) and Campaigns Column 4 (Status).
- * 2. Keeps "Lists & Settings" sorted with Client - Account rows pinned at the top
+ * 2. Syncs Prospect Review Queue "Review Status" dropdown edits back to Persona Leads Col S.
+ * 3. Keeps "Lists & Settings" sorted with Client - Account rows pinned at the top
  *    and refreshes Client dropdown validations whenever a completed row is edited.
- * 3. Automatically resets "Email Deliverability" Campaign Filter (D3) to "All Campaigns"
+ * 4. Automatically resets "Email Deliverability" Campaign Filter (D3) to "All Campaigns"
  *    if Client Filter (B3) is switched away from the selected campaign's owner.
  */
 function onEdit(e) {
@@ -781,6 +782,38 @@ function onEdit(e) {
       const activeCampId = getStudioActiveCampaignId_();
       if (editedCampId && editedCampId === activeCampId) {
         updateDashboardStatusOnly_(activeCampId, val);
+      }
+    } else if (sheetName === 'Prospect Review Queue' &&
+               row > 1 &&
+               e.range.getNumRows() === 1 &&
+               e.range.getNumColumns() === 1) {
+      const lastCol = sheet.getLastColumn();
+      if (lastCol > 0) {
+        const editedHeader = normalizeStudioKey(sheet.getRange(1, col).getDisplayValue());
+        if (editedHeader === 'REVIEWSTATUS' &&
+            (val === 'Needs Review' || val === 'Approved' || val === 'Rejected')) {
+          const rowVals = sheet.getRange(row, 1, 1, lastCol).getValues()[0];
+          const qHeaders = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
+            return normalizeStudioKey(h);
+          });
+          const getQueueVal = function(candidates) {
+            for (let c = 0; c < candidates.length; c++) {
+              const idx = qHeaders.indexOf(candidates[c]);
+              if (idx >= 0) return String(rowVals[idx] || '').trim();
+            }
+            return '';
+          };
+          const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+          syncQueueReviewStatusToPersonaLeads_(ss, [{
+            campaignId: getQueueVal(['CAMPAIGNID']),
+            companyId: getQueueVal(['COMPANYID']),
+            companyName: getQueueVal(['COMPANYNAME']),
+            personaId: getQueueVal(['PERSONAID']),
+            name: getQueueVal(['NAME', 'PERSONANAME']),
+            email: getQueueVal(['BUSINESSEMAIL', 'EMAIL']),
+            reviewStatus: val
+          }]);
+        }
       }
     } else if (sheetName === 'Email Deliverability' && row === 3 && col === 2) {
       const newClient = String(val || '').trim();
@@ -1145,6 +1178,7 @@ function getSidebarInitialData() {
       if (!c.weightEsgReporting && pData[i][19]) c.weightEsgReporting = String(pData[i][19]);
       if (!c.weightSupplyChain && pData[i][20]) c.weightSupplyChain = String(pData[i][20]);
       if (!c.weightDataChallenges && pData[i][21]) c.weightDataChallenges = String(pData[i][21]);
+      if (!c.weightDigital && pData[i][22]) c.weightDataChallenges && (c.weightDigital = String(pData[i][22]));
       if (!c.weightDigital && pData[i][22]) c.weightDigital = String(pData[i][22]);
       if (!c.weightTriggers && pData[i][23]) c.weightTriggers = String(pData[i][23]);
       if (!c.weightEvaluaterFit && pData[i][24]) c.weightEvaluaterFit = String(pData[i][24]);
@@ -2348,10 +2382,105 @@ function getProspectApprovalBlockReason_(row, colMap, suppressionRules) {
 }
 
 /**
+ * Normalizes LinkedIn URLs / Persona IDs for reliable matching across tabs.
+ */
+function normalizePersonaSyncId_(rawVal) {
+  let clean = String(rawVal || '').trim().toLowerCase();
+  if (!clean) return '';
+  if (clean.indexOf('linkedin.com') >= 0) {
+    clean = clean.replace(/^https?:\/\//i, '');
+    clean = clean.replace(/^[a-z0-9-]+\.linkedin\.com\//i, 'linkedin.com/');
+    clean = clean.split('?')[0].split('#')[0].replace(/\/+$/, '');
+  }
+  return clean;
+}
+
+/**
+ * Syncs "Review Status" updates from "Prospect Review Queue" back into "Persona Leads" (Col S).
+ * Strictly enforces Persona Leads Col S allowed values:
+ * ['Ready for Outreach', 'Needs Review', 'Approved', 'Rejected'].
+ */
+function syncQueueReviewStatusToPersonaLeads_(ss, updates) {
+  if (!ss || !Array.isArray(updates) || updates.length === 0) return 0;
+
+  const allowedStatuses = {
+    'Ready for Outreach': true,
+    'Needs Review': true,
+    'Approved': true,
+    'Rejected': true
+  };
+
+  const pSheet = ss.getSheetByName('Persona Leads');
+  if (!pSheet || pSheet.getLastRow() < 2 || pSheet.getLastColumn() < 1) return 0;
+
+  const lastCol = pSheet.getLastColumn();
+  const headers = pSheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
+    return normalizeStudioKey(h);
+  });
+
+  const campCol = headers.indexOf('CAMPAIGNID');
+  const compIdCol = headers.indexOf('COMPANYID');
+  const compNameCol = headers.indexOf('COMPANYNAME');
+  const personaIdCol = headers.indexOf('PERSONAID');
+  const linkedinCol = headers.indexOf('LINKEDINURL');
+  const nameCol = headers.indexOf('NAME') >= 0 ? headers.indexOf('NAME') : headers.indexOf('PERSONANAME');
+  const emailCol = headers.indexOf('BUSINESSEMAIL') >= 0 ? headers.indexOf('BUSINESSEMAIL') : headers.indexOf('EMAIL');
+  const reviewCol = headers.indexOf('REVIEWSTATUS');
+
+  if (campCol < 0 || reviewCol < 0) return 0;
+
+  const rows = pSheet.getRange(2, 1, pSheet.getLastRow() - 1, lastCol).getValues();
+  let updatedCount = 0;
+
+  for (let u = 0; u < updates.length; u++) {
+    const upd = updates[u];
+    const targetStatus = String(upd.reviewStatus || '').trim();
+    if (!allowedStatuses[targetStatus]) continue;
+
+    const targetCid = String(upd.campaignId || '').trim().toLowerCase();
+    const targetPid = normalizePersonaSyncId_(upd.personaId);
+    const targetEmail = String(upd.email || '').trim().toLowerCase();
+    const targetName = String(upd.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const targetCompId = String(upd.companyId || '').trim().toLowerCase();
+    const targetCompName = String(upd.companyName || '').trim().toLowerCase();
+
+    for (let r = 0; r < rows.length; r++) {
+      const rCid = String(rows[r][campCol] || '').trim().toLowerCase();
+      if (targetCid && rCid !== targetCid) continue;
+
+      const rPid = personaIdCol >= 0 ? normalizePersonaSyncId_(rows[r][personaIdCol]) : '';
+      const rLi = linkedinCol >= 0 ? normalizePersonaSyncId_(rows[r][linkedinCol]) : '';
+      const rEmail = emailCol >= 0 ? String(rows[r][emailCol] || '').trim().toLowerCase() : '';
+      const rName = nameCol >= 0 ? String(rows[r][nameCol] || '').trim().toLowerCase().replace(/\s+/g, ' ') : '';
+      const rCompId = compIdCol >= 0 ? String(rows[r][compIdCol] || '').trim().toLowerCase() : '';
+      const rCompName = compNameCol >= 0 ? String(rows[r][compNameCol] || '').trim().toLowerCase() : '';
+
+      const pidMatched = Boolean(targetPid && ((rPid && rPid === targetPid) || (rLi && rLi === targetPid)));
+      const emailMatched = Boolean(targetEmail && rEmail && rEmail === targetEmail);
+      const companyMatched = (!targetCompId && !targetCompName) ||
+        (targetCompId && rCompId && rCompId === targetCompId) ||
+        (targetCompName && rCompName && rCompName === targetCompName);
+      const nameMatched = Boolean(targetName && rName && rName === targetName && companyMatched);
+
+      if (!pidMatched && !emailMatched && !nameMatched) continue;
+
+      if (String(rows[r][reviewCol] || '').trim() !== targetStatus) {
+        pSheet.getRange(r + 2, reviewCol + 1).setValue(targetStatus);
+        rows[r][reviewCol] = targetStatus;
+        updatedCount++;
+      }
+    }
+  }
+
+  return updatedCount;
+}
+
+/**
  * Updates Review Status, Human Approval Status, Reviewer metadata, and Queue Status
  * across ALL selected visible prospect rows in "Prospect Review Queue" (supporting
  * both dragged selections and Ctrl/Cmd-clicked separate rows, while skipping rows
- * hidden by active filters). Blocks accidental approval of suppressed/invalid rows.
+ * hidden by active filters), and syncs Review Status back to "Persona Leads".
+ * Blocks accidental approval of suppressed/invalid rows.
  */
 function updateSelectedProspectStatus(statusText) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -2464,6 +2593,13 @@ function updateSelectedProspectStatus(statusText) {
     return fallbackCol;
   }
 
+  const campIdCol = resolveCol(['Campaign ID'], 1);
+  const compIdCol = resolveCol(['Company ID'], 3);
+  const compNameCol = resolveCol(['Company Name'], 4);
+  const personaIdCol = resolveCol(['Persona ID'], 5);
+  const nameCol = resolveCol(['Name', 'Persona Name'], 6);
+  const emailCol = resolveCol(['Business Email', 'Email'], 8);
+
   const reviewStatusCol = resolveCol(['Review Status'], 18);
   const reviewerCol = resolveCol(['Reviewer'], 19);
   const reviewedAtCol = resolveCol(['Reviewed At'], 21);
@@ -2473,7 +2609,7 @@ function updateSelectedProspectStatus(statusText) {
   const queueStatusCol = resolveCol(['Queue Status'], 41);
 
   const guardColMap = {
-    email: resolveCol(['Business Email', 'Email'], 0),
+    email: emailCol,
     emailVerif: resolveCol(['Email Verification Status'], 0),
     sendStatus: resolveCol(['Send Status'], 25),
     approvalStatus: approvalStatusCol,
@@ -2485,10 +2621,11 @@ function updateSelectedProspectStatus(statusText) {
   const suppressionRules = isApproving ? getApprovalSuppressionRules_(ss) : null;
   const updatedRows = [];
   const skippedDetails = [];
+  const personaSyncUpdates = [];
 
   targetRows.forEach(function(rowNum) {
+    const rowData = allRows[rowNum - 2] || [];
     if (isApproving) {
-      const rowData = allRows[rowNum - 2] || [];
       const blockReason = getProspectApprovalBlockReason_(rowData, guardColMap, suppressionRules);
       if (blockReason) {
         const emailVal = guardColMap.email > 0 ? String(rowData[guardColMap.email - 1] || '').trim() : '';
@@ -2511,8 +2648,22 @@ function updateSelectedProspectStatus(statusText) {
       sheet.getRange(rowNum, queueStatusCol).setValue('Ready for Review');
     }
 
+    personaSyncUpdates.push({
+      campaignId: campIdCol > 0 ? String(rowData[campIdCol - 1] || '').trim() : '',
+      companyId: compIdCol > 0 ? String(rowData[compIdCol - 1] || '').trim() : '',
+      companyName: compNameCol > 0 ? String(rowData[compNameCol - 1] || '').trim() : '',
+      personaId: personaIdCol > 0 ? String(rowData[personaIdCol - 1] || '').trim() : '',
+      name: nameCol > 0 ? String(rowData[nameCol - 1] || '').trim() : '',
+      email: emailCol > 0 ? String(rowData[emailCol - 1] || '').trim() : '',
+      reviewStatus: statusText
+    });
+
     updatedRows.push(rowNum);
   });
+
+  if (personaSyncUpdates.length > 0) {
+    syncQueueReviewStatusToPersonaLeads_(ss, personaSyncUpdates);
+  }
 
   SpreadsheetApp.flush();
 
@@ -2548,8 +2699,8 @@ function updateSelectedProspectStatus(statusText) {
     ? updatedRows.join(', ')
     : (updatedRows.slice(0, 5).join(', ') + '...');
   const toastMsg = updatedRows.length === 1
-    ? ('Row ' + updatedRows[0] + ' updated to: ' + statusText)
-    : ('Updated ' + updatedRows.length + ' prospect rows (' + rowPreviewLabel + ') to: ' + statusText);
+    ? ('Row ' + updatedRows[0] + ' updated to: ' + statusText + ' (synced to Persona Leads)')
+    : ('Updated ' + updatedRows.length + ' prospect rows (' + rowPreviewLabel + ') to: ' + statusText + ' (synced to Persona Leads)');
   ss.toast(toastMsg, 'Status Updated', 4);
 }
 
