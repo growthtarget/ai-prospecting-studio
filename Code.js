@@ -753,7 +753,7 @@ function onOpen() {
 
 /**
  * Native onEdit Trigger:
- * 1. Syncs Dashboard (D1/C4 Status, B2 Campaign ID) and Campaigns Column 4 (Status).
+ * 1. Syncs Dashboard (D1/C4 Status, B2 Campaign ID) and Campaigns Column 2 (Name) & Column 4 (Status).
  * 2. Syncs Prospect Review Queue "Review Status" dropdown edits back to Persona Leads Col S.
  * 3. Keeps "Lists & Settings" sorted with Client - Account rows pinned at the top
  *    and refreshes Client dropdown validations whenever a completed row is edited.
@@ -782,6 +782,42 @@ function onEdit(e) {
       const activeCampId = getStudioActiveCampaignId_();
       if (editedCampId && editedCampId === activeCampId) {
         updateDashboardStatusOnly_(activeCampId, val);
+      }
+    } else if (sheetName === 'Campaigns' && row > 1 && col === 2 && val) {
+      const editedCampId = String(sheet.getRange(row, 1).getValue()).trim();
+      if (editedCampId) {
+        const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+        syncCampaignNameAcrossOperationalTabs_(ss, editedCampId, val);
+
+        const pSheet = findPersonaMapperSettingsSheet(ss);
+        if (pSheet && pSheet.getLastRow() > 1) {
+          const pIds = pSheet.getRange(2, 1, pSheet.getLastRow() - 1, 1).getValues();
+          for (let pr = 0; pr < pIds.length; pr++) {
+            if (String(pIds[pr][0] || '').trim() === editedCampId) {
+              pSheet.getRange(pr + 2, 2).setValue(val);
+              break;
+            }
+          }
+        }
+
+        if (editedCampId === getStudioActiveCampaignId_()) {
+          const dashSheet = ss ? ss.getSheetByName('Dashboard') : null;
+          if (dashSheet) {
+            dashSheet.getRange('C1').setValue(val);
+            dashSheet.getRange('B4').setValue(val);
+            const lastDashR = dashSheet.getLastRow();
+            for (let dr = 18; dr <= lastDashR; dr++) {
+              if (String(dashSheet.getRange(dr, 1).getValue()).trim() === editedCampId) {
+                dashSheet.getRange(dr, 2).setValue(val);
+                break;
+              }
+            }
+          }
+          const cfgSheet = ss ? ss.getSheetByName('Campaign Configuration') : null;
+          if (cfgSheet && cfgSheet.getLastRow() >= 3 && String(cfgSheet.getRange(2, 2).getValue()).trim() === editedCampId) {
+            cfgSheet.getRange(3, 2).setValue(val);
+          }
+        }
       }
     } else if (sheetName === 'Prospect Review Queue' &&
                row > 1 &&
@@ -854,6 +890,53 @@ function onEdit(e) {
   } catch (err) {
     Logger.log('[onEdit Error] ' + err.message);
   }
+}
+
+/**
+ * Propagates Campaign Name changes into existing rows of "Company Intelligence",
+ * "Persona Leads", and "Prospect Review Queue" for the matching Campaign ID.
+ */
+function syncCampaignNameAcrossOperationalTabs_(ss, campaignId, campaignName) {
+  const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
+  const targetCid = String(campaignId || '').trim();
+  const targetName = String(campaignName || '').trim();
+  if (!spreadsheet || !targetCid || !targetName) return 0;
+
+  const targetSheets = [
+    'Company Intelligence',
+    'Persona Leads',
+    'Prospect Review Queue'
+  ];
+
+  let totalUpdated = 0;
+
+  targetSheets.forEach(function(sheetName) {
+    const sheet = spreadsheet.getSheetByName(sheetName);
+    if (!sheet || sheet.getLastRow() <= 1 || sheet.getLastColumn() < 2) return;
+
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    const headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(h) {
+      return normalizeStudioKey(h);
+    });
+
+    const idCol = headers.indexOf('CAMPAIGNID') >= 0 ? headers.indexOf('CAMPAIGNID') : 0;
+    const nameCol = headers.indexOf('CAMPAIGNNAME') >= 0 ? headers.indexOf('CAMPAIGNNAME') : 1;
+
+    const numRows = lastRow - 1;
+    const idVals = sheet.getRange(2, idCol + 1, numRows, 1).getValues();
+    const nameVals = sheet.getRange(2, nameCol + 1, numRows, 1).getValues();
+
+    for (let r = 0; r < numRows; r++) {
+      if (String(idVals[r][0] || '').trim() === targetCid &&
+          String(nameVals[r][0] || '').trim() !== targetName) {
+        sheet.getRange(r + 2, nameCol + 1).setValue(targetName);
+        totalUpdated++;
+      }
+    }
+  });
+
+  return totalUpdated;
 }
 
 /**
@@ -1178,7 +1261,6 @@ function getSidebarInitialData() {
       if (!c.weightEsgReporting && pData[i][19]) c.weightEsgReporting = String(pData[i][19]);
       if (!c.weightSupplyChain && pData[i][20]) c.weightSupplyChain = String(pData[i][20]);
       if (!c.weightDataChallenges && pData[i][21]) c.weightDataChallenges = String(pData[i][21]);
-      if (!c.weightDigital && pData[i][22]) c.weightDataChallenges && (c.weightDigital = String(pData[i][22]));
       if (!c.weightDigital && pData[i][22]) c.weightDigital = String(pData[i][22]);
       if (!c.weightTriggers && pData[i][23]) c.weightTriggers = String(pData[i][23]);
       if (!c.weightEvaluaterFit && pData[i][24]) c.weightEvaluaterFit = String(pData[i][24]);
@@ -1270,7 +1352,8 @@ function selectAndActivateCampaign(cid) {
  * Direct Campaign Pipeline Saver (LOCKED 38 PARAMETERS SCHEMA):
  * Preserves the exact 38 parameter rows in Campaign Configuration without erasing validations.
  * Honors isActivationOnly so switching campaigns never overwrites saved rows in
- * Campaigns or Persona Mapper Settings.
+ * Campaigns or Persona Mapper Settings. When saving (!isActivationOnly), also syncs
+ * Campaign Name across Company Intelligence, Persona Leads, and Prospect Review Queue.
  */
 function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (!payload || !payload.id) {
@@ -1510,6 +1593,10 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     pSheet.getRange(pTargetRow, 35).setNumberFormat('0');
     pSheet.getRange(pTargetRow, 1, 1, 39).setValues([pRow]);
     SpreadsheetApp.flush();
+  }
+
+  if (!isActivationOnly) {
+    syncCampaignNameAcrossOperationalTabs_(ss, campId, campName);
   }
 
   const dashboardPayload = Object.assign({}, payload, { department: clientOwner, status: status });

@@ -139,14 +139,18 @@
         </div>
         <div class="row">
           <div class="field">
-            <label for="companySize">Company Size (FTEs)</label>
-            <input type="text" id="companySize" list="sizePresets" placeholder="e.g. 50 - 250 employees">
-            <datalist id="sizePresets">
-              <option value="10 - 50 employees">
-              <option value="50 - 250 employees">
-              <option value="250 - 1000 employees">
-              <option value="1000+ Enterprise">
-            </datalist>
+            <label for="companySizeSelect">Company Size (FTEs)</label>
+            <select id="companySizeSelect" onchange="onCompanySizeChanged()">
+              <option value="10 - 50 employees">10 - 50 employees</option>
+              <option value="50 - 250 employees" selected>50 - 250 employees</option>
+              <option value="250 - 1000 employees">250 - 1000 employees</option>
+              <option value="1000+ Enterprise">1000+ Enterprise</option>
+              <option value="__CUSTOM_SIZE__">+ Custom Company Size...</option>
+            </select>
+            <div id="customCompanySizeBox" class="new-client-box">
+              <label for="companySizeCustomInput">Custom Company Size</label>
+              <input type="text" id="companySizeCustomInput" placeholder="e.g. 100 - 500 employees">
+            </div>
           </div>
           <div class="field">
             <label for="companyLimit">Discovery Limit</label>
@@ -535,6 +539,13 @@
         ]
       };
 
+      var COMPANY_SIZE_PRESETS_ = [
+        '10 - 50 employees',
+        '50 - 250 employees',
+        '250 - 1000 employees',
+        '1000+ Enterprise'
+      ];
+
       window.onload = function() {
         const activeClientsList = getAllKnownClients_(serverClients);
         if (serverCampaigns && serverCampaigns.length > 0) {
@@ -645,6 +656,54 @@
           }
         }
         presetSel.value = matched;
+      }
+
+      function setCompanySizeValue_(rawSize) {
+        const select = document.getElementById('companySizeSelect');
+        const customBox = document.getElementById('customCompanySizeBox');
+        const customInput = document.getElementById('companySizeCustomInput');
+        const target = String(rawSize || '').trim();
+
+        if (!target) {
+          select.value = '50 - 250 employees';
+          customBox.style.display = 'none';
+          customInput.value = '';
+          return;
+        }
+
+        const matchedPreset = COMPANY_SIZE_PRESETS_.find(function(opt) {
+          return opt.toLowerCase() === target.toLowerCase();
+        });
+
+        if (matchedPreset) {
+          select.value = matchedPreset;
+          customBox.style.display = 'none';
+          customInput.value = '';
+        } else {
+          select.value = '__CUSTOM_SIZE__';
+          customBox.style.display = 'block';
+          customInput.value = target;
+        }
+      }
+
+      function onCompanySizeChanged() {
+        const select = document.getElementById('companySizeSelect');
+        const customBox = document.getElementById('customCompanySizeBox');
+        const customInput = document.getElementById('companySizeCustomInput');
+        if (select.value === '__CUSTOM_SIZE__') {
+          customBox.style.display = 'block';
+          customInput.focus();
+        } else {
+          customBox.style.display = 'none';
+        }
+      }
+
+      function getSelectedCompanySize_() {
+        const select = document.getElementById('companySizeSelect');
+        if (select.value === '__CUSTOM_SIZE__') {
+          return document.getElementById('companySizeCustomInput').value.trim();
+        }
+        return select.value || '50 - 250 employees';
       }
 
       function renderAiModelOptions_(provider, desiredModel) {
@@ -1189,7 +1248,7 @@
 
         document.getElementById('targetCountries').value = '';
         document.getElementById('targetIndustries').value = '';
-        document.getElementById('companySize').value = '';
+        setCompanySizeValue_('50 - 250 employees');
         document.getElementById('companyLimit').value = 5;
 
         document.getElementById('researchDepth').value = 'Deep Persona';
@@ -1256,7 +1315,7 @@
 
         document.getElementById('targetCountries').value = data.country || '';
         document.getElementById('targetIndustries').value = data.industry || '';
-        document.getElementById('companySize').value = data.size || '';
+        setCompanySizeValue_(data.size || '50 - 250 employees');
         document.getElementById('companyLimit').value = Number(data.limit) || 5;
 
         document.getElementById('researchDepth').value = data.researchDepth || 'Deep Persona';
@@ -1609,6 +1668,12 @@
           document.getElementById('campaignIdInput').focus();
           return;
         }
+        if (document.getElementById('companySizeSelect').value === '__CUSTOM_SIZE__' &&
+            !document.getElementById('companySizeCustomInput').value.trim()) {
+          showStatus('⚠️ Please enter a Custom Company Size or select one of the preset ranges.', 'error');
+          document.getElementById('companySizeCustomInput').focus();
+          return;
+        }
         if (document.getElementById('aiModelSelect').value === '__CUSTOM_MODEL__' &&
             !document.getElementById('aiModelCustomInput').value.trim()) {
           showStatus('⚠️ Please enter a Custom AI Model ID or select a preset model.', 'error');
@@ -1636,7 +1701,7 @@
           department: clientOwner,
           country: document.getElementById('targetCountries').value.trim(),
           industry: document.getElementById('targetIndustries').value.trim(),
-          size: document.getElementById('companySize').value.trim(),
+          size: getSelectedCompanySize_(),
           limit: Number(document.getElementById('companyLimit').value) || 5,
           researchDepth: document.getElementById('researchDepth').value,
           evidencePeriodMonths: Number(document.getElementById('evidencePeriodMonths').value) || 12,
