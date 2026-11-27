@@ -115,27 +115,35 @@
       </div>
       <div id="secTargeting">
         <div class="field">
-          <label for="targetCountries">Target Countries / Regions</label>
-          <input type="text" id="targetCountries" list="countryPresets" placeholder="e.g. Canada Only, United States, Global">
-          <datalist id="countryPresets">
-            <option value="Canada Only">
-            <option value="United States & Canada">
-            <option value="United States Only">
-            <option value="Sweden, Norway, Denmark">
-            <option value="United Kingdom & Europe">
-            <option value="Global">
-          </datalist>
+          <label for="targetCountriesSelect">Target Countries / Regions</label>
+          <select id="targetCountriesSelect" onchange="onTargetCountriesChanged()">
+            <option value="Canada Only">Canada Only</option>
+            <option value="United States & Canada" selected>United States &amp; Canada</option>
+            <option value="United States Only">United States Only</option>
+            <option value="Sweden, Norway, Denmark">Sweden, Norway, Denmark</option>
+            <option value="United Kingdom & Europe">United Kingdom &amp; Europe</option>
+            <option value="Global">Global</option>
+            <option value="__CUSTOM_COUNTRY__">+ Custom Country / Region...</option>
+          </select>
+          <div id="customCountriesBox" class="new-client-box">
+            <label for="targetCountriesCustomInput">Custom Countries / Regions</label>
+            <input type="text" id="targetCountriesCustomInput" placeholder="e.g. Alberta & Ontario, Canada or Germany & UK">
+          </div>
         </div>
         <div class="field">
-          <label for="targetIndustries">Target Industries</label>
-          <input type="text" id="targetIndustries" list="industryPresets" placeholder="e.g. Energy, CleanTech & Utilities">
-          <datalist id="industryPresets">
-            <option value="Energy, CleanTech & Utilities">
-            <option value="Freight & Logistics, Industrial Equipment">
-            <option value="Manufacturing, Industrial, BioTech">
-            <option value="Financial Services / FinTech SaaS">
-            <option value="Retail & Consumer Goods">
-          </datalist>
+          <label for="targetIndustriesSelect">Target Industries</label>
+          <select id="targetIndustriesSelect" onchange="onTargetIndustriesChanged()">
+            <option value="Energy, CleanTech & Utilities">Energy, CleanTech &amp; Utilities</option>
+            <option value="Freight & Logistics, Industrial Equipment" selected>Freight &amp; Logistics, Industrial Equipment</option>
+            <option value="Manufacturing, Industrial, BioTech">Manufacturing, Industrial, BioTech</option>
+            <option value="Financial Services / FinTech SaaS">Financial Services / FinTech SaaS</option>
+            <option value="Retail & Consumer Goods">Retail &amp; Consumer Goods</option>
+            <option value="__CUSTOM_INDUSTRY__">+ Custom Industry...</option>
+          </select>
+          <div id="customIndustriesBox" class="new-client-box">
+            <label for="targetIndustriesCustomInput">Custom Target Industries</label>
+            <input type="text" id="targetIndustriesCustomInput" placeholder="e.g. Mining, Oil & Gas, Clean Hydrogen">
+          </div>
         </div>
         <div class="row">
           <div class="field">
@@ -539,6 +547,23 @@
         ]
       };
 
+      var COUNTRY_PRESETS_ = [
+        'Canada Only',
+        'United States & Canada',
+        'United States Only',
+        'Sweden, Norway, Denmark',
+        'United Kingdom & Europe',
+        'Global'
+      ];
+
+      var INDUSTRY_PRESETS_ = [
+        'Energy, CleanTech & Utilities',
+        'Freight & Logistics, Industrial Equipment',
+        'Manufacturing, Industrial, BioTech',
+        'Financial Services / FinTech SaaS',
+        'Retail & Consumer Goods'
+      ];
+
       var COMPANY_SIZE_PRESETS_ = [
         '10 - 50 employees',
         '50 - 250 employees',
@@ -656,6 +681,111 @@
           }
         }
         presetSel.value = matched;
+      }
+
+      function ensureTargetingSectionExpanded_() {
+        const sec = document.getElementById('secTargeting');
+        const icon = document.getElementById('iconTargeting');
+        if (sec && sec.style.display === 'none') {
+          sec.style.display = 'block';
+          if (icon) icon.textContent = '▼';
+        }
+      }
+
+      function setTargetCountriesValue_(rawCountry) {
+        const select = document.getElementById('targetCountriesSelect');
+        const customBox = document.getElementById('customCountriesBox');
+        const customInput = document.getElementById('targetCountriesCustomInput');
+        const target = String(rawCountry || '').trim();
+
+        if (!target) {
+          select.value = 'United States & Canada';
+          customBox.style.display = 'none';
+          customInput.value = '';
+          return;
+        }
+
+        const matchedPreset = COUNTRY_PRESETS_.find(function(opt) {
+          return opt.toLowerCase() === target.toLowerCase();
+        });
+
+        if (matchedPreset) {
+          select.value = matchedPreset;
+          customBox.style.display = 'none';
+          customInput.value = '';
+        } else {
+          select.value = '__CUSTOM_COUNTRY__';
+          customBox.style.display = 'block';
+          customInput.value = target;
+        }
+      }
+
+      function onTargetCountriesChanged() {
+        const select = document.getElementById('targetCountriesSelect');
+        const customBox = document.getElementById('customCountriesBox');
+        const customInput = document.getElementById('targetCountriesCustomInput');
+        if (select.value === '__CUSTOM_COUNTRY__') {
+          customBox.style.display = 'block';
+          customInput.focus();
+        } else {
+          customBox.style.display = 'none';
+        }
+      }
+
+      function getSelectedTargetCountries_() {
+        const select = document.getElementById('targetCountriesSelect');
+        if (select.value === '__CUSTOM_COUNTRY__') {
+          return document.getElementById('targetCountriesCustomInput').value.trim();
+        }
+        return select.value || 'United States & Canada';
+      }
+
+      function setTargetIndustriesValue_(rawIndustry) {
+        const select = document.getElementById('targetIndustriesSelect');
+        const customBox = document.getElementById('customIndustriesBox');
+        const customInput = document.getElementById('targetIndustriesCustomInput');
+        const target = String(rawIndustry || '').trim();
+
+        if (!target) {
+          select.value = 'Freight & Logistics, Industrial Equipment';
+          customBox.style.display = 'none';
+          customInput.value = '';
+          return;
+        }
+
+        const matchedPreset = INDUSTRY_PRESETS_.find(function(opt) {
+          return opt.toLowerCase() === target.toLowerCase();
+        });
+
+        if (matchedPreset) {
+          select.value = matchedPreset;
+          customBox.style.display = 'none';
+          customInput.value = '';
+        } else {
+          select.value = '__CUSTOM_INDUSTRY__';
+          customBox.style.display = 'block';
+          customInput.value = target;
+        }
+      }
+
+      function onTargetIndustriesChanged() {
+        const select = document.getElementById('targetIndustriesSelect');
+        const customBox = document.getElementById('customIndustriesBox');
+        const customInput = document.getElementById('targetIndustriesCustomInput');
+        if (select.value === '__CUSTOM_INDUSTRY__') {
+          customBox.style.display = 'block';
+          customInput.focus();
+        } else {
+          customBox.style.display = 'none';
+        }
+      }
+
+      function getSelectedTargetIndustries_() {
+        const select = document.getElementById('targetIndustriesSelect');
+        if (select.value === '__CUSTOM_INDUSTRY__') {
+          return document.getElementById('targetIndustriesCustomInput').value.trim();
+        }
+        return select.value || 'Freight & Logistics, Industrial Equipment';
       }
 
       function setCompanySizeValue_(rawSize) {
@@ -1246,8 +1376,8 @@
           renderClientOptions(serverClients, targetClient);
         }
 
-        document.getElementById('targetCountries').value = '';
-        document.getElementById('targetIndustries').value = '';
+        setTargetCountriesValue_('United States & Canada');
+        setTargetIndustriesValue_('Freight & Logistics, Industrial Equipment');
         setCompanySizeValue_('50 - 250 employees');
         document.getElementById('companyLimit').value = 5;
 
@@ -1313,8 +1443,8 @@
         const targetClient = data.department || getCampaignClient_(cid);
         renderClientOptions(serverClients, targetClient);
 
-        document.getElementById('targetCountries').value = data.country || '';
-        document.getElementById('targetIndustries').value = data.industry || '';
+        setTargetCountriesValue_(data.country || 'United States & Canada');
+        setTargetIndustriesValue_(data.industry || 'Freight & Logistics, Industrial Equipment');
         setCompanySizeValue_(data.size || '50 - 250 employees');
         document.getElementById('companyLimit').value = Number(data.limit) || 5;
 
@@ -1668,8 +1798,23 @@
           document.getElementById('campaignIdInput').focus();
           return;
         }
+        if (document.getElementById('targetCountriesSelect').value === '__CUSTOM_COUNTRY__' &&
+            !document.getElementById('targetCountriesCustomInput').value.trim()) {
+          ensureTargetingSectionExpanded_();
+          showStatus('⚠️ Please enter Custom Countries / Regions or select one of the preset options.', 'error');
+          document.getElementById('targetCountriesCustomInput').focus();
+          return;
+        }
+        if (document.getElementById('targetIndustriesSelect').value === '__CUSTOM_INDUSTRY__' &&
+            !document.getElementById('targetIndustriesCustomInput').value.trim()) {
+          ensureTargetingSectionExpanded_();
+          showStatus('⚠️ Please enter Custom Target Industries or select one of the preset options.', 'error');
+          document.getElementById('targetIndustriesCustomInput').focus();
+          return;
+        }
         if (document.getElementById('companySizeSelect').value === '__CUSTOM_SIZE__' &&
             !document.getElementById('companySizeCustomInput').value.trim()) {
+          ensureTargetingSectionExpanded_();
           showStatus('⚠️ Please enter a Custom Company Size or select one of the preset ranges.', 'error');
           document.getElementById('companySizeCustomInput').focus();
           return;
@@ -1699,8 +1844,8 @@
           id: cid,
           name: cname || cid,
           department: clientOwner,
-          country: document.getElementById('targetCountries').value.trim(),
-          industry: document.getElementById('targetIndustries').value.trim(),
+          country: getSelectedTargetCountries_(),
+          industry: getSelectedTargetIndustries_(),
           size: getSelectedCompanySize_(),
           limit: Number(document.getElementById('companyLimit').value) || 5,
           researchDepth: document.getElementById('researchDepth').value,
