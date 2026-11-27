@@ -19,6 +19,8 @@ const APP_CONFIG = Object.freeze({
   defaultOpenAiModel: 'gpt-4o',
   geminiApiKeyProperty: 'GEMINI_API_KEY',
   openAiApiKeyProperty: 'OPENAI_API_KEY',
+  serperApiKeyProperty: 'SERPER_API_KEY',
+  serperSearchUrl: 'https://google.serper.dev/search',
   openAiResponsesUrl: 'https://api.openai.com/v1/responses',
   openAiChatCompletionsUrl: 'https://api.openai.com/v1/chat/completions',
   defaultEmailVerifier: 'ZeroBounce',
@@ -32,10 +34,18 @@ const APP_CONFIG = Object.freeze({
   guardrails: {
     defaultDailySpendCapUsd: 10.00,        // Max daily spend limit in USD before hard exit
     defaultMinVerifierCredits: 500,        // Minimum email verification credits before email alert
-    // Standard Pricing Rates (per 1 Million tokens for LLMs, per credit for verifiers)
+    // Standard Pricing Rates (per 1 Million tokens for LLMs, per unit/query for search & verifiers)
     pricing: {
+      'gemini-4-carbon':       { inputPer1M: 2.00,  outputPer1M: 10.00 },
+      'gemini-4-argon':        { inputPer1M: 2.00,  outputPer1M: 10.00 },
+      'gemini-4-neon':         { inputPer1M: 3.00,  outputPer1M: 15.00 },
+      'gemini-4-hydrogen':     { inputPer1M: 1.50,  outputPer1M: 7.50 },
       'gemini-3.8-flash':      { inputPer1M: 0.75,  outputPer1M: 3.75 },
+      'gemini-3.6-flash':      { inputPer1M: 0.75,  outputPer1M: 3.75 },
       'gemini-3.5-flash-lite': { inputPer1M: 0.30,  outputPer1M: 2.50 },
+      'gemini-3.1-flash-lite': { inputPer1M: 0.25,  outputPer1M: 1.50 },
+      'gemini-3.1-pro':        { inputPer1M: 2.00,  outputPer1M: 12.00 },
+      'gemini-3-flash':        { inputPer1M: 0.50,  outputPer1M: 3.00 },
       'gemini-2.5-flash-lite': { inputPer1M: 0.10,  outputPer1M: 0.40 },
       'gemini-2.5-flash':      { inputPer1M: 0.30,  outputPer1M: 2.50 },
       'gemini-2.5-pro':        { inputPer1M: 1.25,  outputPer1M: 10.00 },
@@ -47,6 +57,7 @@ const APP_CONFIG = Object.freeze({
       'gpt-4.1-mini':          { inputPer1M: 0.80,  outputPer1M: 3.20 },
       'o1-mini':               { inputPer1M: 1.10,  outputPer1M: 4.40 },
       'o4-mini':               { inputPer1M: 1.10,  outputPer1M: 4.40 },
+      'Serper':                { costPerUnit: 0.001 },
       'ZeroBounce':            { costPerUnit: 0.007 },
       'MillionVerifier':       { costPerUnit: 0.003 },
       'NeverBounce':           { costPerUnit: 0.008 },

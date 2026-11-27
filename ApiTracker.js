@@ -6,7 +6,7 @@
  * File: ApiTracker.gs / ApiTracker.js
  *
  * PURPOSE:
- * 1. Logs every external API call (LLMs, Verifiers) to "API_Usage_Log" (10 canonical cols).
+ * 1. Logs every external API call (LLMs, Serper Search, Verifiers) to "API_Usage_Log" (10 canonical cols).
  * 2. Tags usage entries with Client / Owner context for effortless client spend auditing.
  * 3. Calculates accurate dollar cost via exact & longest-prefix pricing lookup.
  * 4. Enforces pre-flight daily spend hard caps isolated per Client / Owner
@@ -15,7 +15,7 @@
  * 5. Checks verifier balances & dispatches throttled low-balance alerts for
  *    ZeroBounce, MillionVerifier, and NeverBounce.
  * 6. Runs $0.00 read-only Connection & Budget Audits for ControlPanel.html without
- *    spending AI/verifier credits, sending emails, or exposing raw secrets.
+ *    spending AI/search/verifier credits, sending emails, or exposing raw secrets.
  * ============================================================================
  */
 
@@ -181,7 +181,7 @@ function logApiUsage_(data) {
 
 /**
  * Calculates estimated dollar cost based on APP_CONFIG pricing (exact + longest-prefix match)
- * with conservative LLM fallback pricing so unmapped models never under-report at $0.0001.
+ * with conservative LLM/Serper fallback pricing so unmapped models never under-report.
  */
 function calculateApiCost_(modelName, inputUnits, outputUnits, serviceName) {
   try {
@@ -230,7 +230,7 @@ function calculateApiCost_(modelName, inputUnits, outputUnits, serviceName) {
       }
     }
 
-    // 3. Exact or case-insensitive match on serviceName (e.g. ZeroBounce, MillionVerifier)
+    // 3. Exact or case-insensitive match on serviceName (e.g. Serper, ZeroBounce, MillionVerifier)
     if (serviceKey && pricing[serviceKey]) {
       const svcCost = computeFromSpec(pricing[serviceKey]);
       if (svcCost !== null) return svcCost;
@@ -241,6 +241,13 @@ function calculateApiCost_(modelName, inputUnits, outputUnits, serviceName) {
     if (svcMatch) {
       const svcCaseCost = computeFromSpec(pricing[svcMatch]);
       if (svcCaseCost !== null) return svcCaseCost;
+    }
+
+    if (serviceKeyLow.indexOf('serper') >= 0 || rateKeyLow.indexOf('serper') >= 0) {
+      const serperCostPerUnit = (pricing['Serper'] && pricing['Serper'].costPerUnit !== undefined)
+        ? Number(pricing['Serper'].costPerUnit)
+        : 0.001;
+      return Number((inUnits * serperCostPerUnit).toFixed(4));
     }
 
     // 4. Conservative fallback for unmapped LLM models when tokens were consumed
@@ -635,7 +642,7 @@ function getClientBudgetSnapshot(clientName, campaignId) {
 
 /**
  * Performs a $0.00 read-only Connection & Budget Audit for the active Client & Campaign.
- * Never spends AI tokens or verification credits, never sends email, and never returns raw secrets.
+ * Never spends AI tokens, search queries, or verification credits, never sends email, and never returns raw secrets.
  */
 function runClientConnectionAndBudgetAudit(auditInput) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -695,6 +702,9 @@ function runClientConnectionAndBudgetAudit(auditInput) {
   // 4. Email Dispatch Channel Check (Read-only auth/ping)
   const senderCheck = auditSenderConnection_(ss, clientName, campaignId, isLocal, prefix, senderProvider, senderEndpoint, senderEmail);
 
+  // 5. Optional Serper Search Check ($0.00 Script Property presence check only)
+  const serperCheck = auditSerperConnection_(ss, clientName, campaignId, isLocal);
+
   const allStatuses = [budgetCheck.status, aiCheck.status, verifierCheck.status, senderCheck.status];
   let overallStatus = 'PASS';
   if (allStatuses.indexOf('FAIL') >= 0) overallStatus = 'FAIL';
@@ -709,7 +719,37 @@ function runClientConnectionAndBudgetAudit(auditInput) {
     ai: aiCheck,
     verifier: verifierCheck,
     sender: senderCheck,
+    serper: serperCheck,
     checkedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'HH:mm:ss')
+  };
+}
+
+function auditSerperConnection_(ss, clientName, campaignId, isLocal) {
+  const baseProp = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.serperApiKeyProperty)
+    ? APP_CONFIG.serperApiKeyProperty
+    : 'SERPER_API_KEY';
+  const prefix = isLocal ? '' : getTrackerClientPrefix_(clientName);
+  let resolved = { key: '', propertyUsed: '', expectedProperty: prefix + baseProp };
+
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    resolved = resolveClientScopedSecret_(
+      [baseProp],
+      { campaignId: campaignId, clientName: clientName },
+      { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: ss }
+    );
+  } else if (isLocal) {
+    const val = PropertiesService.getScriptProperties().getProperty(baseProp);
+    if (val) resolved = { key: val, propertyUsed: baseProp, expectedProperty: baseProp };
+  }
+
+  return {
+    status: resolved.key ? 'PASS' : 'INFO',
+    configured: Boolean(resolved.key),
+    propertyUsed: resolved.propertyUsed || '',
+    expectedProperty: resolved.expectedProperty || (prefix + baseProp),
+    message: resolved.key
+      ? ('Configured (' + resolved.propertyUsed + ') — Google Search LinkedIn/Leadership pre-search enabled ($0.00 property check).')
+      : ('Optional: Add ' + (resolved.expectedProperty || (prefix + baseProp)) + ' in Script Properties for live Google Search persona verification.')
   };
 }
 

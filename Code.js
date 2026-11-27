@@ -689,6 +689,47 @@ function filterAgentSettingsForClientWorkspace(clientName) {
 }
 
 /**
+ * Safely syncs Growth Target default GEMINI_MODEL / OPENAI_MODEL in "Agent Settings"
+ * when explicitly saving a local campaign, respecting strict cell dropdown validation.
+ */
+function syncLocalAgentModelDefault_(ss, aiProvider, aiModel) {
+  if (!ss || !aiModel) return;
+  const agentSheet = ss.getSheetByName('Agent Settings');
+  if (!agentSheet || agentSheet.getLastRow() <= 1) return;
+
+  const prov = String(aiProvider || 'GEMINI').toUpperCase();
+  const targetNormKey = prov.indexOf('OPENAI') >= 0 ? 'OPENAIMODEL' : 'GEMINIMODEL';
+  const desiredModel = String(aiModel).trim();
+  if (!desiredModel) return;
+
+  const keys = agentSheet.getRange(2, 2, agentSheet.getLastRow() - 1, 1).getValues();
+  for (let r = 0; r < keys.length; r++) {
+    if (normalizeStudioKey(keys[r][0]) !== targetNormKey) continue;
+
+    const valCell = agentSheet.getRange(r + 2, 3);
+    let canWrite = true;
+    try {
+      const rule = valCell.getDataValidation();
+      if (rule && !rule.getAllowInvalid() &&
+          rule.getCriteriaType() === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+        const allowed = rule.getCriteriaValues()[0] || [];
+        const matched = allowed.find(function(item) {
+          return String(item || '').trim().toLowerCase() === desiredModel.toLowerCase();
+        });
+        if (!matched) {
+          canWrite = false;
+        }
+      }
+    } catch (e) {}
+
+    if (canWrite) {
+      valCell.setValue(desiredModel);
+    }
+    break;
+  }
+}
+
+/**
  * Safely resolves reviewer email without throwing if userinfo.email scope is restricted.
  */
 function getSafeReviewerEmail_() {
@@ -1353,7 +1394,8 @@ function selectAndActivateCampaign(cid) {
  * Preserves the exact 38 parameter rows in Campaign Configuration without erasing validations.
  * Honors isActivationOnly so switching campaigns never overwrites saved rows in
  * Campaigns or Persona Mapper Settings. When saving (!isActivationOnly), also syncs
- * Campaign Name across Company Intelligence, Persona Leads, and Prospect Review Queue.
+ * Campaign Name across Company Intelligence, Persona Leads, and Prospect Review Queue,
+ * and updates local Agent Settings GEMINI_MODEL / OPENAI_MODEL if Growth Target is saved.
  */
 function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
   if (!payload || !payload.id) {
@@ -1599,13 +1641,19 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
     syncCampaignNameAcrossOperationalTabs_(ss, campId, campName);
   }
 
-  const dashboardPayload = Object.assign({}, payload, { department: clientOwner, status: status });
-  updateDashboardForActiveCampaign(dashboardPayload);
-
-  // Sync Agent Settings key protection badges & filter to active Client / Owner (preserves edited spend caps)
+  // Sync Agent Settings key protection badges & dropdowns first
   if (typeof setupAgentSettingsTabDropdowns === 'function') {
     setupAgentSettingsTabDropdowns(ss, clientOwner);
   }
+
+  // Safely sync Growth Target's GEMINI_MODEL / OPENAI_MODEL default row on explicit save
+  if (!isActivationOnly && isLocalAgencyClient_(clientOwner) && payload.aiModel) {
+    syncLocalAgentModelDefault_(ss, payload.aiProvider, payload.aiModel);
+  }
+
+  const dashboardPayload = Object.assign({}, payload, { department: clientOwner, status: status });
+  updateDashboardForActiveCampaign(dashboardPayload);
+
   if (typeof refreshDeliverabilityFilterDropdowns_ === 'function') {
     refreshDeliverabilityFilterDropdowns_(ss);
   }
@@ -1621,7 +1669,7 @@ function studioDirectSaveCampaignPipeline(payload, isActivationOnly) {
 }
 
 /**
- * EXACT 4-COLUMN DASHBOARD UPDATER (Client-Aware AI & Email Verifier Key Checks)
+ * EXACT 4-COLUMN DASHBOARD UPDATER (Client-Aware AI, Verifier & Serper Key Checks)
  */
 function updateDashboardForActiveCampaign(payloadOrId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -1737,6 +1785,17 @@ function updateDashboardForActiveCampaign(payloadOrId) {
       : (verifKeyInfo.isLocal ? 'Key Not Configured' : ('Missing: ' + verifKeyInfo.expectedProperty));
   }
 
+  // Client-scoped Serper Search key check (optional enhancement, zero local fallback for external clients)
+  const serperKeyInfo = resolveClientScopedSecret_(
+    ['SERPER_API_KEY'],
+    { campaignId: cid, clientName: dept },
+    { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: ss }
+  );
+  const serperDisplay = serperKeyInfo.key ? 'Serper.dev (Google Search)' : 'Not Configured (Optional)';
+  const serperStatus = serperKeyInfo.key
+    ? 'Connected'
+    : (serperKeyInfo.isLocal ? 'Optional (Not Set)' : ('Optional: ' + serperKeyInfo.expectedProperty));
+
   const nowTimestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy HH:mm:ss');
 
   let discoveredCount = 0;
@@ -1798,6 +1857,7 @@ function updateDashboardForActiveCampaign(payloadOrId) {
   dashSheet.getRange('B2').setValue(cid);
 
   let verifierRowUpdated = false;
+  let serperRowUpdated = false;
   const kpiMaxRow = Math.min(dashSheet.getLastRow(), 15);
   if (kpiMaxRow >= 4) {
     const labels = dashSheet.getRange(4, 1, kpiMaxRow - 3, 1).getValues();
@@ -1855,6 +1915,12 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         dashSheet.getRange(rowNum, 3).setValue(verifierStatus);
         dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
         verifierRowUpdated = true;
+      } else if (label.includes('SERPER')) {
+        dashSheet.getRange(rowNum, 1).setValue('Serper Search Configured');
+        dashSheet.getRange(rowNum, 2).setValue(serperDisplay);
+        dashSheet.getRange(rowNum, 3).setValue(serperStatus);
+        dashSheet.getRange(rowNum, 4).setValue(nowTimestamp);
+        serperRowUpdated = true;
       }
     }
   }
@@ -1874,6 +1940,26 @@ function updateDashboardForActiveCampaign(payloadOrId) {
         'Email Verifier Configured',
         verifierDisplay,
         verifierStatus,
+        nowTimestamp
+      ]]);
+    }
+  }
+
+  // Safely populate Row 15 ("Serper Search Configured") in reserved spacer slot without shifting Row 16+ Rollup
+  if (!serperRowUpdated) {
+    const row15Existing = normalizeStudioKey(dashSheet.getRange(15, 1).getValue());
+    if (!row15Existing || row15Existing.includes('SERPER')) {
+      if (!row15Existing) {
+        dashSheet.getRange('A14:D14').copyTo(
+          dashSheet.getRange('A15:D15'),
+          SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+          false
+        );
+      }
+      dashSheet.getRange(15, 1, 1, 4).setValues([[
+        'Serper Search Configured',
+        serperDisplay,
+        serperStatus,
         nowTimestamp
       ]]);
     }
@@ -2225,6 +2311,14 @@ function runStudioSpreadsheetAudit() {
     setupAgentSettingsTabDropdowns(ss, activeClient);
   }
 
+  if (activeId && activeId !== 'No Active Campaign' && activeId !== 'Select Campaign') {
+    try {
+      updateDashboardForActiveCampaign(activeId);
+    } catch (dashErr) {
+      Logger.log('Dashboard refresh notice during audit: ' + dashErr.message);
+    }
+  }
+
   const requiredTabs = [
     'Dashboard',
     'API_Usage_Log',
@@ -2316,6 +2410,20 @@ function runStudioSpreadsheetAudit() {
     }
   }
 
+  const localSerperInfo = resolveClientScopedSecret_(
+    ['SERPER_API_KEY'],
+    { campaignId: activeId, clientName: 'Growth Target' },
+    { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: ss }
+  );
+  const activeClientIsExternal = !isLocalAgencyClient_(activeClient);
+  const activeClientSerperInfo = activeClientIsExternal
+    ? resolveClientScopedSecret_(
+        ['SERPER_API_KEY'],
+        { campaignId: activeId, clientName: activeClient },
+        { throwOnMissing: false, allowAgentSettingsForLocal: false, spreadsheet: ss }
+      )
+    : null;
+
   let dispatchChannel = 'Workspace Gmail (Drafts Only)';
   const cfgSheet = ss.getSheetByName('Campaign Configuration');
   if (cfgSheet && cfgSheet.getLastRow() > 1) {
@@ -2330,6 +2438,8 @@ function runStudioSpreadsheetAudit() {
   }
 
   const registeredClients = getRegisteredClientsList_(ss);
+  const totalExpectedTabs = requiredTabs.length + deliverabilityTabs.length;
+  const totalPresentTabs = present.length + delivPresent.length;
 
   let apiKeyInfo = 'Not Configured (Add key in Project Settings > Script Properties)';
   if (detectedLocalKeys.length > 0) {
@@ -2339,18 +2449,27 @@ function runStudioSpreadsheetAudit() {
   let message = '📊 SPREADSHEET SYSTEM HEALTH CHECK:\n\n';
   message += '• Active Campaign: ' + activeId + ' (Client / Owner: ' + activeClient + ')\n';
   message += '• Registered Clients: ' + registeredClients.join(', ') + '\n';
-  message += '• Core Project Tabs Verified: ' + present.length + ' of ' + requiredTabs.length + ' Tabs Active\n';
+  message += '• Project Tabs Verified: ' + totalPresentTabs + ' of ' + totalExpectedTabs + ' Tabs Active (' +
+    present.length + '/' + requiredTabs.length + ' Core + ' + delivPresent.length + '/' + deliverabilityTabs.length + ' Deliverability)' +
+    (missing.length === 0 && delivMissing.length === 0 ? ' ✅\n' : '\n');
+
   if (missing.length > 0) {
     message += '⚠️ Missing Core Tabs: ' + missing.join(', ') + '\n';
-  } else {
-    message += '✅ All 13 core project tabs exist and match system schema.\n';
+  }
+  if (delivMissing.length > 0) {
+    message += '⚠️ Missing Deliverability Tabs: ' + delivMissing.join(', ') + ' (run setupEmailDeliverabilityModule)\n';
+  }
+  if (missing.length === 0 && delivMissing.length === 0) {
+    message += '✅ All 15 project tabs exist and match system schema.\n';
   }
 
-  message += '• Deliverability Tabs: ' + delivPresent.length + ' of ' + deliverabilityTabs.length + ' Active' +
-    (delivMissing.length > 0 ? (' (Missing: ' + delivMissing.join(', ') + ' — run setupEmailDeliverabilityModule)') : ' ✅') + '\n';
   message += '• Hourly Deliverability Sync Trigger: ' + (hourlySyncActive ? 'Active ✅' : 'Not Installed (Enable from menu)') + '\n\n';
 
   message += '• Local Agency AI Status: ' + apiKeyInfo + '\n';
+  message += '• Local Serper Search Status: ' + (localSerperInfo.key ? ('Connected (' + localSerperInfo.propertyUsed + ') ✅') : 'Not Configured (Optional — add SERPER_API_KEY)') + '\n';
+  if (activeClientIsExternal && activeClientSerperInfo) {
+    message += '• Active Client (' + activeClient + ') Serper Status: ' + (activeClientSerperInfo.key ? ('Connected (' + activeClientSerperInfo.propertyUsed + ') ✅') : ('Optional (Add ' + activeClientSerperInfo.expectedProperty + ')')) + '\n';
+  }
   message += '• Client-Isolated Properties Detected: ' + detectedClientKeys.length + ' key(s)\n';
   message += '• Email Dispatch Channel: ' + dispatchChannel + '\n';
   message += '• Suppression Engine: Active (checking Lists & Settings)\n';

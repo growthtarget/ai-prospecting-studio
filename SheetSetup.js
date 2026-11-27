@@ -14,7 +14,8 @@
  * 4. Enforces plain integer formatting (0) on limit/score columns to prevent date conversion.
  * 5. Ensures "Prospect Review Queue" includes trailing tracking columns (Dispatch Mode,
  *    Thread / Message ID, Draft Created At) in AT:AV without shifting existing cols A:AS.
- * 6. Pre-populates "Agent Settings" with Growth Target defaults + per-client status,
+ * 6. Pre-populates "Agent Settings" with Growth Target defaults + per-client status
+ *    (including protected SERPER_API_KEY / CLIENT_{NAME}_SERPER_API_KEY badges),
  *    spend caps, verifier thresholds, and daily send limits.
  * 7. Filters "Agent Settings" cleanly to the active Client / Owner.
  * 8. Initializes and formats "API_Usage_Log" (Tab 2) plus "EmailEvents" & "Email Deliverability".
@@ -633,7 +634,11 @@ function setupCampaignConfigurationTab(ss) {
     'COMPANY_SIZE_RANGE': ['10 - 50 employees', '50 - 250 employees', '250 - 1000 employees', '1000+ Enterprise'],
     'MAX_COMPANIES': ['3', '5', '10', '25', '50'],
     'MIN_EMAIL_PRIORITY_SCORE': ['70', '75', '80', '85', '90'],
-    'AI_MODEL': ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gpt-4o', 'gpt-4o-mini', 'o1-mini']
+    'AI_MODEL': [
+      'gemini-4-hydrogen', 'gemini-4-neon', 'gemini-4-argon', 'gemini-4-carbon',
+      'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash',
+      'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'o1-mini'
+    ]
   };
 
   const integerKeys = ['MAX_COMPANIES', 'EVIDENCE_PERIOD_MONTHS', 'MIN_COMPANY_SCORE', 'MIN_PERSONA_SCORE', 'MIN_EMAIL_PRIORITY_SCORE'];
@@ -882,7 +887,8 @@ function setupListsAndSettingsTabDropdowns(ss) {
  * Formats, Populates & Dynamically Refreshes "Agent Settings"
  * Layout: Category | Setting Key | Value | Status / Description
  * Includes Growth Target (Local Default) rows AND per-client rows for every external client,
- * including editable DAILY_SPEND_CAP_USD, MIN_VERIFIER_CREDITS, and DAILY_SEND_LIMIT.
+ * including protected SERPER_API_KEY / CLIENT_{NAME}_SERPER_API_KEY indicators,
+ * spend caps, verifier thresholds, and daily send limits.
  */
 function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
   const spreadsheet = ss || SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
@@ -935,6 +941,7 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
 
   const hasGemini = checkLocalPropertyConfigured('GEMINI_API_KEY');
   const hasOpenAi = checkLocalPropertyConfigured('OPENAI_API_KEY');
+  const hasSerper = checkLocalPropertyConfigured('SERPER_API_KEY');
   const hasSmartlead = checkLocalPropertyConfigured('SMARTLEAD_API_KEY');
   const hasInstantly = checkLocalPropertyConfigured('INSTANTLY_API_KEY');
   const hasMsTenantId = checkLocalPropertyConfigured('MS_TENANT_ID');
@@ -956,6 +963,7 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
     ['API Credentials', 'GEMINI_API_KEY', hasGemini ? protectedMsg : '', 'Growth Target Gemini API key (encrypted in Script Properties)'],
     ['API Credentials', 'OPENAI_API_KEY', hasOpenAi ? protectedMsg : '', 'Growth Target OpenAI API key (encrypted in Script Properties)'],
     ['Search Grounding', 'GOOGLE_SEARCH_GROUNDING', 'TRUE', 'Enable live Google Search Grounding for Growth Target'],
+    ['Search Grounding', 'SERPER_API_KEY', hasSerper ? protectedMsg : '', 'Growth Target Serper.dev Google Search key (optional; encrypted in Script Properties)'],
     ['Email Verification', 'VERIFIER_PROVIDER', 'ZeroBounce', 'Default email verification vendor for Growth Target'],
     ['API Credentials', 'VERIFIER_API_KEY', hasVerifier ? protectedMsg : '', 'Growth Target verifier API key (encrypted in Script Properties)'],
     ['Outreach Sequencers', 'SMARTLEAD_API_KEY', hasSmartlead ? protectedMsg : '', 'Growth Target Smartlead key (encrypted in Script Properties)'],
@@ -971,6 +979,7 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
   const secretValueByKey = {
     'GEMINIAPIKEY': hasGemini ? protectedMsg : '',
     'OPENAIAPIKEY': hasOpenAi ? protectedMsg : '',
+    'SERPERAPIKEY': hasSerper ? protectedMsg : '',
     'VERIFIERAPIKEY': hasVerifier ? protectedMsg : '',
     'EMAILVERIFICATIONAPIKEY': hasVerifier ? protectedMsg : '',
     'SMARTLEADAPIKEY': hasSmartlead ? protectedMsg : '',
@@ -1003,6 +1012,7 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
 
     const cGemini = checkClientPropertyConfigured(prefix, ['GEMINI_API_KEY']);
     const cOpenAi = checkClientPropertyConfigured(prefix, ['OPENAI_API_KEY']);
+    const cSerper = checkClientPropertyConfigured(prefix, ['SERPER_API_KEY']);
     const cVerifier = checkClientPropertyConfigured(prefix, [
       'ZEROBOUNCE_API_KEY',
       'MILLIONVERIFIER_API_KEY',
@@ -1026,6 +1036,7 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
       [catLabel, prefix + 'GEMINI_API_KEY', cGemini ? protectedMsg : '', clientName + ' Gemini API key (add in Project Settings > Script Properties)'],
       [catLabel, prefix + 'OPENAI_API_KEY', cOpenAi ? protectedMsg : '', clientName + ' OpenAI API key (add in Project Settings > Script Properties)'],
       [catLabel, prefix + 'GOOGLE_SEARCH_GROUNDING', 'TRUE', 'Enable live Search Grounding for ' + clientName + ' (optional Script Property override)'],
+      [catLabel, prefix + 'SERPER_API_KEY', cSerper ? protectedMsg : '', clientName + ' Serper.dev Google Search key (optional; add in Script Properties)'],
       [catLabel, prefix + 'VERIFIER_API_KEY', cVerifier ? protectedMsg : '', clientName + ' verifier key (ZeroBounce / MillionVerifier / NeverBounce in Script Properties)'],
       [catLabel, prefix + 'SMARTLEAD_API_KEY', cSmartlead ? protectedMsg : '', clientName + ' Smartlead API key (add in Script Properties)'],
       [catLabel, prefix + 'INSTANTLY_API_KEY', cInstantly ? protectedMsg : '', clientName + ' Instantly API key (add in Script Properties)'],
@@ -1093,8 +1104,11 @@ function setupAgentSettingsTabDropdowns(ss, activeClientOverride) {
 
   const agentKeyDropdowns = {
     'PRIMARYAIPROVIDER': ['GEMINI', 'OPENAI'],
-    'GEMINIMODEL': ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'],
-    'OPENAIMODEL': ['gpt-4o', 'gpt-4o-mini', 'o1-mini'],
+    'GEMINIMODEL': [
+      'gemini-4-hydrogen', 'gemini-4-neon', 'gemini-4-argon', 'gemini-4-carbon',
+      'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'
+    ],
+    'OPENAIMODEL': ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'o1-mini'],
     'GOOGLESEARCHGROUNDING': ['TRUE', 'FALSE'],
     'VERIFIERPROVIDER': ['ZeroBounce', 'MillionVerifier', 'NeverBounce', 'Custom HTTPS', 'None']
   };

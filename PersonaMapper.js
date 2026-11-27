@@ -6,21 +6,31 @@
  * File: PersonaMapper.gs / PersonaMapper.js
  *
  * CAPABILITIES:
- * 1. Multi-AI Support: Routes dynamically to GEMINI (Grounding) or OPENAI (GPT-4o)
+ * 1. Multi-AI Support: Routes dynamically to GEMINI (Grounding) or OPENAI
  *    using strict Client-Scoped API keys (zero local fallback for clients).
- * 2. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
+ * 2. Optional Serper.dev Google Search Pre-Enrichment (Step B):
+ *    - Resolves SERPER_API_KEY / CLIENT_{NAME}_SERPER_API_KEY strictly per client.
+ *    - Retrieves real Google-indexed site:linkedin.com/in profiles and company
+ *      leadership pages (num: 10 = 1 credit / ~$0.001 per query) before AI scoring.
+ * 3. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
  *    Custom HTTPS keys strictly per Client / Owner (validated pre-flight before AI calls).
- * 3. Campaign-Level Anti-Duplication:
+ * 4. Anti-Hallucination & Profile Sanitization (Step A Hardening):
+ *    - Rejects generic role placeholders ("VP Procurement", "Procurement Leader", etc.)
+ *      before spending email verification credits.
+ *    - Strips bare linkedin.com, /search/ links, role-fabricated slugs, and
+ *      ungrounded AI-guessed /in/ URLs (leaving LinkedIn URL blank rather than 404).
+ * 5. Campaign-Level Anti-Duplication:
  *    - Automatically skips companies in the same Campaign ID that already have mapped personas.
  *    - Deduplicates personas per Campaign ID across normalized LinkedIn URLs,
  *      Business Emails, and normalized Person Name + Company before spending verifier credits.
- * 4. Manual Queue Verification: Supports verifying selected visible rows in
- *    "Prospect Review Queue" on demand and syncing results to "Persona Leads".
- * 5. Real-Time Suppression: Cross-references Lists & Settings for competitor domains,
- *    opt-out emails, and role-based accounts before verification & queuing.
- * 6. Dual-Tab Intelligence: Enriches "Persona Leads" (29 cols) and "Prospect Review Queue" (45 base cols).
- * 7. Grounding Evidence Logging: Persists verified decision-maker signals into "Research Evidence" (9 cols).
- * 8. API Usage & Cost Tracking: Logs LLM token costs and email verifier credit usage to "API_Usage_Log".
+ * 6. Real-Time Suppression & Auto-Rejection:
+ *    - Cross-references Lists & Settings for competitor domains, opt-out emails,
+ *      and role-based accounts before verification & queuing.
+ *    - Automatically rejects & suppresses verified "invalid" emails during Step 2
+ *      and manual "Verify Selected Prospect Emails" runs.
+ * 7. Dual-Tab Intelligence & Grounding Evidence: Enriches "Persona Leads" (29 cols),
+ *    "Prospect Review Queue" (45 base cols), and "Research Evidence" (9 cols).
+ * 8. API Usage & Cost Tracking: Logs LLM tokens, Serper queries, and verifier credits to "API_Usage_Log".
  * ============================================================================
  */
 
@@ -567,7 +577,7 @@ function runPersonaMapperFromSidebar(campaignId) {
       };
     }
 
-    // Fail-fast before making any paid AI or Verifier API calls
+    // Fail-fast before making any paid AI, Serper, or Verifier API calls
     validatePersonaPreRunGuardrails_(spreadsheet, activeId, settings);
 
     const suppressionRules = loadSuppressionRulesFromSettings_(spreadsheet);
@@ -575,8 +585,18 @@ function runPersonaMapperFromSidebar(campaignId) {
     const mappedTracker = getMappedCompanyTracker_(spreadsheet, activeId);
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
     const batchCompanies = unmappedCompanies.slice(0, batchLimit);
+    const isPilotCampaign = activeId.toUpperCase().indexOf('PILOT-') === 0;
+    const newlyInvalidEmails = [];
+    const validationCache = {};
+
     let processed = 0;
+    let mappedPersonaCount = 0;
     let skippedDuplicatePersonas = 0;
+    let rejectedPlaceholderCount = 0;
+    let strippedLinkedInCount = 0;
+    let autoSuppressedInvalidCount = 0;
+    let serperCompaniesEnriched = 0;
+    let serperLinkedInCandidatesFound = 0;
 
     const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
     const minConfidenceRank = resolveMinPersonaConfidenceRank_(settings['Minimum Persona Confidence']);
@@ -595,13 +615,18 @@ function runPersonaMapperFromSidebar(campaignId) {
       }
 
       const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, activeId, companyName);
+      const serperContext = fetchSerperPersonaSearchContext_(company, settings, spreadsheet);
+      if (serperContext && serperContext.enabled) {
+        if (serperContext.hasResults) serperCompaniesEnriched++;
+        serperLinkedInCandidatesFound += (serperContext.linkedinResults ? serperContext.linkedinResults.length : 0);
+      }
 
       const aiResponse = executeAiCall_({
         campaignId: activeId,
         clientName: clientName,
         provider: providerChoice,
         model: modelChoice,
-        prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets),
+        prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext),
         enableWebSearch: true,
         json: true,
         operation: 'PersonaMapping'
@@ -622,7 +647,18 @@ function runPersonaMapperFromSidebar(campaignId) {
         ? result.personas
         : (result.persona && typeof result.persona === 'object' ? [result.persona] : []);
 
-      personasList.forEach(function(persona) {
+      personasList.forEach(function(rawPersona) {
+        if (!rawPersona || typeof rawPersona !== 'object') return;
+
+        const cleanCheck = sanitizePersonaCandidate_(rawPersona, company, aiResponse, grounding, serperContext);
+        if (cleanCheck.strippedLinkedIn) strippedLinkedInCount++;
+        if (!cleanCheck.valid) {
+          rejectedPlaceholderCount++;
+          Logger.log('Rejected unverified/placeholder persona for ' + companyName + ': ' + cleanCheck.reason);
+          return;
+        }
+
+        const persona = cleanCheck.persona;
         const confidence = titleCaseSignal_(persona.confidence) || 'Medium';
         if (confidence === 'Low' || confidenceRank_(confidence) < minConfidenceRank) return;
         if (companyScore.score < minCompanyScore) return;
@@ -643,19 +679,43 @@ function runPersonaMapperFromSidebar(campaignId) {
           return;
         }
 
-        const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings);
-        upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
+        if (emailInfo.shouldAutoSuppress && emailInfo.businessEmail && !isPilotCampaign) {
+          newlyInvalidEmails.push(emailInfo.businessEmail);
+          if (suppressionRules.emails.indexOf(emailInfo.businessEmail) < 0) {
+            suppressionRules.emails.push(emailInfo.businessEmail);
+          }
+          autoSuppressedInvalidCount++;
+        } else if (emailInfo.emailVerificationStatus === 'invalid') {
+          autoSuppressedInvalidCount++;
+        }
+
+        const personaSheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas);
+        const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings, personaSheet, validationCache);
+        upsertPreservingNonEmpty_(personaSheet, PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
+
         const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings, suppressionRules);
         upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
 
         registerPersonaInCampaignTracker_(persona, company, existingPersonaTracker, emailInfo);
-        recordPersonaGroundingEvidence_(spreadsheet, activeId, company, persona, grounding, settings['Persona Titles']);
+        recordPersonaGroundingEvidence_(spreadsheet, activeId, company, persona, grounding, settings['Persona Titles'], serperContext);
+        mappedPersonaCount++;
       });
 
       if (result.company && Array.isArray(result.company.evidence)) {
         result.company.evidence.forEach(function(evItem) {
           if (evItem && evItem.url) {
-            recordCompanyGroundingEvidence_(spreadsheet, activeId, company, evItem, grounding, settings['Campaign Focus']);
+            const cleanEvUrl = sanitizeHttpUrl_(evItem.url);
+            if (cleanEvUrl) {
+              recordCompanyGroundingEvidence_(
+                spreadsheet,
+                activeId,
+                company,
+                Object.assign({}, evItem, { url: cleanEvUrl }),
+                grounding,
+                settings['Campaign Focus'],
+                serperContext
+              );
+            }
           }
         });
       }
@@ -663,6 +723,14 @@ function runPersonaMapperFromSidebar(campaignId) {
       if (companyId) mappedTracker.companyIds[companyId.toLowerCase()] = true;
       if (normCompName) mappedTracker.companyNames[normCompName] = true;
       processed++;
+    }
+
+    if (newlyInvalidEmails.length > 0) {
+      if (typeof appendSuppressedEmailsToLists_ === 'function') {
+        appendSuppressedEmailsToLists_(spreadsheet, newlyInvalidEmails, 'Suppression - Email', 'invalid verified email(s)');
+      } else {
+        suppressInvalidVerifiedEmails_(spreadsheet, newlyInvalidEmails);
+      }
     }
 
     if (typeof checkVerifierBalanceAndAlert_ === 'function') {
@@ -676,21 +744,25 @@ function runPersonaMapperFromSidebar(campaignId) {
 
     properties.deleteProperty(cursorKey);
     const remainingUnmapped = Math.max(0, unmappedCompanies.length - batchCompanies.length);
-    const dupNote = skippedDuplicatePersonas > 0
-      ? (' (' + skippedDuplicatePersonas + ' duplicate persona(s) automatically skipped)')
-      : '';
+    const notes = [];
+    if (serperCompaniesEnriched > 0) notes.push('Serper found ' + serperLinkedInCandidatesFound + ' LinkedIn candidate(s)');
+    if (skippedDuplicatePersonas > 0) notes.push(skippedDuplicatePersonas + ' duplicate skipped');
+    if (rejectedPlaceholderCount > 0) notes.push(rejectedPlaceholderCount + ' generic placeholder(s) rejected');
+    if (strippedLinkedInCount > 0) notes.push(strippedLinkedInCount + ' unverified LinkedIn link(s) cleared');
+    if (autoSuppressedInvalidCount > 0) notes.push(autoSuppressedInvalidCount + ' invalid email(s) auto-rejected');
+    const noteSuffix = notes.length > 0 ? (' (' + notes.join(', ') + ')') : '';
 
     if (remainingUnmapped === 0) {
       return {
         success: true,
         count: processed,
-        message: 'Persona Mapper completed ' + processed + ' unmapped company record(s) for "' + clientName + '" using ' + providerLabel + '!' + dupNote + ' Leads staged in Review Queue & citations logged in Research Evidence.'
+        message: 'Persona Mapper processed ' + processed + ' company record(s) (' + mappedPersonaCount + ' persona(s) mapped) for "' + clientName + '" using ' + providerLabel + '!' + noteSuffix + ' Leads staged in Review Queue & citations logged in Research Evidence.'
       };
     } else {
       return {
         success: true,
         count: processed,
-        message: 'Processed ' + processed + ' unmapped company record(s) for "' + clientName + '" with ' + providerLabel + '.' + dupNote + ' ' + remainingUnmapped + ' unmapped company record(s) remaining—click Step 2 again to run next batch.'
+        message: 'Processed ' + processed + ' company record(s) (' + mappedPersonaCount + ' persona(s) mapped) for "' + clientName + '" with ' + providerLabel + '.' + noteSuffix + ' ' + remainingUnmapped + ' unmapped company record(s) remaining—click Step 2 again to run next batch.'
       };
     }
   } catch (err) {
@@ -752,7 +824,7 @@ function runPersonaMapperForSelectedCampaign() {
       return;
     }
 
-    // Fail-fast before making any paid AI or Verifier API calls
+    // Fail-fast before making any paid AI, Serper, or Verifier API calls
     try {
       validatePersonaPreRunGuardrails_(spreadsheet, campaignId, settings);
     } catch (preErr) {
@@ -766,8 +838,18 @@ function runPersonaMapperForSelectedCampaign() {
     const mappedTracker = getMappedCompanyTracker_(spreadsheet, campaignId);
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
     const batchCompanies = unmappedCompanies.slice(0, batchLimit);
+    const isPilotCampaign = campaignId.toUpperCase().indexOf('PILOT-') === 0;
+    const newlyInvalidEmails = [];
+    const validationCache = {};
+
     let processed = 0;
+    let mappedPersonaCount = 0;
     let skippedDuplicatePersonas = 0;
+    let rejectedPlaceholderCount = 0;
+    let strippedLinkedInCount = 0;
+    let autoSuppressedInvalidCount = 0;
+    let serperCompaniesEnriched = 0;
+    let serperLinkedInCandidatesFound = 0;
 
     const minCompanyScore = Number(settings['Minimum Company Opportunity Score']) || 0;
     const minConfidenceRank = resolveMinPersonaConfidenceRank_(settings['Minimum Persona Confidence']);
@@ -787,12 +869,18 @@ function runPersonaMapperForSelectedCampaign() {
       const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName);
 
       try {
+        const serperContext = fetchSerperPersonaSearchContext_(company, settings, spreadsheet);
+        if (serperContext && serperContext.enabled) {
+          if (serperContext.hasResults) serperCompaniesEnriched++;
+          serperLinkedInCandidatesFound += (serperContext.linkedinResults ? serperContext.linkedinResults.length : 0);
+        }
+
         const aiResponse = executeAiCall_({
           campaignId: campaignId,
           clientName: clientName,
           provider: providerChoice,
           model: modelChoice,
-          prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets),
+          prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext),
           enableWebSearch: true,
           json: true,
           operation: 'PersonaMapping'
@@ -813,7 +901,18 @@ function runPersonaMapperForSelectedCampaign() {
           ? result.personas
           : (result.persona && typeof result.persona === 'object' ? [result.persona] : []);
 
-        personasList.forEach(function(persona) {
+        personasList.forEach(function(rawPersona) {
+          if (!rawPersona || typeof rawPersona !== 'object') return;
+
+          const cleanCheck = sanitizePersonaCandidate_(rawPersona, company, aiResponse, grounding, serperContext);
+          if (cleanCheck.strippedLinkedIn) strippedLinkedInCount++;
+          if (!cleanCheck.valid) {
+            rejectedPlaceholderCount++;
+            Logger.log('Rejected unverified/placeholder persona for ' + companyName + ': ' + cleanCheck.reason);
+            return;
+          }
+
+          const persona = cleanCheck.persona;
           const confidence = titleCaseSignal_(persona.confidence) || 'Medium';
           if (confidence === 'Low' || confidenceRank_(confidence) < minConfidenceRank) return;
           if (companyScore.score < minCompanyScore) return;
@@ -833,19 +932,43 @@ function runPersonaMapperForSelectedCampaign() {
             return;
           }
 
-          const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings);
-          upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas), PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
+          if (emailInfo.shouldAutoSuppress && emailInfo.businessEmail && !isPilotCampaign) {
+            newlyInvalidEmails.push(emailInfo.businessEmail);
+            if (suppressionRules.emails.indexOf(emailInfo.businessEmail) < 0) {
+              suppressionRules.emails.push(emailInfo.businessEmail);
+            }
+            autoSuppressedInvalidCount++;
+          } else if (emailInfo.emailVerificationStatus === 'invalid') {
+            autoSuppressedInvalidCount++;
+          }
+
+          const personaSheet = spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.personas);
+          const personaRecord = makePersonaRecord_(company, persona, fitScore, emailInfo, settings, personaSheet, validationCache);
+          upsertPreservingNonEmpty_(personaSheet, PERSONA_MAPPER_HEADERS_.personas, 'persona', personaRecord);
+
           const queueRecord = makeEmailQueueRecord_(company, persona, companyScore, fitScore, citations, emailInfo, settings, suppressionRules);
           upsertPreservingNonEmpty_(spreadsheet.getSheetByName(PERSONA_MAPPER_SHEETS_.queue), PERSONA_MAPPER_HEADERS_.queue, 'queue', queueRecord);
 
           registerPersonaInCampaignTracker_(persona, company, existingPersonaTracker, emailInfo);
-          recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, settings['Persona Titles']);
+          recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, settings['Persona Titles'], serperContext);
+          mappedPersonaCount++;
         });
 
         if (result.company && Array.isArray(result.company.evidence)) {
           result.company.evidence.forEach(function(evItem) {
             if (evItem && evItem.url) {
-              recordCompanyGroundingEvidence_(spreadsheet, campaignId, company, evItem, grounding, settings['Campaign Focus']);
+              const cleanEvUrl = sanitizeHttpUrl_(evItem.url);
+              if (cleanEvUrl) {
+                recordCompanyGroundingEvidence_(
+                  spreadsheet,
+                  campaignId,
+                  company,
+                  Object.assign({}, evItem, { url: cleanEvUrl }),
+                  grounding,
+                  settings['Campaign Focus'],
+                  serperContext
+                );
+              }
             }
           });
         }
@@ -860,6 +983,14 @@ function runPersonaMapperForSelectedCampaign() {
       }
     }
 
+    if (newlyInvalidEmails.length > 0) {
+      if (typeof appendSuppressedEmailsToLists_ === 'function') {
+        appendSuppressedEmailsToLists_(spreadsheet, newlyInvalidEmails, 'Suppression - Email', 'invalid verified email(s)');
+      } else {
+        suppressInvalidVerifiedEmails_(spreadsheet, newlyInvalidEmails);
+      }
+    }
+
     if (typeof checkVerifierBalanceAndAlert_ === 'function') {
       checkVerifierBalanceAndAlert_(campaignId, clientName);
     }
@@ -871,14 +1002,18 @@ function runPersonaMapperForSelectedCampaign() {
 
     properties.deleteProperty(cursorKey);
     const remainingUnmapped = Math.max(0, unmappedCompanies.length - batchCompanies.length);
-    const dupNote = skippedDuplicatePersonas > 0
-      ? (' (' + skippedDuplicatePersonas + ' duplicate persona(s) automatically skipped)')
-      : '';
+    const notes = [];
+    if (serperCompaniesEnriched > 0) notes.push('Serper found ' + serperLinkedInCandidatesFound + ' LinkedIn candidate(s)');
+    if (skippedDuplicatePersonas > 0) notes.push(skippedDuplicatePersonas + ' duplicate skipped');
+    if (rejectedPlaceholderCount > 0) notes.push(rejectedPlaceholderCount + ' generic placeholder(s) rejected');
+    if (strippedLinkedInCount > 0) notes.push(strippedLinkedInCount + ' unverified LinkedIn link(s) cleared');
+    if (autoSuppressedInvalidCount > 0) notes.push(autoSuppressedInvalidCount + ' invalid email(s) auto-rejected');
+    const noteSuffix = notes.length > 0 ? (' (' + notes.join(', ') + ')') : '';
 
     if (remainingUnmapped === 0) {
-      if (ui) ui.alert('Persona Mapper completed ' + processed + ' unmapped company record(s) for "' + clientName + '" using ' + providerLabel + '.' + dupNote + ' Leads staged in Prospect Review Queue & Grounding Evidence recorded.');
+      if (ui) ui.alert('Persona Mapper processed ' + processed + ' company record(s) (' + mappedPersonaCount + ' persona(s) mapped) for "' + clientName + '" using ' + providerLabel + '.' + noteSuffix + ' Leads staged in Prospect Review Queue & Grounding Evidence recorded.');
     } else {
-      if (ui) ui.alert('Persona Mapper processed ' + processed + ' unmapped company record(s) for "' + clientName + '".' + dupNote + ' ' + remainingUnmapped + ' unmapped company record(s) remaining—run it again to continue next batch.');
+      if (ui) ui.alert('Persona Mapper processed ' + processed + ' company record(s) (' + mappedPersonaCount + ' persona(s) mapped) for "' + clientName + '".' + noteSuffix + ' ' + remainingUnmapped + ' unmapped company record(s) remaining—run it again to continue next batch.');
     }
   } finally {
     lock.releaseLock();
@@ -886,7 +1021,700 @@ function runPersonaMapperForSelectedCampaign() {
 }
 
 /**
- * Queries Tab 10 (Research Evidence) for existing evidence snippets & email pattern clues
+ * ============================================================================
+ * STEP B: SERPER.DEV GOOGLE SEARCH PRE-ENRICHMENT (OPTIONAL & CLIENT-ISOLATED)
+ * ============================================================================
+ */
+
+function isValidSerperKeyValue_(val) {
+  const s = String(val || '').trim();
+  if (!s) return false;
+  const upper = s.toUpperCase();
+  if (upper.indexOf('PASTE_') >= 0) return false;
+  if (upper.indexOf('CONFIGURED IN SCRIPT PROPERTIES') >= 0) return false;
+  if (upper.indexOf('PROTECTED') >= 0 && s.length < 35) return false;
+  return true;
+}
+
+/**
+ * Resolves SERPER_API_KEY strictly scoped to the Client / Owner.
+ * External clients require CLIENT_{NAME}_SERPER_API_KEY (zero local fallback).
+ * Returns '' cleanly if unconfigured (Serper is optional).
+ */
+function resolveSerperApiKey_(spreadsheet, settings) {
+  const propName = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.serperApiKeyProperty)
+    ? APP_CONFIG.serperApiKeyProperty
+    : 'SERPER_API_KEY';
+
+  const campaignId = (settings && settings['Campaign ID']) || '';
+  const clientName = (settings && settings['Department']) || '';
+
+  if (typeof resolveClientScopedSecret_ === 'function') {
+    const resolved = resolveClientScopedSecret_(
+      [propName, 'SERPER_API_KEY'],
+      { campaignId: campaignId, clientName: clientName },
+      {
+        serviceLabel: 'Serper Google Search',
+        throwOnMissing: false,
+        allowAgentSettingsForLocal: false,
+        spreadsheet: spreadsheet
+      }
+    );
+    return isValidSerperKeyValue_(resolved.key) ? String(resolved.key).trim() : '';
+  }
+
+  const scriptVal = PropertiesService.getScriptProperties().getProperty(propName);
+  return isValidSerperKeyValue_(scriptVal) ? String(scriptVal).trim() : '';
+}
+
+function mapCountryToSerperGl_(countryText) {
+  const raw = String(countryText || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (raw.indexOf('&') >= 0 || raw.indexOf(',') >= 0 || raw.indexOf('global') >= 0) {
+    return '';
+  }
+  if (raw.indexOf('canada') >= 0 || raw === 'ca' || raw === 'can') return 'ca';
+  if (raw.indexOf('united states') >= 0 || raw === 'usa' || raw === 'us' || raw === 'u.s.') return 'us';
+  if (raw.indexOf('united kingdom') >= 0 || raw === 'uk' || raw === 'great britain') return 'uk';
+  if (raw.indexOf('australia') >= 0 || raw === 'au') return 'au';
+  if (raw.indexOf('germany') >= 0 || raw === 'de') return 'de';
+  if (raw.indexOf('france') >= 0 || raw === 'fr') return 'fr';
+  if (raw.indexOf('sweden') >= 0 || raw === 'se') return 'se';
+  if (raw.indexOf('norway') >= 0 || raw === 'no') return 'no';
+  if (raw.indexOf('denmark') >= 0 || raw === 'dk') return 'dk';
+  if (raw.indexOf('netherlands') >= 0 || raw === 'nl') return 'nl';
+  return '';
+}
+
+function buildSerperCompanyQueries_(company, settings) {
+  const fullCompanyName = String((company && (company['Company name'] || company['Company Name'])) || '').trim();
+  const domain = extractPersonaDomainFromUrl_((company && (company['Domain'] || company['Website'])) || '');
+  const cleanBrand = fullCompanyName
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(incorporated|inc|corporation|corp|limited|ltd|llc|llp|lp|plc|gmbh|ag|sa)\b\.?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const companyVariants = [];
+  if (cleanBrand) companyVariants.push('"' + cleanBrand + '"');
+  if (fullCompanyName && fullCompanyName.toLowerCase() !== cleanBrand.toLowerCase()) {
+    companyVariants.push('"' + fullCompanyName + '"');
+  }
+  const firstWord = cleanBrand ? cleanBrand.split(/\s+/)[0] : '';
+  const genericFirstWords = {
+    'the': true, 'north': true, 'south': true, 'east': true, 'west': true,
+    'canadian': true, 'american': true, 'global': true, 'energy': true,
+    'capital': true, 'group': true, 'pacific': true, 'atlantic': true, 'clean': true
+  };
+  if (firstWord && firstWord.length >= 6 && !genericFirstWords[firstWord.toLowerCase()] && cleanBrand.indexOf(' ') >= 0) {
+    companyVariants.push('"' + firstWord + '"');
+  }
+
+  const companyClause = companyVariants.length > 1
+    ? '(' + companyVariants.slice(0, 2).join(' OR ') + ')'
+    : (companyVariants[0] || ('"' + fullCompanyName + '"'));
+
+  // Build dynamic title / functional clauses from campaign Persona Titles
+  const rawTitles = String((settings && settings['Persona Titles']) || 'VP Procurement; Head of Supply Chain; Director of Sustainability').trim();
+  const titlePhrases = rawTitles.split(/[;,\n]+/).map(function(t) { return t.trim(); }).filter(Boolean).slice(0, 4);
+  const titleTerms = [];
+  const seenTerms = {};
+
+  titlePhrases.forEach(function(tp) {
+    const cleanTp = tp.replace(/"/g, '').trim();
+    if (cleanTp && !seenTerms[cleanTp.toLowerCase()]) {
+      seenTerms[cleanTp.toLowerCase()] = true;
+      titleTerms.push('"' + cleanTp + '"');
+    }
+    const functionalMatch = cleanTp.match(/\b(?:of|for)\s+([a-z0-9 &\/-]{3,30})$/i);
+    if (functionalMatch && functionalMatch[1]) {
+      const fnTerm = functionalMatch[1].trim();
+      if (fnTerm && !seenTerms[fnTerm.toLowerCase()]) {
+        seenTerms[fnTerm.toLowerCase()] = true;
+        titleTerms.push('"' + fnTerm + '"');
+      }
+    }
+  });
+
+  if (titleTerms.length === 0) {
+    titleTerms.push('"VP"', '"Director"', '"Head"', '"Chief"');
+  } else if (titleTerms.length < 4) {
+    ['"VP"', '"Director"'].forEach(function(roleFallback) {
+      const k = roleFallback.replace(/"/g, '').toLowerCase();
+      if (!seenTerms[k]) {
+        seenTerms[k] = true;
+        titleTerms.push(roleFallback);
+      }
+    });
+  }
+
+  const roleClause = '(' + titleTerms.slice(0, 6).join(' OR ') + ')';
+  const linkedinQuery = 'site:linkedin.com/in ' + companyClause + ' ' + roleClause;
+
+  const leadershipQuery = domain
+    ? ('site:' + domain + ' (leadership OR "management team" OR executives OR team OR sustainability OR "@' + domain + '")')
+    : (companyClause + ' (leadership OR "management team" OR executives OR sustainability)');
+
+  return {
+    linkedinQuery: linkedinQuery,
+    leadershipQuery: leadershipQuery
+  };
+}
+
+function callSerperSearchApi_(apiKey, queryText, glCode, campaignId, clientName, operationLabel) {
+  const endpoint = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.serperSearchUrl)
+    ? APP_CONFIG.serperSearchUrl
+    : 'https://google.serper.dev/search';
+
+  if (typeof checkApiBudgetGuardrails_ === 'function') {
+    checkApiBudgetGuardrails_(campaignId, clientName);
+  }
+
+  const payload = {
+    q: queryText,
+    num: 10, // num <= 10 uses 1 Serper credit (~$0.001)
+    hl: 'en'
+  };
+  if (glCode) payload.gl = glCode;
+
+  let res, code, text;
+  try {
+    res = UrlFetchApp.fetch(endpoint, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'X-API-KEY': apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    code = res.getResponseCode();
+    text = res.getContentText() || '';
+  } catch (netErr) {
+    if (typeof logApiUsage_ === 'function') {
+      logApiUsage_({
+        campaignId: campaignId,
+        clientName: clientName,
+        serviceName: 'Serper',
+        operation: operationLabel || 'SerperSearch',
+        httpStatus: 500,
+        inputUnits: 0,
+        outputUnits: 0,
+        status: 'ERROR',
+        details: 'Network error: ' + netErr.toString().slice(0, 200),
+        modelName: 'Serper'
+      });
+    }
+    return [];
+  }
+
+  if (code < 200 || code >= 300) {
+    if (typeof logApiUsage_ === 'function') {
+      logApiUsage_({
+        campaignId: campaignId,
+        clientName: clientName,
+        serviceName: 'Serper',
+        operation: operationLabel || 'SerperSearch',
+        httpStatus: code,
+        inputUnits: 0,
+        outputUnits: 0,
+        status: 'ERROR',
+        details: 'Query: ' + queryText.slice(0, 120) + ' | HTTP ' + code + ': ' + text.slice(0, 180),
+        modelName: 'Serper'
+      });
+    }
+    Logger.log('Serper API HTTP ' + code + ' on query "' + queryText + '": ' + text.slice(0, 200));
+    return [];
+  }
+
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text || '{}');
+  } catch (e) {
+    return [];
+  }
+
+  const organic = Array.isArray(parsed.organic) ? parsed.organic : [];
+
+  if (typeof logApiUsage_ === 'function') {
+    logApiUsage_({
+      campaignId: campaignId,
+      clientName: clientName,
+      serviceName: 'Serper',
+      operation: operationLabel || 'SerperSearch',
+      httpStatus: code,
+      inputUnits: 1,
+      outputUnits: organic.length,
+      status: 'SUCCESS',
+      details: 'Query: ' + queryText.slice(0, 130) + ' | Results: ' + organic.length,
+      modelName: 'Serper'
+    });
+  }
+
+  return organic;
+}
+
+/**
+ * Fetches real Google Search candidates (LinkedIn /in profiles + company leadership pages)
+ * via Serper.dev before invoking LLM scoring & copy generation.
+ */
+function fetchSerperPersonaSearchContext_(company, settings, spreadsheet) {
+  const empty = {
+    enabled: false,
+    hasResults: false,
+    linkedinResults: [],
+    webResults: [],
+    verifiedLinkedInUrls: {},
+    allVerifiedUrls: {},
+    queries: [],
+    promptSection: ''
+  };
+
+  const apiKey = resolveSerperApiKey_(spreadsheet, settings);
+  if (!apiKey) return empty;
+
+  const campaignId = (settings && settings['Campaign ID']) || 'CMP-DEFAULT';
+  const clientName = (settings && settings['Department']) || 'Growth Target';
+  const glCode = mapCountryToSerperGl_(
+    (company && (company['Country'] || company['Headquarters'])) || (settings && settings['Target Countries']) || ''
+  );
+
+  const queryPair = buildSerperCompanyQueries_(company, settings);
+  const linkedinOrganic = callSerperSearchApi_(apiKey, queryPair.linkedinQuery, glCode, campaignId, clientName, 'SerperLinkedInSearch');
+  const webOrganic = callSerperSearchApi_(apiKey, queryPair.leadershipQuery, glCode, campaignId, clientName, 'SerperLeadershipSearch');
+
+  const linkedinResults = [];
+  const webResults = [];
+  const verifiedLinkedInUrls = {};
+  const allVerifiedUrls = {};
+
+  linkedinOrganic.forEach(function(item) {
+    if (!item || !item.link) return;
+    const normLi = normalizeLinkedInUrl_(item.link);
+    if (!normLi) return;
+    const slugMatch = String(item.link).split('?')[0].split('#')[0].replace(/\/+$/, '')
+      .match(/^https?:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\/in\/([a-z0-9][a-z0-9\-_%]{1,98}[a-z0-9])(?:\/[a-z]{2}(?:_[a-z]{2}|-[a-z]{2})?)?$/i);
+    const canonicalLi = (slugMatch && slugMatch[1]) ? ('https://www.linkedin.com/in/' + slugMatch[1]) : item.link;
+
+    if (verifiedLinkedInUrls[normLi]) return;
+    verifiedLinkedInUrls[normLi] = true;
+    allVerifiedUrls[normLi] = queryPair.linkedinQuery;
+
+    linkedinResults.push({
+      title: String(item.title || '').trim(),
+      url: canonicalLi,
+      snippet: String(item.snippet || '').trim()
+    });
+  });
+
+  webOrganic.forEach(function(item) {
+    if (!item || !item.link) return;
+    const cleanUrl = sanitizeHttpUrl_(item.link);
+    if (!cleanUrl) return;
+    const normWeb = typeof normalizeSourceUrl_ === 'function'
+      ? normalizeSourceUrl_(cleanUrl)
+      : cleanUrl.replace(/\/+$/, '').toLowerCase();
+    if (!allVerifiedUrls[normWeb]) {
+      allVerifiedUrls[normWeb] = queryPair.leadershipQuery;
+    }
+    webResults.push({
+      title: String(item.title || '').trim(),
+      url: cleanUrl,
+      snippet: String(item.snippet || '').trim()
+    });
+  });
+
+  const lines = [];
+  if (linkedinResults.length > 0) {
+    lines.push('Verified Google-Indexed LinkedIn Profile Candidates (Serper.dev):');
+    linkedinResults.slice(0, 8).forEach(function(r) {
+      lines.push('• ' + r.title + ' | URL: ' + r.url + (r.snippet ? (' | Snippet: ' + r.snippet) : ''));
+    });
+  }
+  if (webResults.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push('Verified Company Leadership & Public Pages (Serper.dev):');
+    webResults.slice(0, 6).forEach(function(r) {
+      lines.push('• ' + r.title + ' | URL: ' + r.url + (r.snippet ? (' | Snippet: ' + r.snippet) : ''));
+    });
+  }
+
+  return {
+    enabled: true,
+    hasResults: lines.length > 0,
+    linkedinResults: linkedinResults,
+    webResults: webResults,
+    verifiedLinkedInUrls: verifiedLinkedInUrls,
+    allVerifiedUrls: allVerifiedUrls,
+    queries: [queryPair.linkedinQuery, queryPair.leadershipQuery],
+    promptSection: lines.join('\n')
+  };
+}
+
+/**
+ * Validates and sanitizes an AI-returned persona object BEFORE deduplication,
+ * email verification, or sheet persistence (Step A Hardening + Step B Serper verification).
+ */
+function sanitizePersonaCandidate_(rawPersona, company, aiResponse, grounding, serperContext) {
+  const persona = Object.assign({}, rawPersona);
+  const companyName = String((company && (company['Company name'] || company['Company Name'])) || '').trim();
+  const title = String(persona.title || '').trim();
+  const name = String(persona.name || '').trim();
+
+  if (!isValidRealPersonName_(name, title, companyName)) {
+    return {
+      valid: false,
+      strippedLinkedIn: false,
+      reason: 'Generic/placeholder or invalid person name "' + name + '"'
+    };
+  }
+
+  const cleanEvidenceUrl = sanitizeHttpUrl_(persona.evidenceUrl || '');
+  const cleanEmailSourceUrl = sanitizeHttpUrl_(persona.emailSourceUrl || '');
+  const rawLi = String(persona.linkedinUrl || '').trim();
+  const cleanLi = sanitizeVerifiedLinkedInUrl_(
+    rawLi,
+    name,
+    companyName,
+    aiResponse,
+    grounding,
+    cleanEvidenceUrl,
+    cleanEmailSourceUrl,
+    serperContext
+  );
+
+  const strippedLinkedIn = Boolean(rawLi && !cleanLi);
+
+  persona.name = name;
+  persona.title = title;
+  persona.linkedinUrl = cleanLi;
+  persona.evidenceUrl = cleanEvidenceUrl;
+  persona.emailSourceUrl = cleanEmailSourceUrl;
+
+  if (!cleanEvidenceUrl && !cleanLi && String(persona.verificationStatus || '').toLowerCase() === 'verified') {
+    persona.verificationStatus = 'Needs Review';
+  }
+
+  return {
+    valid: true,
+    strippedLinkedIn: strippedLinkedIn,
+    persona: persona
+  };
+}
+
+/**
+ * Rejects generic role placeholders ("VP Procurement", "Procurement Leader",
+ * "Supply Chain Director", "Head of ESG", etc.) and synthetic fake names.
+ */
+function isValidRealPersonName_(rawName, title, companyName) {
+  const clean = String(rawName || '').replace(/\s+/g, ' ').trim();
+  if (!clean || clean.length < 4) return false;
+
+  // Reject URLs, emails, ellipses, brackets, digits, or slash/parenthetical role combos
+  if (/[@\/\\<>\[\]{}|0-9]|\.\.\./.test(clean)) return false;
+
+  const lower = clean.toLowerCase();
+  const exactBlocked = {
+    'unknown': true, 'tbd': true, 'n/a': true, 'na': true, 'none': true, 'null': true,
+    'anonymous': true, 'placeholder': true, 'full name': true, 'first last': true,
+    'firstname lastname': true, 'john doe': true, 'jane doe': true, 'decision maker': true,
+    'executive name': true, 'team member': true, 'contact person': true, 'sample lead': true
+  };
+  if (exactBlocked[lower]) return false;
+
+  // Reject if name equals or essentially duplicates the job title
+  const normTitle = normalizePersonaName_(title || '');
+  const normName = normalizePersonaName_(clean);
+  if (normTitle && normName === normTitle) return false;
+
+  // Forbidden role / department / placeholder phrases anywhere in name
+  const forbiddenPhrases = [
+    'vice president', 'supply chain', 'decision maker', 'head of', 'general counsel',
+    'sustainability lead', 'esg lead', 'procurement lead', 'operations lead',
+    'team lead', 'project lead', 'technical evaluator', 'economic buyer'
+  ];
+  for (let i = 0; i < forbiddenPhrases.length; i++) {
+    if (lower.indexOf(forbiddenPhrases[i]) >= 0) return false;
+  }
+
+  // Strip honorifics & suffixes to inspect actual personal name tokens
+  const honorifics = {
+    'dr': true, 'mr': true, 'mrs': true, 'ms': true, 'mx': true, 'prof': true,
+    'jr': true, 'sr': true, 'ii': true, 'iii': true, 'iv': true,
+    'phd': true, 'mba': true, 'cpa': true, 'pe': true, 'peng': true
+  };
+
+  const rawTokens = lower.replace(/[.,'"()]+/g, ' ').split(/[\s\-]+/).filter(Boolean);
+  const nameTokens = rawTokens.filter(function(t) {
+    return !honorifics[t];
+  });
+
+  if (nameTokens.length < 2) return false;
+  const alphaChars = nameTokens.join('').replace(/[^a-z\u00C0-\u024F]/gi, '');
+  if (alphaChars.length < 4) return false;
+
+  // Unambiguous job-title / corporate / placeholder tokens that do not appear in real names
+  const forbiddenSingleTokens = {
+    'vp': true, 'svp': true, 'evp': true, 'avp': true,
+    'procurement': true, 'purchasing': true, 'sustainability': true, 'esg': true,
+    'compliance': true, 'director': true, 'leader': true, 'manager': true,
+    'officer': true, 'executive': true, 'coordinator': true, 'specialist': true,
+    'analyst': true, 'consultant': true, 'representative': true, 'buyer': true,
+    'evaluator': true, 'team': true, 'department': true, 'unknown': true,
+    'placeholder': true, 'anonymous': true, 'tbd': true, 'unnamed': true,
+    'unverified': true, 'cfo': true, 'ceo': true, 'coo': true, 'cto': true,
+    'cso': true, 'cio': true, 'cpo': true, 'chro': true, 'cmo': true, 'cro': true,
+    'chief': true, 'senior': true, 'principal': true
+  };
+  for (let i = 0; i < nameTokens.length; i++) {
+    if (forbiddenSingleTokens[nameTokens[i]]) return false;
+  }
+
+  // Reject trailing role markers ("Corix Lead", "ESG Head", "Admin Staff")
+  const lastTok = nameTokens[nameTokens.length - 1];
+  if (lastTok === 'lead' || lastTok === 'head' || lastTok === 'rep' || lastTok === 'admin' || lastTok === 'staff') {
+    return false;
+  }
+
+  // Reject if company stem appears inside the person's name alongside generic descriptors
+  const compStem = normalizePersonaCompanyName_(companyName || '');
+  if (compStem && compStem.length >= 3 && lower.indexOf(compStem) >= 0) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Validates HTTP(S) URLs for Evidence URL / Email Source URL and drops bare
+ * social homepages, search result links, and ellipsis placeholders.
+ */
+function sanitizeHttpUrl_(rawUrl) {
+  let clean = String(rawUrl || '').trim();
+  if (!clean || !/^https?:\/\//i.test(clean)) return '';
+  if (/\s|\.\.\.|[<>{}\[\]]/.test(clean)) return '';
+
+  const lower = clean.toLowerCase();
+  if (lower.indexOf('example.com') >= 0 || lower.indexOf('placeholder') >= 0) return '';
+  if (/^https?:\/\/(?:www\.)?(?:linkedin\.com|twitter\.com|x\.com|facebook\.com|instagram\.com)\/?$/i.test(clean)) {
+    return '';
+  }
+  if (/linkedin\.com\/(?:search|pub\/dir|jobs)\b/i.test(clean)) return '';
+  if (/(?:google\.|bing\.com|duckduckgo\.com)\/search\b/i.test(clean)) return '';
+
+  return clean;
+}
+
+/**
+ * Inspects Gemini Search Grounding chunks & citations to determine if LinkedIn
+ * sources were genuinely grounded during this AI call.
+ */
+function extractGroundedLinkedInSignal_(aiResponse, grounding) {
+  const info = {
+    usedGrounding: Boolean(aiResponse && aiResponse.usedSearchGrounding),
+    hasLinkedInChunk: false,
+    literalLinkedInUrls: {}
+  };
+
+  const citations = (aiResponse && Array.isArray(aiResponse.citations)) ? aiResponse.citations : [];
+  citations.forEach(function(u) {
+    const low = String(u || '').toLowerCase();
+    if (low.indexOf('linkedin.com/in/') >= 0) {
+      info.hasLinkedInChunk = true;
+      info.literalLinkedInUrls[normalizeLinkedInUrl_(u)] = true;
+    } else if (low.indexOf('linkedin.com') >= 0) {
+      info.hasLinkedInChunk = true;
+    }
+  });
+
+  if (grounding && grounding.citationsByUrl) {
+    Object.keys(grounding.citationsByUrl).forEach(function(u) {
+      const low = String(u || '').toLowerCase();
+      if (low.indexOf('linkedin.com') >= 0) {
+        info.hasLinkedInChunk = true;
+        if (low.indexOf('linkedin.com/in/') >= 0) {
+          info.literalLinkedInUrls[normalizeLinkedInUrl_(u)] = true;
+        }
+      }
+    });
+  }
+
+  const raw = aiResponse && aiResponse.raw ? aiResponse.raw : null;
+  const cand = raw && raw.candidates && raw.candidates[0] ? raw.candidates[0] : null;
+  const chunks = cand && cand.groundingMetadata && Array.isArray(cand.groundingMetadata.groundingChunks)
+    ? cand.groundingMetadata.groundingChunks
+    : [];
+
+  chunks.forEach(function(chunk) {
+    if (!chunk || !chunk.web) return;
+    const uri = String(chunk.web.uri || '').toLowerCase();
+    const title = String(chunk.web.title || '').toLowerCase();
+    if (uri.indexOf('linkedin.com') >= 0 || title.indexOf('linkedin') >= 0) {
+      info.hasLinkedInChunk = true;
+      if (uri.indexOf('linkedin.com/in/') >= 0) {
+        info.literalLinkedInUrls[normalizeLinkedInUrl_(chunk.web.uri)] = true;
+      }
+    }
+  });
+
+  return info;
+}
+
+/**
+ * Validates and sanitizes a LinkedIn profile URL.
+ * Accepts exact Serper-verified / citation-verified /in/ URLs (including international subdomains & locale tails),
+ * and strips bare domains, /search/ links, role-fabricated slugs (e.g. "corix-procurement-lead"),
+ * slugs lacking person name overlap, and ungrounded AI-guessed /in/ URLs.
+ * Returns "" rather than storing an unverified 404.
+ */
+function sanitizeVerifiedLinkedInUrl_(rawUrl, personaName, companyName, aiResponse, grounding, evidenceUrl, emailSourceUrl, serperContext) {
+  let clean = String(rawUrl || '').trim();
+  if (!clean) return '';
+  if (/\s|\.\.\.|[<>{}\[\]]/.test(clean)) return '';
+
+  if (/^linkedin\.com\//i.test(clean) || /^www\.linkedin\.com\//i.test(clean) || /^[a-z]{2}\.linkedin\.com\//i.test(clean)) {
+    clean = 'https://' + clean;
+  }
+
+  // Strip query string and fragment before checking profile path
+  clean = clean.split('?')[0].split('#')[0].replace(/\/+$/, '');
+
+  const match = clean.match(/^https?:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\/in\/([a-z0-9][a-z0-9\-_%]{1,98}[a-z0-9])(?:\/[a-z]{2}(?:_[a-z]{2}|-[a-z]{2})?)?$/i);
+  if (!match || !match[1]) {
+    return '';
+  }
+
+  const canonicalUrl = 'https://www.linkedin.com/in/' + match[1];
+  let decodedSlug = match[1].toLowerCase();
+  try {
+    decodedSlug = decodeURIComponent(decodedSlug).toLowerCase();
+  } catch (e) {}
+
+  // Reject literal placeholder slugs
+  const blockedSlugParts = [
+    'first-last', 'firstname', 'lastname', 'john-doe', 'jane-doe',
+    'your-name', 'example', 'placeholder', 'unknown', 'profile-url',
+    'linkedin-url', 'username', 'user-name', 'test-user'
+  ];
+  for (let i = 0; i < blockedSlugParts.length; i++) {
+    if (decodedSlug.indexOf(blockedSlugParts[i]) >= 0) return '';
+  }
+
+  // Extract person's name tokens & initials
+  const honorifics = { 'dr': true, 'mr': true, 'mrs': true, 'ms': true, 'mx': true, 'prof': true, 'jr': true, 'sr': true, 'ii': true, 'iii': true, 'iv': true };
+  const nameTokens = String(personaName || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/[\s-]+/)
+    .filter(function(t) { return t && !honorifics[t]; });
+
+  let decodedAsciiSlug = decodedSlug;
+  try {
+    decodedAsciiSlug = decodedSlug.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  } catch (e) {}
+
+  const slugTokens = decodedAsciiSlug.split(/[^a-z0-9]+/).filter(Boolean);
+  let hasNameOverlap = false;
+
+  for (let i = 0; i < nameTokens.length; i++) {
+    const tok = nameTokens[i];
+    if (tok.length >= 3 && decodedAsciiSlug.indexOf(tok) >= 0) {
+      hasNameOverlap = true;
+      break;
+    }
+  }
+  if (!hasNameOverlap && nameTokens.length >= 2) {
+    const first = nameTokens[0];
+    const last = nameTokens[nameTokens.length - 1];
+    if ((first[0] + last).length >= 4 && decodedAsciiSlug.indexOf(first[0] + last) >= 0) hasNameOverlap = true;
+    if ((first + last[0]).length >= 4 && decodedAsciiSlug.indexOf(first + last[0]) >= 0) hasNameOverlap = true;
+  }
+
+  // Reject role-fabricated slugs ("corix-procurement-lead", "innergex-vp-sustainability", etc.)
+  const roleSlugWords = {
+    'vp': true, 'svp': true, 'evp': true, 'vice': true, 'president': true,
+    'procurement': true, 'purchasing': true, 'supply': true, 'chain': true,
+    'sustainability': true, 'esg': true, 'director': true, 'leader': true,
+    'lead': true, 'manager': true, 'officer': true, 'chief': true, 'head': true,
+    'coordinator': true, 'buyer': true, 'evaluator': true, 'compliance': true,
+    'operations': true
+  };
+  const slugHasRoleWord = slugTokens.some(function(st) { return Boolean(roleSlugWords[st]); });
+  if (slugHasRoleWord && !hasNameOverlap) {
+    return '';
+  }
+
+  const compStem = normalizePersonaCompanyName_(companyName || '').replace(/\s+/g, '');
+  const compactSlug = decodedAsciiSlug.replace(/[^a-z0-9]/g, '');
+  if (compStem && compStem.length >= 4 && compactSlug.indexOf(compStem) >= 0 && !hasNameOverlap) {
+    return '';
+  }
+
+  // Grounding & Serper verification gate: trust exact Serper/citation matches, else require Search Grounding
+  const normCanonical = normalizeLinkedInUrl_(canonicalUrl);
+  const liSignal = extractGroundedLinkedInSignal_(aiResponse, grounding);
+  const serperVerified = Boolean(serperContext && serperContext.verifiedLinkedInUrls && serperContext.verifiedLinkedInUrls[normCanonical]);
+  const preVerified = Boolean(
+    serperVerified ||
+    liSignal.literalLinkedInUrls[normCanonical] ||
+    (evidenceUrl && normalizeLinkedInUrl_(evidenceUrl) === normCanonical) ||
+    (emailSourceUrl && normalizeLinkedInUrl_(emailSourceUrl) === normCanonical)
+  );
+
+  if (preVerified) {
+    return canonicalUrl;
+  }
+
+  // Require real name overlap + active LinkedIn grounding signal when not literally returned in Serper/citations
+  if (!hasNameOverlap) {
+    return '';
+  }
+
+  if (!liSignal.usedGrounding || !liSignal.hasLinkedInChunk) {
+    return '';
+  }
+
+  return canonicalUrl;
+}
+
+/**
+ * Resolves a sheet cell value respecting any existing dropdown validation on that column.
+ */
+function resolveValidatedCellValue_(sheet, headers, headerName, preferredCandidates, validationCache) {
+  const fallback = preferredCandidates[0] || '';
+  if (!sheet || !Array.isArray(headers)) return fallback;
+
+  const colIdx = headers.indexOf(headerName);
+  if (colIdx < 0) return fallback;
+
+  const cacheKey = sheet.getName() + '|' + headerName;
+  if (!validationCache[cacheKey]) {
+    let allowed = null;
+    try {
+      const rule = sheet.getRange(2, colIdx + 1).getDataValidation();
+      if (rule && rule.getCriteriaType() === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+        const values = rule.getCriteriaValues()[0];
+        if (Array.isArray(values) && values.length > 0) {
+          allowed = values.map(function(v) { return String(v); });
+        }
+      }
+    } catch (e) {}
+    validationCache[cacheKey] = allowed || [];
+  }
+
+  const allowedValues = validationCache[cacheKey];
+  if (!allowedValues || allowedValues.length === 0) return fallback;
+
+  for (let i = 0; i < preferredCandidates.length; i++) {
+    const cand = String(preferredCandidates[i] || '').trim();
+    const match = allowedValues.find(function(v) { return v.trim().toLowerCase() === cand.toLowerCase(); });
+    if (match) return match;
+  }
+  return allowedValues[0];
+}
+
+/**
+ * Queries Tab 12 (Research Evidence) for existing evidence snippets & email pattern clues
  */
 function getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName) {
   const snippets = [];
@@ -912,9 +1740,9 @@ function getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName) {
 }
 
 /**
- * Builds the Multi-Client Persona Research & Outreach Prompt
+ * Builds the Multi-Client Persona Research & Outreach Prompt (incorporating Serper search results when available)
  */
-function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
+function buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext) {
   const clientOwner = settings['Department'] || 'Growth Target';
   const senderName = settings['Sender Name'] || 'Alex Mercer';
   const senderTitle = settings['Sender Title'] || 'Solutions Consultant';
@@ -924,7 +1752,7 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
     ? evidenceSnippets.slice(0, 8).join('\n')
     : 'No prior company research snippets recorded yet. Perform fresh discovery.';
 
-  return [
+  const parts = [
     'Act as the Senior B2B Account Researcher, Executive Persona Mapper, and Outbound Email Copywriter.',
     'Research ONLY the single existing company supplied below. Do not invent or discover other companies.',
     '',
@@ -938,15 +1766,29 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
     '• Target Persona Titles: ' + (settings['Persona Titles'] || 'VP, Director, Head of Department, Chief Officer'),
     '',
     'EXISTING RESEARCH EVIDENCE & CLUES (FROM RESEARCH EVIDENCE TAB):',
-    snippetsText,
+    snippetsText
+  ];
+
+  if (serperContext && serperContext.hasResults && serperContext.promptSection) {
+    parts.push(
+      '',
+      'LIVE GOOGLE SEARCH CANDIDATES (PRE-FETCHED VIA SERPER.DEV):',
+      serperContext.promptSection,
+      'NOTE ON CANDIDATES: Prioritize real current employees from these search results whose title/snippet shows they currently work at this target company (skip anyone clearly labeled "Former" or currently working at a different company). Copy their exact verified "linkedinUrl" or "evidenceUrl" verbatim.'
+    );
+  }
+
+  parts.push(
     '',
     'COMPANY PROFILE UNDER RESEARCH:',
     JSON.stringify(company),
     '',
-    'RESEARCH INSTRUCTIONS:',
-    '1. Identify up to ' + Math.max(1, Math.min(5, Number(settings['Personas Per Company']) || 2)) + ' real decision-makers matching the target roles using live web search when available or verified public knowledge.',
-    '2. Separate verified facts from interpretation. Never invent a person, title, recent activity, or email address.',
-    '3. Search for or identify the company domain and likely professional business email pattern.',
+    'RESEARCH & ANTI-HALLUCINATION INSTRUCTIONS (STRICT):',
+    '1. Identify up to ' + Math.max(1, Math.min(5, Number(settings['Personas Per Company']) || 2)) + ' real, named human decision-makers matching the target roles using the Google Search candidates above, live web search when available, or verified public knowledge.',
+    '2. CRITICAL PERSONA RULE: NEVER return generic job titles, role descriptions, or placeholders as "name" (e.g., NEVER output "VP Procurement", "Procurement Leader", "Supply Chain Director", "Head of ESG", or "Unknown"). If you cannot confirm a real individual\'s first and last name, omit that role entirely (returning "personas": [] is far better than inventing a placeholder).',
+    '3. CRITICAL URL RULE: NEVER invent, guess, or construct a "linkedinUrl" from someone\'s name or company name, and NEVER output bare "https://linkedin.com" or "/search/results/" URLs. Only include an exact "linkedinUrl" (https://www.linkedin.com/in/...) or "evidenceUrl" if you observed that exact URL in the search candidates above or verified search results; otherwise set it to "". Never use "..." placeholders.',
+    '4. EMAIL PATTERN RULE: Set "emailDiscoveryMethod" to "Published" or "Public biography" ONLY if the email appears publicly (and supply "emailSourceUrl"), or "Pattern Match" when constructing first.last@verifiedcompanydomain.com (leaving "emailSourceUrl": "" unless an actual public email page exists).',
+    '5. Separate verified facts from interpretation. Never invent a person, title, recent activity, or URL.',
     '',
     'EMAIL CURATION INSTRUCTIONS (IMPORTANT):',
     '• Draft a peer-to-peer cold outreach message under 150 words from ' + senderName + ' (' + senderTitle + ' at ' + senderCompany + ').',
@@ -981,13 +1823,13 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
     '  },',
     '  "personas": [',
     '    {',
-    '      "name": "Full Name",',
+    '      "name": "Real First Last Name",',
     '      "title": "Exact Current Job Title",',
     '      "personaType": "Economic Buyer, Key Decision Maker, or Technical Evaluator",',
-    '      "linkedinUrl": "https://linkedin.com/in/...",',
+    '      "linkedinUrl": "Exact verified https://www.linkedin.com/in/slug or empty string",',
     '      "signal": "Verified recent keynote, post, publication, or role responsibility",',
     '      "signalDate": "YYYY-MM-DD",',
-    '      "evidenceUrl": "Direct source URL confirming this person and signal",',
+    '      "evidenceUrl": "Exact source URL confirming this person and signal, or empty string",',
     '      "buyingSignal": "Active, Relevant, or Emerging",',
     '      "verificationStatus": "Verified",',
     '      "confidence": "High, Medium, or Low",',
@@ -1001,22 +1843,27 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets) {
     '      "personalizedHook": "Specific opening hook referencing their context",',
     '      "draftSubject": "Relevant and concise subject line",',
     '      "draftEmail": "Full curated email under 150 words",',
-    '      "businessEmail": "username@companydomain.com",',
+    '      "businessEmail": "first.last@companydomain.com",',
     '      "emailDomain": "companydomain.com",',
-    '      "emailSourceUrl": "https://...",',
+    '      "emailSourceUrl": "Exact source URL if email is published publicly, else empty string",',
     '      "emailDiscoveryMethod": "Published, Public biography, Pattern Match, or Not Found",',
     '      "emailIdentityConfidence": "High, Medium, or Low"',
     '    }',
     '  ]',
     '}'
-  ].join('\n');
+  );
+
+  return parts.join('\n');
 }
 
 function resolvePersonaAiModel_(provider, configuredModel) {
   if (configuredModel && String(configuredModel).trim() !== '') {
     return String(configuredModel).trim();
   }
-  return provider === 'OPENAI' ? 'gpt-4o' : 'gemini-3.8-flash';
+  if (provider === 'OPENAI') return 'gpt-4o';
+  return (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel)
+    ? String(APP_CONFIG.defaultGeminiModel).trim()
+    : 'gemini-3.8-flash';
 }
 
 function getPersonaMapperSettings_(spreadsheet, campaignId) {
@@ -1175,7 +2022,7 @@ function getPersonaMapperSettings_(spreadsheet, campaignId) {
 
   if (!merged['AI Provider']) merged['AI Provider'] = 'GEMINI';
   if (!merged['AI Model']) {
-    merged['AI Model'] = String(merged['AI Provider']).toUpperCase() === 'OPENAI' ? 'gpt-4o' : 'gemini-3.8-flash';
+    merged['AI Model'] = resolvePersonaAiModel_(merged['AI Provider'], '');
   }
 
   return merged;
@@ -1358,10 +2205,14 @@ function registerPersonaInCampaignTracker_(persona, company, tracker, emailInfo)
 
 function normalizeLinkedInUrl_(url) {
   let clean = String(url || '').trim().toLowerCase();
-  if (!clean || clean.indexOf('linkedin.com') < 0) return '';
+  if (!clean || clean.indexOf('linkedin.com/in/') < 0) return '';
   clean = clean.replace(/^https?:\/\//i, '');
   clean = clean.replace(/^[a-z0-9-]+\.linkedin\.com\//i, 'linkedin.com/');
   clean = clean.split('?')[0].split('#')[0].replace(/\/+$/, '');
+  const match = clean.match(/^linkedin\.com\/in\/([^\/]+)(?:\/[a-z]{2}(?:_[a-z]{2}|-[a-z]{2})?)?$/i);
+  if (match && match[1]) {
+    return 'linkedin.com/in/' + match[1].toLowerCase();
+  }
   return clean;
 }
 
@@ -1460,7 +2311,8 @@ function normalizeSolutionFit_(rawVal, scoreObj) {
 
 function makeCompanyIntelligenceRecord_(source, enrichment, score, citations, settings) {
   const evidence = Array.isArray(enrichment.evidence) ? enrichment.evidence : [];
-  const urls = citations.concat(evidence.map(function(item) { return item && item.url ? item.url : ''; })).filter(Boolean);
+  const rawUrls = citations.concat(evidence.map(function(item) { return item && item.url ? item.url : ''; }));
+  const urls = rawUrls.map(function(u) { return sanitizeHttpUrl_(u); }).filter(Boolean);
 
   return {
     'Campaign ID': source['Campaign ID'],
@@ -1491,7 +2343,26 @@ function makeCompanyIntelligenceRecord_(source, enrichment, score, citations, se
   };
 }
 
-function makePersonaRecord_(company, persona, fitScore, emailInfo, settings) {
+function makePersonaRecord_(company, persona, fitScore, emailInfo, settings, personaSheet, validationCache) {
+  const hasSourceEvidence = Boolean(persona.evidenceUrl || persona.linkedinUrl);
+  const verifStatusPreferred = hasSourceEvidence
+    ? ['Verified']
+    : ['Needs Review', 'Needs review', 'Unverified', 'Verified'];
+  const verificationStatus = resolveValidatedCellValue_(
+    personaSheet,
+    PERSONA_MAPPER_HEADERS_.personas,
+    'Verification Status',
+    verifStatusPreferred,
+    validationCache || {}
+  );
+
+  let reviewStatus = 'Ready for Outreach';
+  if (emailInfo.isBlockedOrInvalid) {
+    reviewStatus = 'Rejected';
+  } else if (!emailInfo.businessEmail || emailInfo.emailVerificationStatus === 'unverified') {
+    reviewStatus = 'Needs Review';
+  }
+
   return {
     'Campaign ID': company['Campaign ID'],
     'Campaign Name': settings['Campaign Name'] || '',
@@ -1507,11 +2378,11 @@ function makePersonaRecord_(company, persona, fitScore, emailInfo, settings) {
     'Signal Date': persona.signalDate || new Date().toISOString().split('T')[0],
     'Evidence URL': persona.evidenceUrl || '',
     'Buying Signal': titleCaseSignal_(persona.buyingSignal) || 'Active',
-    'Verification Status': persona.verificationStatus || 'Verified',
+    'Verification Status': verificationStatus,
     'Confidence': titleCaseSignal_(persona.confidence) || 'High',
     'Persona Fit Score': fitScore,
     'Personalized Hook': persona.personalizedHook || '',
-    'Review Status': 'Ready for Outreach',
+    'Review Status': reviewStatus,
     'Last Verified At': new Date().toLocaleString(),
     'Business Email': emailInfo.businessEmail,
     'Email Domain': emailInfo.emailDomain,
@@ -1537,7 +2408,9 @@ function makeEmailQueueRecord_(company, persona, companyScore, fitScore, citatio
   const priority = Math.round((companyScore.score * weights[0] + fitScore * weights[1] + signalScore * weights[2]) / total);
   const name = persona.name || '';
   const companyName = company['Company name'] || company['Company Name'] || '';
-  const urls = citations.concat([persona.evidenceUrl || '', emailInfo.emailSourceUrl || '']).filter(Boolean);
+  const urls = citations.concat([persona.evidenceUrl || '', emailInfo.emailSourceUrl || ''])
+    .map(function(u) { return sanitizeHttpUrl_(u); })
+    .filter(Boolean);
   const defaultSubject = (settings['Campaign Name'] || 'Collaboration') + ' for ' + companyName;
 
   const email = String(emailInfo.businessEmail || '').trim().toLowerCase();
@@ -1545,6 +2418,7 @@ function makeEmailQueueRecord_(company, persona, companyScore, fitScore, citatio
   const rules = suppressionRules || { domains: [], emails: [] };
   const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@', 'office@', 'jobs@', 'careers@'];
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const verifierProv = String(emailInfo.emailVerificationProvider || settings['Email Verification Provider'] || 'Verifier').trim();
 
   let complianceStatus = 'Passed';
   let suppressionCheck = 'Clear';
@@ -1578,6 +2452,12 @@ function makeEmailQueueRecord_(company, persona, companyScore, fitScore, citatio
     humanApprovalStatus = 'Rejected (Suppression Guard)';
     sendStatus = 'Suppressed - Not Sent';
     sendError = suppressionCheck;
+  } else if (emailInfo.emailVerificationStatus === 'invalid') {
+    complianceStatus = 'Failed - Suppressed';
+    suppressionCheck = 'Blocked: Verified Invalid (' + verifierProv + ')';
+    humanApprovalStatus = 'Rejected (Suppression Guard)';
+    sendStatus = 'Suppressed - Not Sent';
+    sendError = 'Blocked: ' + verifierProv + ' reported status is invalid';
   } else if (fitScore >= minFitForReview) {
     humanApprovalStatus = 'Needs Review';
   }
@@ -1645,7 +2525,7 @@ function normalizeEmailVerificationStatus_(rawStatus) {
 function prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules) {
   const candidate = String(persona.businessEmail || '').trim().toLowerCase();
   const method = String(persona.emailDiscoveryMethod || (candidate ? 'Public web source' : 'Not Found')).trim();
-  const sourceUrl = String(persona.emailSourceUrl || '').trim();
+  const sourceUrl = sanitizeHttpUrl_(persona.emailSourceUrl || '');
   const empty = {
     businessEmail: '',
     emailDomain: '',
@@ -1657,7 +2537,9 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
     emailIdentityConfidence: 'None',
     emailVerificationNotes: 'No suitable business email found.',
     queueStatus: 'Email Research Required',
-    country: persona.country || ''
+    country: persona.country || '',
+    isBlockedOrInvalid: true,
+    shouldAutoSuppress: false
   };
 
   if (!candidate) return empty;
@@ -1673,7 +2555,9 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
       emailDiscoveryMethod: normalizedMethod,
       emailVerificationStatus: 'invalid',
       emailVerificationNotes: 'Email syntax invalid.',
-      queueStatus: 'Email Verification Failed'
+      queueStatus: 'Email Verification Failed',
+      isBlockedOrInvalid: true,
+      shouldAutoSuppress: false
     });
   }
 
@@ -1682,7 +2566,9 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
       emailDomain: domain,
       emailVerificationStatus: 'invalid',
       emailVerificationNotes: 'Personal domain rejected (Gmail/Yahoo/Outlook); professional domain required.',
-      queueStatus: 'Email Research Required'
+      queueStatus: 'Email Research Required',
+      isBlockedOrInvalid: true,
+      shouldAutoSuppress: false
     });
   }
 
@@ -1711,7 +2597,9 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
         ? 'Skipped verification: role-based email blocked by Suppression Guard.'
         : 'Skipped verification: email/domain already blocked in Lists & Settings.',
       queueStatus: 'Email Verification Failed',
-      country: persona.country || ''
+      country: persona.country || '',
+      isBlockedOrInvalid: true,
+      shouldAutoSuppress: false
     };
   }
 
@@ -1721,12 +2609,17 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
 
   let queueStatus = 'Ready for Review';
   let verificationNotes = verifier.notes || 'Domain verified';
+  let isBlockedOrInvalid = false;
+  let shouldAutoSuppress = false;
 
   if (normalizedStatus === 'invalid') {
     queueStatus = 'Email Verification Failed';
+    isBlockedOrInvalid = true;
+    shouldAutoSuppress = Boolean(verifier.configured);
+    verificationNotes = (verifier.notes || 'Verifier reported invalid') + ' — Auto-rejected & suppressed.';
   } else if (normalizedStatus === 'catch-all' || normalizedStatus === 'risky' || normalizedStatus === 'unverified') {
     if (verifier.configured) {
-      verificationNotes = 'Soft Warning: Server status is ' + normalizedStatus + '. Queued for review in Gmail Drafts.';
+      verificationNotes = 'Soft Warning: Server status is ' + normalizedStatus + '. Queued for review.';
     }
   }
 
@@ -1741,7 +2634,9 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
     emailIdentityConfidence: confidence,
     emailVerificationNotes: verificationNotes,
     queueStatus: queueStatus,
-    country: persona.country || ''
+    country: persona.country || '',
+    isBlockedOrInvalid: isBlockedOrInvalid,
+    shouldAutoSuppress: shouldAutoSuppress
   };
 }
 
@@ -2073,11 +2968,13 @@ function loadSuppressionRulesFromSettings_(spreadsheet) {
   return rules;
 }
 
-function recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, defaultQuery) {
+function recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, persona, grounding, defaultQuery, serperContext) {
   const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
   if (!evidenceSheet) return;
 
-  const evidenceUrl = String(persona.evidenceUrl || persona.linkedinUrl || persona.emailSourceUrl || '').trim();
+  const evidenceUrl = sanitizeHttpUrl_(persona.evidenceUrl || '') ||
+    String(persona.linkedinUrl || '').trim() ||
+    sanitizeHttpUrl_(persona.emailSourceUrl || '');
   if (!evidenceUrl) return;
 
   const personaName = String(persona.name || '').trim();
@@ -2086,20 +2983,27 @@ function recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, perso
 
   const normUrl = typeof normalizeSourceUrl_ === 'function'
     ? normalizeSourceUrl_(evidenceUrl)
-    : evidenceUrl.replace(/\/+$/, '');
-  const isGrounded = Boolean(grounding.citationsByUrl && grounding.citationsByUrl[normUrl]);
+    : evidenceUrl.replace(/\/+$/, '').toLowerCase();
+  const normLi = normalizeLinkedInUrl_(evidenceUrl);
+  const isSerperVerified = Boolean(
+    serperContext && serperContext.allVerifiedUrls &&
+    (serperContext.allVerifiedUrls[normUrl] || (normLi && serperContext.allVerifiedUrls[normLi]))
+  );
+  const isGrounded = Boolean(isSerperVerified || (grounding.citationsByUrl && grounding.citationsByUrl[normUrl]));
   const conf = titleCaseSignal_(persona.confidence);
 
-  // Only award 'High' Verification Score when live search grounding verified the URL
+  // Award 'High' Verification Score when Serper Google Search or live search grounding verified the URL
   const verificationScore = isGrounded
     ? 'High'
     : ((conf === 'High' || conf === 'Medium') ? 'Medium' : 'Unknown');
 
   const snippet = String(persona.signal || persona.personalizedHook || persona.buyingSignal || (persona.title + ' at ' + companyName)).trim();
   const searchQueries = grounding.searchQueries || [];
+  const serperQuery = (serperContext && serperContext.allVerifiedUrls &&
+    (serperContext.allVerifiedUrls[normUrl] || (normLi && serperContext.allVerifiedUrls[normLi]))) || '';
   const queryUsed = searchQueries.length > 0
     ? searchQueries.join('; ')
-    : (defaultQuery || ('Persona search: ' + (persona.title || 'Leadership') + ' at ' + companyName));
+    : (serperQuery || defaultQuery || ('Persona search: ' + (persona.title || 'Leadership') + ' at ' + companyName));
 
   const evidenceRow = [
     'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(),
@@ -2125,18 +3029,22 @@ function recordPersonaGroundingEvidence_(spreadsheet, campaignId, company, perso
   evidenceSheet.appendRow(evidenceRow);
 }
 
-function recordCompanyGroundingEvidence_(spreadsheet, campaignId, company, evItem, grounding, defaultQuery) {
+function recordCompanyGroundingEvidence_(spreadsheet, campaignId, company, evItem, grounding, defaultQuery, serperContext) {
   const evidenceSheet = spreadsheet.getSheetByName('Research Evidence');
   if (!evidenceSheet || !evItem || !evItem.url) return;
 
-  const evidenceUrl = String(evItem.url).trim();
+  const evidenceUrl = sanitizeHttpUrl_(evItem.url);
+  if (!evidenceUrl) return;
+
   const companyName = String(company['Company name'] || company['Company Name'] || '').trim();
-  const normUrl = typeof normalizeSourceUrl_ === 'function' ? normalizeSourceUrl_(evidenceUrl) : evidenceUrl.replace(/\/+$/, '');
-  const isGrounded = Boolean(grounding.citationsByUrl && grounding.citationsByUrl[normUrl]);
+  const normUrl = typeof normalizeSourceUrl_ === 'function' ? normalizeSourceUrl_(evidenceUrl) : evidenceUrl.replace(/\/+$/, '').toLowerCase();
+  const isSerperVerified = Boolean(serperContext && serperContext.allVerifiedUrls && serperContext.allVerifiedUrls[normUrl]);
+  const isGrounded = Boolean(isSerperVerified || (grounding.citationsByUrl && grounding.citationsByUrl[normUrl]));
   const verificationScore = isGrounded ? 'High' : 'Medium';
   const snippet = String(evItem.claim || evItem.extracted_information || 'Account research trigger').trim();
   const searchQueries = grounding.searchQueries || [];
-  const queryUsed = searchQueries.length > 0 ? searchQueries.join('; ') : (defaultQuery || 'Deep company persona research');
+  const serperQuery = (serperContext && serperContext.allVerifiedUrls && serperContext.allVerifiedUrls[normUrl]) || '';
+  const queryUsed = searchQueries.length > 0 ? searchQueries.join('; ') : (serperQuery || defaultQuery || 'Deep company persona research');
 
   const evidenceRow = [
     'EVD-' + Utilities.getUuid().slice(0, 6).toUpperCase(),

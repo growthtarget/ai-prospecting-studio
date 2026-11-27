@@ -47,6 +47,7 @@
       .audit-tag { font-weight: 700; }
       .audit-tag.pass { color: #137333; }
       .audit-tag.warn { color: #b06000; }
+      .audit-tag.info { color: #174ea6; }
       .audit-tag.fail { color: #c5221f; }
       .new-client-box { display: none; background: #f1f3f4; border: 1px solid #dadce0; border-radius: 6px; padding: 8px; margin-top: 6px; }
       .new-client-actions { display: flex; gap: 6px; margin-top: 6px; }
@@ -351,7 +352,7 @@
           <label for="aiProviderSelect">AI Provider</label>
           <select id="aiProviderSelect" onchange="onProviderChanged()">
             <option value="GEMINI" selected>Google Gemini (Search Grounding & Fast)</option>
-            <option value="OPENAI">OpenAI (GPT-4o)</option>
+            <option value="OPENAI">OpenAI (GPT-4o / 4.1)</option>
           </select>
         </div>
         <div class="field">
@@ -359,9 +360,9 @@
           <select id="aiModelSelect" onchange="onAiModelSelectChanged()"></select>
           <div id="customAiModelBox" class="new-client-box">
             <label for="aiModelCustomInput">Custom AI Model ID</label>
-            <input type="text" id="aiModelCustomInput" placeholder="e.g. gemini-2.5-pro or gpt-4.1">
+            <input type="text" id="aiModelCustomInput" placeholder="e.g. gemini-4-hydrogen or gpt-4.1">
           </div>
-          <div id="aiModelHint" class="hint">Tip: If gemini-3.8-flash is congested (503) on a free/unpaid key, auto-fallback uses gemini-3.5-flash-lite / gemini-2.5-flash automatically.</div>
+          <div id="aiModelHint" class="hint">Supports Gemini 4 &amp; Gemini 3.x with Search Grounding and cost-aware automatic model cascading.</div>
         </div>
       </div>
     </div>
@@ -536,14 +537,22 @@
 
       var AI_MODELS_BY_PROVIDER_ = {
         GEMINI: [
-          { value: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Default & Search Grounding)' },
-          { value: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite (Fast / Free-Tier Fallback)' },
-          { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Stable Grounding)' }
+          { value: 'gemini-4-hydrogen', label: 'gemini-4-hydrogen (Latest Gemini 4 Fast + Search)' },
+          { value: 'gemini-4-neon', label: 'gemini-4-neon (Gemini 4 Frontier Paid + Search)' },
+          { value: 'gemini-4-argon', label: 'gemini-4-argon (Gemini 4 Reasoning Paid + Search)' },
+          { value: 'gemini-4-carbon', label: 'gemini-4-carbon (Gemini 4 Top Reasoning Paid)' },
+          { value: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Balanced Default + Search)' },
+          { value: 'gemini-3.6-flash', label: 'gemini-3.6-flash (Fast Flash + Search)' },
+          { value: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite (Lowest Cost / Free-Tier)' },
+          { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Legacy — Retiring Dec 2026)' }
         ],
         OPENAI: [
           { value: 'gpt-4o', label: 'gpt-4o (Recommended)' },
           { value: 'gpt-4o-mini', label: 'gpt-4o-mini (Fast / Low Cost)' },
-          { value: 'o1-mini', label: 'o1-mini (Reasoning)' }
+          { value: 'gpt-4.1', label: 'gpt-4.1 (Advanced)' },
+          { value: 'gpt-4.1-mini', label: 'gpt-4.1-mini (Fast / Balanced)' },
+          { value: 'o4-mini', label: 'o4-mini (Reasoning)' },
+          { value: 'o1-mini', label: 'o1-mini (Legacy Reasoning)' }
         ]
       };
 
@@ -863,7 +872,9 @@
         });
 
         if (!targetModel) {
-          select.value = models[0].value;
+          select.value = (prov === 'GEMINI' && models.some(function(m) { return m.value === 'gemini-3.8-flash'; }))
+            ? 'gemini-3.8-flash'
+            : models[0].value;
           customBox.style.display = 'none';
           customInput.value = '';
         } else if (matchesPreset) {
@@ -881,7 +892,7 @@
           if (prov === 'OPENAI') {
             hintEl.textContent = 'Showing OpenAI models only. Requires OPENAI_API_KEY (or CLIENT_{NAME}_OPENAI_API_KEY for external clients).';
           } else {
-            hintEl.textContent = 'Showing Gemini models only. If gemini-3.8-flash is congested (503) on a free/unpaid key, auto-fallback uses gemini-3.5-flash-lite / gemini-2.5-flash.';
+            hintEl.textContent = 'Showing Gemini 4 & 3.x models with live Search Grounding. Transient overload cascades automatically across gemini-4-hydrogen / gemini-3.8-flash / gemini-3.6-flash / gemini-3.5-flash-lite.';
           }
         }
       }
@@ -1715,7 +1726,7 @@
         };
 
         setPipelineBusy_(true);
-        showStatus('🩺 Testing Budget Cap, AI Key, Verifier Credits & Sender Mailbox for "' + ownerVal + '" ($0.00 dry-run)...', 'info');
+        showStatus('🩺 Testing Budget Cap, AI Key, Verifier Credits, Sender Mailbox & Serper Key for "' + ownerVal + '" ($0.00 dry-run)...', 'info');
 
         google.script.run
           .withSuccessHandler(function(res) {
@@ -1756,9 +1767,9 @@
         box.innerHTML = '';
 
         function appendAuditRow(title, item) {
-          const st = (item && item.status) ? item.status : 'WARN';
-          const icon = st === 'PASS' ? '✅' : (st === 'WARN' ? '⚠️' : '❌');
-          const cls = st === 'PASS' ? 'pass' : (st === 'WARN' ? 'warn' : 'fail');
+          const st = (item && item.status) ? String(item.status).toUpperCase() : 'WARN';
+          const icon = st === 'PASS' ? '✅' : (st === 'WARN' ? '⚠️' : (st === 'INFO' ? 'ℹ️' : '❌'));
+          const cls = st === 'PASS' ? 'pass' : (st === 'WARN' ? 'warn' : (st === 'INFO' ? 'info' : 'fail'));
 
           const row = document.createElement('div');
           row.className = 'audit-row';
@@ -1779,6 +1790,9 @@
         appendAuditRow('AI (' + ((res.ai && res.ai.provider) || 'LLM') + ')', res.ai);
         appendAuditRow('Verifier (' + ((res.verifier && res.verifier.provider) || 'None') + ')', res.verifier);
         appendAuditRow('Sender (' + ((res.sender && res.sender.provider) || 'Gmail') + ')', res.sender);
+        if (res.serper) {
+          appendAuditRow('Serper Search', res.serper);
+        }
         box.style.display = 'block';
       }
 

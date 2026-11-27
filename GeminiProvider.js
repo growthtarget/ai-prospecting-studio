@@ -4,12 +4,13 @@
  * GOOGLE GEMINI AI PROVIDER (WITH GOOGLE SEARCH GROUNDING & CLIENT ISOLATION)
  * ============================================================================
  * File: GeminiProvider.gs / GeminiProvider.js
- * 
+ *
  * Connects directly to Google Generative Language API (v1beta)
- * with real-time Google Search Grounding, free-tier/unpaid fallback safety,
- * automatic model cascade on 503/429 overload (3.8-flash -> 3.5-flash-lite -> 2.5-flash),
- * fast thinking configuration, resilient JSON parsing, strict client-scoped
- * API key resolution, and ApiTracker logging.
+ * with real-time Google Search Grounding, Gemini 4 + Gemini 3 compatibility,
+ * free-tier/unpaid fallback safety, cost-aware model cascading
+ * (4-hydrogen / 3.8-flash -> 3.6-flash -> 3.5-flash-lite),
+ * thinkingConfig management, resilient JSON parsing, strict client-scoped
+ * API key resolution, and ApiTracker token/thought logging.
  * ============================================================================
  */
 
@@ -32,26 +33,28 @@ function callGemini_(options) {
     throw new Error('GEMINI_API_KEY is missing. Add a valid key under Project Settings > Script Properties.');
   }
 
-  // 2. Respect Configured Model & Build Resilient Free/Paid Cascade List
+  // 2. Respect Configured Model (Including Gemini 4 & Future Models) + Cost-Safe Cascade
   const defaultModel = (typeof APP_CONFIG !== 'undefined' && APP_CONFIG.defaultGeminiModel)
-    ? APP_CONFIG.defaultGeminiModel
-    : 'gemini-3.8-flash';
+    ? String(APP_CONFIG.defaultGeminiModel).trim()
+    : 'gemini-4-hydrogen';
 
   let primaryModel = String(options.model || defaultModel).trim();
-  if (!primaryModel || primaryModel === 'gemini-1.5-flash') {
+  const retiredLegacyModels = {
+    'gemini-1.5-flash': true,
+    'gemini-1.5-pro': true,
+    'gemini-1.0-pro': true,
+    'gemini-3-pro-preview': true
+  };
+  if (!primaryModel || retiredLegacyModels[primaryModel.toLowerCase()]) {
     primaryModel = defaultModel;
   }
 
-  const candidateModels = [primaryModel, 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.8-flash']
-    .filter(function(m, idx, arr) {
-      return Boolean(m) && arr.indexOf(m) === idx;
-    });
+  const candidateModels = buildGeminiCandidateModels_(primaryModel, defaultModel);
 
   // 3. Check GOOGLE_SEARCH_GROUNDING setting & recent grounding quota skip cache (keyed by API key suffix)
   const groundingAllowedByConfig = isGeminiSearchGroundingEnabled_(options);
   const groundingSkipKey = 'GEMINI_GROUNDING_SKIP_' + apiKey.slice(-6);
-  const groundingRecentlyBlocked = isCacheFlagSet_(groundingSkipKey);
-  const wantGrounding = (options.enableWebSearch !== false) && groundingAllowedByConfig && !groundingRecentlyBlocked;
+  const wantGrounding = (options.enableWebSearch !== false) && groundingAllowedByConfig && !isCacheFlagSet_(groundingSkipKey);
 
   let responseData = null;
   let lastError = null;
@@ -70,7 +73,8 @@ function callGemini_(options) {
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
       encodeURIComponent(activeModel) + ':generateContent?key=' + encodeURIComponent(apiKey);
 
-    const tryGrounded = wantGrounding && i === 0 && !isCacheFlagSet_(groundingSkipKey);
+    // Allow grounding on fallback models too unless a confirmed Search tier/quota block was cached
+    const tryGrounded = wantGrounding && !isCacheFlagSet_(groundingSkipKey);
 
     if (tryGrounded) {
       try {
@@ -78,11 +82,16 @@ function callGemini_(options) {
         break;
       } catch (groundingErr) {
         lastError = groundingErr;
-        if (groundingErr && groundingErr.isGroundingFallbackEligible) {
-          Logger.log('Gemini Search Grounding unavailable (' + groundingErr.message + '). Skipping grounding for 10 mins and retrying...');
-          if (groundingErr.isQuotaOrTierBlock) {
-            setCacheFlag_(groundingSkipKey, 600);
-          }
+
+        if (groundingErr && groundingErr.isApiKeyInvalid) {
+          throw groundingErr;
+        }
+
+        // Case A: Confirmed Search Grounding tier/quota/tool rejection -> cache skip & retry ungrounded
+        if (groundingErr && groundingErr.isGroundingFallbackEligible && groundingErr.isQuotaOrTierBlock) {
+          const skipSeconds = groundingErr.skipCacheSeconds || 300;
+          Logger.log('Gemini Search Grounding tier/quota unavailable (' + groundingErr.message + '). Skipping grounding for ' + skipSeconds + 's and retrying ungrounded...');
+          setCacheFlag_(groundingSkipKey, skipSeconds);
 
           if (Date.now() - startTimeMs > MAX_ELAPSED_MS) {
             throw groundingErr;
@@ -94,17 +103,29 @@ function callGemini_(options) {
           } catch (ungroundedErr) {
             lastError = ungroundedErr;
             if (ungroundedErr && ungroundedErr.isModelFallbackEligible && i < candidateModels.length - 1) {
-              Logger.log('Model ' + activeModel + ' overloaded/exhausted (' + ungroundedErr.message + '). Falling back to next Gemini model...');
+              Logger.log('Model ' + activeModel + ' overloaded/unavailable (' + ungroundedErr.message + '). Falling back to next Gemini model...');
+              Utilities.sleep(1000);
               continue;
             }
             throw ungroundedErr;
           }
-        } else if (groundingErr && groundingErr.isModelFallbackEligible && i < candidateModels.length - 1) {
-          Logger.log('Model ' + activeModel + ' unavailable (' + groundingErr.message + '). Falling back to next Gemini model...');
-          continue;
-        } else {
-          throw groundingErr;
         }
+
+        // Case B: Transient overload / RPM 429 / model unavailable -> keep grounding ON and try next model
+        if (groundingErr && groundingErr.isModelFallbackEligible && i < candidateModels.length - 1) {
+          Logger.log('Model ' + activeModel + ' transient error (' + groundingErr.message + '). Retrying next Gemini model WITH Search Grounding...');
+          Utilities.sleep(1200);
+          continue;
+        }
+
+        // Case C: Final model still hit a fallback-eligible error (e.g., ambiguous 429) -> one ungrounded rescue attempt without poisoning cache
+        if (groundingErr && groundingErr.isGroundingFallbackEligible && i === candidateModels.length - 1) {
+          Logger.log('Final grounded attempt failed (' + groundingErr.message + '). Trying ungrounded rescue without disabling future grounding...');
+          responseData = executeGeminiFetch_(url, activeModel, options, false, true);
+          break;
+        }
+
+        throw groundingErr;
       }
     } else {
       try {
@@ -112,8 +133,12 @@ function callGemini_(options) {
         break;
       } catch (err) {
         lastError = err;
+        if (err && err.isApiKeyInvalid) {
+          throw err;
+        }
         if (err && err.isModelFallbackEligible && i < candidateModels.length - 1) {
           Logger.log('Model ' + activeModel + ' unavailable (' + err.message + '). Falling back to next Gemini model...');
+          Utilities.sleep(1000);
           continue;
         }
         throw err;
@@ -128,7 +153,12 @@ function callGemini_(options) {
   const body = responseData.body;
   const candidate = body.candidates && body.candidates[0];
   if (!candidate || !candidate.content || !candidate.content.parts) {
-    throw new Error('Gemini returned an empty response.');
+    const finishInfo = candidate && candidate.finishReason ? ' (finishReason: ' + candidate.finishReason + ')' : '';
+    throw new Error('Gemini returned an empty response' + finishInfo + '.');
+  }
+
+  if (candidate.finishReason && candidate.finishReason !== 'STOP') {
+    Logger.log('Gemini finishReason on ' + (responseData.model || primaryModel) + ': ' + candidate.finishReason);
   }
 
   // Filter out internal thinking parts (part.thought === true) so JSON extraction stays clean
@@ -152,7 +182,7 @@ function callGemini_(options) {
     });
     const webSearchQueries = candidate.groundingMetadata.webSearchQueries || [];
     if (webSearchQueries.length > 0) {
-      Logger.log('Gemini Search Grounding Queries: ' + webSearchQueries.join(' | '));
+      Logger.log('Gemini Search Grounding Queries (' + webSearchQueries.length + '): ' + webSearchQueries.join(' | '));
     }
   }
 
@@ -175,35 +205,95 @@ function callGemini_(options) {
 }
 
 /**
- * Performs a single Gemini HTTP request and logs tokens/errors to ApiTracker.
- * Applies fast thinkingConfig per model family and clarifies ungrounded free-tier mode.
+ * Builds a cost-aware Gemini model cascade list honoring the configured primary model.
+ * Never auto-upgrades a budget -lite model into expensive paid-only Carbon/Neon/Argon models.
+ */
+function buildGeminiCandidateModels_(primaryModel, defaultModel) {
+  const cleanPrimary = String(primaryModel || defaultModel || 'gemini-4-hydrogen').trim();
+  const lowerPrimary = cleanPrimary.toLowerCase();
+
+  let fallbacks;
+  if (lowerPrimary.indexOf('lite') >= 0) {
+    fallbacks = [cleanPrimary, 'gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-4-hydrogen'];
+  } else {
+    fallbacks = [cleanPrimary, 'gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+  }
+
+  return fallbacks.filter(function(m, idx, arr) {
+    return Boolean(m) && arr.indexOf(m) === idx;
+  });
+}
+
+/**
+ * Builds model-appropriate generationConfig for Gemini 4+, Gemini 3, and legacy models.
+ * - Omits temperature on Gemini 4+ per Google migration guidelines.
+ * - Raises maxOutputTokens to 32K/64K so thinking tokens do not truncate JSON.
+ * - Configures low-latency thinkingLevel (never sends 'minimal' to Gemini 4 or 3.8-flash).
+ */
+function buildGeminiGenerationConfig_(model, options, enableGroundingTool, allowThinkingConfig) {
+  const lowerModel = String(model || '').trim().toLowerCase();
+  const isGemini4Plus = /^gemini-(?:[4-9]|\d{2,})(?:[-.]|$)/.test(lowerModel);
+  const isGemini3 = /^gemini-3(?:[-.]|$)/.test(lowerModel);
+  const isGemini25 = /^gemini-2\.5(?:[-.]|$)/.test(lowerModel);
+  const isLite = lowerModel.indexOf('lite') >= 0;
+
+  let defaultMaxTokens = 65536;
+  if (lowerModel.indexOf('gemini-4-carbon') === 0 || lowerModel.indexOf('gemini-4-argon') === 0) {
+    defaultMaxTokens = 32768;
+  } else if (/^gemini-(?:1|2\.0)(?:[-.]|$)/.test(lowerModel)) {
+    defaultMaxTokens = 8192;
+  }
+
+  const generationConfig = {
+    maxOutputTokens: (options && options.maxOutputTokens) ? Number(options.maxOutputTokens) : defaultMaxTokens
+  };
+
+  if (!isGemini4Plus) {
+    generationConfig.temperature = (options && options.temperature !== undefined) ? options.temperature : 0.2;
+  }
+
+  if (allowThinkingConfig) {
+    const requestedLevel = (options && options.thinkingLevel)
+      ? String(options.thinkingLevel).trim().toLowerCase()
+      : '';
+
+    if (isGemini4Plus) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: (requestedLevel && requestedLevel !== 'minimal') ? requestedLevel : 'low'
+      };
+    } else if (isGemini3 && !isLite) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: (requestedLevel && requestedLevel !== 'minimal') ? requestedLevel : 'low'
+      };
+    } else if (isGemini3 && isLite && requestedLevel) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: requestedLevel
+      };
+    } else if (isGemini25 && lowerModel.indexOf('pro') < 0) {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+  }
+
+  if (!enableGroundingTool && options && options.json) {
+    generationConfig.responseMimeType = 'application/json';
+  }
+
+  return generationConfig;
+}
+
+/**
+ * Performs a single Gemini HTTP request and logs tokens/thinking/errors to ApiTracker.
  */
 function executeGeminiFetch_(url, model, options, enableGroundingTool, allowThinkingConfig) {
   let promptText = String(options.prompt || '');
 
   if (enableGroundingTool && options.json) {
-    promptText += '\n\nIMPORTANT: Output ONLY raw valid JSON matching the requested schema. Do not wrap in markdown code fences or add extra commentary.';
+    promptText += '\n\nIMPORTANT: Use Google Search grounding to verify real, current facts and official URLs before answering. Do NOT guess or fabricate profile URLs. Output ONLY raw valid JSON matching the requested schema. Do not wrap in markdown code fences or add extra commentary.';
   } else if (!enableGroundingTool && options.enableWebSearch !== false) {
-    promptText += '\n\n[UNGROUNDED MODE NOTICE: Live web search is unavailable on this API tier. Do NOT return an empty list or refuse because search is unavailable. Instead, use your general knowledge of real, established organizations and executives matching the criteria, populate every required JSON field cleanly, and return valid JSON matching the requested schema.]';
+    promptText += '\n\n[UNGROUNDED MODE NOTICE: Live web search is unavailable on this request. Do NOT return an empty list or refuse solely because live search is unavailable—use verified knowledge for established organizations where applicable. CRITICAL ACCURACY RULE: Never invent, guess, or construct URLs, LinkedIn profile slugs, search-result links, or unverified executive names. If an exact profile URL or person name is uncertain, leave that URL blank ("") or omit the unverified person rather than guessing.]';
   }
 
-  const generationConfig = {
-    temperature: options.temperature !== undefined ? options.temperature : 0.2,
-    maxOutputTokens: 8192
-  };
-
-  if (allowThinkingConfig) {
-    const lowerModel = String(model || '').toLowerCase();
-    if (lowerModel.indexOf('gemini-3.') === 0 && lowerModel.indexOf('lite') < 0) {
-      generationConfig.thinkingConfig = { thinkingLevel: 'low' };
-    } else if (lowerModel.indexOf('gemini-2.5-flash') === 0) {
-      generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    }
-  }
-
-  if (!enableGroundingTool && options.json) {
-    generationConfig.responseMimeType = 'application/json';
-  }
+  const generationConfig = buildGeminiGenerationConfig_(model, options, enableGroundingTool, allowThinkingConfig);
 
   const payload = {
     contents: [
@@ -272,17 +362,53 @@ function executeGeminiFetch_(url, model, options, enableGroundingTool, allowThin
 
     const err = new Error('Gemini API Error (' + statusCode + ' on ' + model + '): ' + rawText);
 
-    if (enableGroundingTool && (
-      statusCode === 429 ||
-      statusCode === 503 ||
-      (statusCode === 400 && (lowerErr.indexOf('google_search') >= 0 || lowerErr.indexOf('tool') >= 0 || lowerErr.indexOf('grounding') >= 0 || lowerErr.indexOf('mime') >= 0)) ||
-      (statusCode === 403 && (lowerErr.indexOf('grounding') >= 0 || lowerErr.indexOf('search') >= 0))
-    )) {
-      err.isGroundingFallbackEligible = true;
-      err.isQuotaOrTierBlock = (statusCode === 429 || statusCode === 403);
+    if (lowerErr.indexOf('api key not valid') >= 0 || lowerErr.indexOf('api_key_invalid') >= 0) {
+      err.isApiKeyInvalid = true;
+      throw err;
     }
 
-    if (statusCode === 503 || statusCode === 429 || statusCode === 404 || statusCode >= 500) {
+    if (enableGroundingTool) {
+      const explicitGroundingReject =
+        (statusCode === 400 && (
+          lowerErr.indexOf('google_search') >= 0 ||
+          lowerErr.indexOf('search_retrieval') >= 0 ||
+          lowerErr.indexOf('grounding') >= 0 ||
+          lowerErr.indexOf('mime') >= 0 ||
+          lowerErr.indexOf('tool') >= 0
+        )) ||
+        (statusCode === 403 && (
+          lowerErr.indexOf('grounding') >= 0 ||
+          lowerErr.indexOf('search') >= 0 ||
+          lowerErr.indexOf('permission') >= 0
+        )) ||
+        (statusCode === 429 && (
+          lowerErr.indexOf('search') >= 0 ||
+          lowerErr.indexOf('grounding') >= 0 ||
+          lowerErr.indexOf('free_tier') >= 0 ||
+          lowerErr.indexOf('free tier') >= 0 ||
+          lowerErr.indexOf('quota_limit_value: "0"') >= 0 ||
+          lowerErr.indexOf('limit: 0') >= 0
+        ));
+
+      if (explicitGroundingReject) {
+        err.isGroundingFallbackEligible = true;
+        err.isQuotaOrTierBlock = true;
+        err.skipCacheSeconds = (statusCode === 429) ? 180 : 600;
+      } else if (statusCode === 429 || statusCode === 503) {
+        err.isGroundingFallbackEligible = true;
+        err.isQuotaOrTierBlock = false;
+      }
+    }
+
+    const modelTierOrMissing400 = (statusCode === 400 && (
+      lowerErr.indexOf('model') >= 0 ||
+      lowerErr.indexOf('not found') >= 0 ||
+      lowerErr.indexOf('deprecated') >= 0 ||
+      lowerErr.indexOf('not supported') >= 0 ||
+      lowerErr.indexOf('free tier') >= 0
+    ));
+
+    if (statusCode === 503 || statusCode === 429 || statusCode === 404 || statusCode === 403 || statusCode >= 500 || modelTierOrMissing400) {
       err.isModelFallbackEligible = true;
     }
 
@@ -291,10 +417,27 @@ function executeGeminiFetch_(url, model, options, enableGroundingTool, allowThin
 
   const body = JSON.parse(rawText || '{}');
   const usage = body.usageMetadata || {};
-  const promptTokens = usage.promptTokenCount || 0;
-  const candidateTokens = usage.candidatesTokenCount || 0;
+  const promptTokens = (usage.promptTokenCount || 0) + (usage.toolUsePromptTokenCount || 0);
+  const candidateTokens = (usage.candidatesTokenCount || 0) + (usage.thoughtsTokenCount || 0);
+  const firstCandidate = body.candidates && body.candidates[0];
+  const groundingMeta = firstCandidate && firstCandidate.groundingMetadata ? firstCandidate.groundingMetadata : null;
+  const searchQueriesCount = groundingMeta && Array.isArray(groundingMeta.webSearchQueries)
+    ? groundingMeta.webSearchQueries.filter(Boolean).length
+    : 0;
+  const groundingChunksCount = groundingMeta && Array.isArray(groundingMeta.groundingChunks)
+    ? groundingMeta.groundingChunks.length
+    : 0;
 
   if (typeof logApiUsage_ === 'function') {
+    const modeTag = enableGroundingTool
+      ? (searchQueriesCount > 0 || groundingChunksCount > 0
+        ? '[Search Grounding] '
+        : '[Search Grounding Enabled - 0 Queries] ')
+      : '[Standard JSON] ';
+
+    const extraUsage = (usage.thoughtsTokenCount ? (', Thought tokens: ' + usage.thoughtsTokenCount) : '') +
+      (enableGroundingTool ? (', Queries: ' + searchQueriesCount + ', Sources: ' + groundingChunksCount) : '');
+
     logApiUsage_({
       campaignId: options.campaignId,
       clientName: options.clientName,
@@ -304,13 +447,17 @@ function executeGeminiFetch_(url, model, options, enableGroundingTool, allowThin
       inputUnits: promptTokens,
       outputUnits: candidateTokens,
       status: 'SUCCESS',
-      details: (enableGroundingTool ? '[Search Grounding] ' : '[Standard JSON] ') +
-        'Model: ' + model + ' | Prompt tokens: ' + promptTokens + ', Candidate tokens: ' + candidateTokens,
+      details: modeTag + 'Model: ' + model + ' | Input tokens: ' + promptTokens + ', Output tokens: ' + candidateTokens + extraUsage,
       modelName: model
     });
   }
 
-  return { body: body, statusCode: statusCode, usedGrounding: enableGroundingTool };
+  return {
+    body: body,
+    statusCode: statusCode,
+    usedGrounding: enableGroundingTool,
+    model: model
+  };
 }
 
 /**
@@ -323,32 +470,39 @@ function parseGeminiJsonOutput_(textOutput) {
 
   const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenceMatch && fenceMatch[1]) {
-    cleaned = fenceMatch[1].trim();
+    const fenced = fenceMatch[1].trim();
+    try {
+      return JSON.parse(fenced);
+    } catch (fenceErr) {
+      cleaned = fenced;
+    }
   }
 
   try {
     return JSON.parse(cleaned);
   } catch (e) {
     const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
     const firstBracket = cleaned.indexOf('[');
-    let startIdx = -1;
-    let endIdx = -1;
+    const lastBracket = cleaned.lastIndexOf(']');
 
-    if (firstBracket >= 0 && (firstBrace < 0 || firstBracket < firstBrace)) {
-      startIdx = firstBracket;
-      endIdx = cleaned.lastIndexOf(']');
-    } else if (firstBrace >= 0) {
-      startIdx = firstBrace;
-      endIdx = cleaned.lastIndexOf('}');
+    const candidates = [];
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      candidates.push({ index: firstBrace, slice: cleaned.slice(firstBrace, lastBrace + 1) });
+    }
+    if (firstBracket >= 0 && lastBracket > firstBracket) {
+      candidates.push({ index: firstBracket, slice: cleaned.slice(firstBracket, lastBracket + 1) });
     }
 
-    if (startIdx >= 0 && endIdx > startIdx) {
+    candidates.sort(function(a, b) { return a.index - b.index; });
+
+    for (let i = 0; i < candidates.length; i++) {
       try {
-        return JSON.parse(cleaned.slice(startIdx, endIdx + 1));
-      } catch (nestedErr) {
-        Logger.log('Could not parse Gemini JSON slice: ' + nestedErr.message);
-      }
+        return JSON.parse(candidates[i].slice);
+      } catch (nestedErr) {}
     }
+
+    Logger.log('Could not parse Gemini JSON slice from preview: ' + cleaned.slice(0, 300));
     return null;
   }
 }
@@ -363,7 +517,7 @@ function isCacheFlagSet_(key) {
 
 function setCacheFlag_(key, seconds) {
   try {
-    CacheService.getScriptCache().put(key, '1', Math.max(60, Math.min(21600, seconds || 600)));
+    CacheService.getScriptCache().put(key, '1', Math.max(60, Math.min(21600, seconds || 300)));
   } catch (e) {}
 }
 
@@ -422,17 +576,32 @@ function isValidGeminiKeyValue_(val) {
 function isGeminiSearchGroundingEnabled_(options) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.getActive();
-    if (options && typeof resolveCampaignClientName_ === 'function' && typeof isLocalAgencyClient_ === 'function' && typeof normalizeClientPropertyPrefix_ === 'function') {
-      const clientName = resolveCampaignClientName_(options.campaignId, options.clientName, ss);
-      if (!isLocalAgencyClient_(clientName)) {
-        const overrideProp = normalizeClientPropertyPrefix_(clientName) + 'GOOGLE_SEARCH_GROUNDING';
-        const overrideVal = String(PropertiesService.getScriptProperties().getProperty(overrideProp) || '').trim().toUpperCase();
-        if (overrideVal === 'FALSE' || overrideVal === 'NO' || overrideVal === '0' || overrideVal === 'DISABLED') {
-          return false;
-        }
-        if (overrideVal === 'TRUE' || overrideVal === 'YES' || overrideVal === '1' || overrideVal === 'ENABLED') {
-          return true;
-        }
+    let clientName = '';
+    let isLocal = true;
+
+    if (options && typeof resolveCampaignClientName_ === 'function' && typeof isLocalAgencyClient_ === 'function') {
+      clientName = resolveCampaignClientName_(options.campaignId, options.clientName, ss);
+      isLocal = isLocalAgencyClient_(clientName);
+    }
+
+    const scriptProps = PropertiesService.getScriptProperties();
+
+    if (!isLocal && typeof normalizeClientPropertyPrefix_ === 'function') {
+      const overrideProp = normalizeClientPropertyPrefix_(clientName) + 'GOOGLE_SEARCH_GROUNDING';
+      const overrideVal = String(scriptProps.getProperty(overrideProp) || '').trim().toUpperCase();
+      if (overrideVal === 'FALSE' || overrideVal === 'NO' || overrideVal === '0' || overrideVal === 'DISABLED') {
+        return false;
+      }
+      if (overrideVal === 'TRUE' || overrideVal === 'YES' || overrideVal === '1' || overrideVal === 'ENABLED') {
+        return true;
+      }
+    } else if (isLocal) {
+      const localPropVal = String(scriptProps.getProperty('GOOGLE_SEARCH_GROUNDING') || '').trim().toUpperCase();
+      if (localPropVal === 'FALSE' || localPropVal === 'NO' || localPropVal === '0' || localPropVal === 'DISABLED') {
+        return false;
+      }
+      if (localPropVal === 'TRUE' || localPropVal === 'YES' || localPropVal === '1' || localPropVal === 'ENABLED') {
+        return true;
       }
     }
 
@@ -440,10 +609,14 @@ function isGeminiSearchGroundingEnabled_(options) {
     const sheet = ss.getSheetByName('Agent Settings');
     if (!sheet || sheet.getLastRow() <= 1) return true;
 
+    const targetNormKey = (!isLocal && typeof normalizeClientPropertyPrefix_ === 'function')
+      ? (normalizeClientPropertyPrefix_(clientName) + 'GOOGLE_SEARCH_GROUNDING').replace(/[^A-Z0-9]/g, '')
+      : 'GOOGLESEARCHGROUNDING';
+
     const data = sheet.getDataRange().getValues();
     for (let r = 1; r < data.length; r++) {
       const key = String(data[r][1] || data[r][0] || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-      if (key === 'GOOGLESEARCHGROUNDING') {
+      if (key === targetNormKey) {
         const val = String(data[r][2] !== undefined ? data[r][2] : data[r][1]).trim().toUpperCase();
         if (val === 'FALSE' || val === 'NO' || val === '0' || val === 'DISABLED') {
           return false;
