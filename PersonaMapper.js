@@ -10,27 +10,31 @@
  *    using strict Client-Scoped API keys (zero local fallback for clients).
  * 2. Optional Serper.dev Google Search Pre-Enrichment (Step B):
  *    - Resolves SERPER_API_KEY / CLIENT_{NAME}_SERPER_API_KEY strictly per client.
- *    - Retrieves real Google-indexed site:linkedin.com/in profiles and company
- *      leadership pages (num: 10 = 1 credit / ~$0.001 per query) before AI scoring.
- * 3. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
+ *    - Retrieves real Google-indexed site:linkedin.com/in profiles plus "@domain"
+ *      email-format & corporate leadership pages (num: 10 = 1 credit / ~$0.001 each).
+ * 3. Domain-Pattern Memory & Smart 1-Retry Fallback:
+ *    - Learns proven & disproven email patterns per company domain from existing leads ($0).
+ *    - Tries at most 1 smart alternate pattern (e.g., flast <-> first.last) when a
+ *      Pattern Match email returns invalid on a healthy-DNS domain before rejecting.
+ * 4. Strict Verifier Isolation: Resolves ZeroBounce / MillionVerifier / NeverBounce /
  *    Custom HTTPS keys strictly per Client / Owner (validated pre-flight before AI calls).
- * 4. Anti-Hallucination & Profile Sanitization (Step A Hardening):
+ * 5. Anti-Hallucination & Profile Sanitization (Step A Hardening):
  *    - Rejects generic role placeholders ("VP Procurement", "Procurement Leader", etc.)
  *      before spending email verification credits.
  *    - Strips bare linkedin.com, /search/ links, role-fabricated slugs, and
  *      ungrounded AI-guessed /in/ URLs (leaving LinkedIn URL blank rather than 404).
- * 5. Campaign-Level Anti-Duplication:
+ * 6. Campaign-Level Anti-Duplication & Manual Rescue:
  *    - Automatically skips companies in the same Campaign ID that already have mapped personas.
  *    - Deduplicates personas per Campaign ID across normalized LinkedIn URLs,
  *      Business Emails, and normalized Person Name + Company before spending verifier credits.
- * 6. Real-Time Suppression & Auto-Rejection:
+ *    - Supports manual re-verification rescue via "Verify Selected Prospect Emails",
+ *      cleanly unblocking rows when a corrected email passes verification and syncing
+ *      the updated email & Review Status back to "Persona Leads".
+ * 7. Real-Time Suppression & Auto-Rejection:
  *    - Cross-references Lists & Settings for competitor domains, opt-out emails,
  *      and role-based accounts before verification & queuing.
- *    - Automatically rejects & suppresses verified "invalid" emails during Step 2
- *      and manual "Verify Selected Prospect Emails" runs.
- * 7. Dual-Tab Intelligence & Grounding Evidence: Enriches "Persona Leads" (29 cols),
+ * 8. Dual-Tab Intelligence & Grounding Evidence: Enriches "Persona Leads" (29 cols),
  *    "Prospect Review Queue" (45 base cols), and "Research Evidence" (9 cols).
- * 8. API Usage & Cost Tracking: Logs LLM tokens, Serper queries, and verifier credits to "API_Usage_Log".
  * ============================================================================
  */
 
@@ -75,11 +79,12 @@ function validatePersonaPreRunGuardrails_(spreadsheet, campaignId, settings) {
 }
 
 /**
- * Manual Queue Email Verifier:
+ * Manual Queue Email Verifier (with Manual Rescue Support):
  * Verifies selected visible rows in "Prospect Review Queue" outside the AI agent workflow
- * using the campaign's configured verifier (ZeroBounce, MillionVerifier, NeverBounce, Custom HTTPS),
- * syncs results to "Persona Leads", auto-suppresses invalid emails, and warns if an invalid
- * email already has a staged draft in Gmail / Microsoft 365.
+ * using the campaign's configured verifier (ZeroBounce, MillionVerifier, NeverBounce, Custom HTTPS).
+ * - Checks active Lists & Settings suppression rules before spending credits.
+ * - Cleanly unblocks & rescues previously rejected/suppressed rows when a replacement email passes.
+ * - Syncs updated Business Email, Email Domain, verification metadata, and Review Status back to "Persona Leads".
  */
 function verifySelectedProspectEmails() {
   let ui = null;
@@ -179,11 +184,14 @@ function verifySelectedProspectEmails() {
   }
 
   const campCol = colIdx(['Campaign ID']);
+  const compIdCol = colIdx(['Company ID']);
+  const compNameCol = colIdx(['Company Name']);
   const personaIdCol = colIdx(['Persona ID']);
   const nameCol = colIdx(['Name', 'Persona Name']);
   const emailCol = colIdx(['Business Email', 'Email']);
   const domainCol = colIdx(['Email Domain']);
   const reviewCol = colIdx(['Review Status']);
+  const reviewerNotesCol = colIdx(['Reviewer Notes']);
   const approvalCol = colIdx(['Human Approval Status']);
   const sendStatusCol = colIdx(['Send Status']);
   const sendErrorCol = colIdx(['Send Error', 'Last Error']);
@@ -257,16 +265,20 @@ function verifySelectedProspectEmails() {
       'Verify ' + targetRows.length + ' selected visible row(s) using ' + primaryProvider + '?\n' +
       '• Client / Owner: ' + primaryClient + '\n' +
       '• Campaign(s): ' + uniqueCampaignIds.join(', ') + '\n\n' +
-      'This will use 1 verification credit per valid-syntax email and update both Prospect Review Queue & Persona Leads.',
+      'This will use 1 verification credit per unsuppressed email, rescue/unblock valid replacement emails, and sync updates to Persona Leads.',
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
   }
 
+  const suppressionRules = loadSuppressionRulesFromSettings_(ss);
+  const rolePrefixes = ['info@', 'support@', 'sales@', 'admin@', 'billing@', 'contact@', 'help@', 'office@', 'jobs@', 'careers@'];
   const todayIso = new Date().toISOString().split('T')[0];
+
   let validCount = 0;
   let softWarnCount = 0;
   let invalidCount = 0;
+  let rescuedCount = 0;
   let errorCount = 0;
   const invalidEmailsToSuppress = [];
   const staleDraftWarnings = [];
@@ -281,9 +293,19 @@ function verifySelectedProspectEmails() {
     checkedCampaignClients[cid] = clientName;
 
     const rawEmail = String(row[emailCol] || '').trim().toLowerCase();
+    const compId = compIdCol >= 0 ? String(row[compIdCol] || '').trim() : '';
+    const compName = compNameCol >= 0 ? String(row[compNameCol] || '').trim() : '';
     const personaId = personaIdCol >= 0 ? String(row[personaIdCol] || '').trim() : '';
     const leadName = nameCol >= 0 ? String(row[nameCol] || '').trim() : '';
+
+    const currReview = reviewCol >= 0 ? String(row[reviewCol] || '').trim() : '';
+    const currReviewerNotes = reviewerNotesCol >= 0 ? String(row[reviewerNotesCol] || '').trim() : '';
+    const currApproval = approvalCol >= 0 ? String(row[approvalCol] || '').trim() : '';
     const currSendStatus = sendStatusCol >= 0 ? String(row[sendStatusCol] || '').trim() : '';
+    const currSendError = sendErrorCol >= 0 ? String(row[sendErrorCol] || '').trim() : '';
+    const currCompliance = complianceCol >= 0 ? String(row[complianceCol] || '').trim() : '';
+    const currSuppression = suppressionCol >= 0 ? String(row[suppressionCol] || '').trim() : '';
+
     const currSendLow = currSendStatus.toLowerCase();
     const hadStagedDraft = (currSendLow === 'draft created' || currSendLow === 'draft created in gmail');
     const isAlreadyDispatched = (currSendLow === 'sent' || currSendLow === 'pushed to sequencer');
@@ -292,17 +314,32 @@ function verifySelectedProspectEmails() {
     const domain = atIdx > 0 ? rawEmail.slice(atIdx + 1) : '';
     const isValidSyntax = Boolean(domain && /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(rawEmail));
     const isPersonal = Boolean(domain && isPersonalEmailDomain_(domain));
+    const isRoleEmail = Boolean(rawEmail && rolePrefixes.some(function(pre) { return rawEmail.indexOf(pre) === 0; }));
+    const isSuppressedEmail = Boolean(rawEmail && suppressionRules.emails && suppressionRules.emails.indexOf(rawEmail) >= 0);
+    const isSuppressedDomain = Boolean(domain && suppressionRules.domains && suppressionRules.domains.indexOf(domain) >= 0);
 
     let normStatus = 'unverified';
     let providerUsed = String(settings['Email Verification Provider'] || 'ZeroBounce').trim();
     let notesText = '';
     let isApiError = false;
+    let blockedByGuardType = '';
 
     if (!rawEmail || !isValidSyntax || isPersonal) {
       normStatus = 'invalid';
+      blockedByGuardType = 'syntax';
       notesText = !rawEmail
         ? 'Missing Business Email.'
         : (isPersonal ? 'Personal domain rejected; business email required.' : 'Email syntax invalid.');
+    } else if (isRoleEmail) {
+      normStatus = 'unverified';
+      blockedByGuardType = 'role';
+      notesText = 'Skipped verification: role-based email blocked by Suppression Guard.';
+    } else if (isSuppressedEmail || isSuppressedDomain) {
+      normStatus = 'invalid';
+      blockedByGuardType = 'suppression';
+      notesText = isSuppressedEmail
+        ? 'Skipped verification: email is on active suppression list in Lists & Settings.'
+        : 'Skipped verification: domain is on active suppression list in Lists & Settings.';
     } else {
       const verif = callConfiguredEmailVerifier_(rawEmail, settings, ss);
       providerUsed = verif.provider || providerUsed;
@@ -327,13 +364,23 @@ function verifySelectedProspectEmails() {
     if (isApiError) {
       errorCount++;
       if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(notesText);
-    } else if (normStatus === 'invalid') {
+    } else if (blockedByGuardType || normStatus === 'invalid') {
       invalidCount++;
       if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(notesText);
       if (queueStatusCol >= 0) qSheet.getRange(rowNum, queueStatusCol + 1).setValue('Email Verification Failed');
 
       const isPilot = cid.toUpperCase().indexOf('PILOT-') === 0;
-      if (isValidSyntax && !isPersonal && !isPilot) {
+      if (blockedByGuardType === 'role') {
+        if (complianceCol >= 0) qSheet.getRange(rowNum, complianceCol + 1).setValue('Failed - Role Based');
+        if (suppressionCol >= 0) qSheet.getRange(rowNum, suppressionCol + 1).setValue('Blocked: Role-Based Account');
+      } else if (blockedByGuardType === 'suppression') {
+        if (complianceCol >= 0) qSheet.getRange(rowNum, complianceCol + 1).setValue('Failed - Suppressed');
+        if (suppressionCol >= 0) {
+          qSheet.getRange(rowNum, suppressionCol + 1).setValue(
+            isSuppressedEmail ? 'Blocked: Email in Lists & Settings' : 'Blocked: Domain in Lists & Settings'
+          );
+        }
+      } else if (isValidSyntax && !isPersonal && !isPilot) {
         invalidEmailsToSuppress.push(rawEmail);
         if (complianceCol >= 0) qSheet.getRange(rowNum, complianceCol + 1).setValue('Failed - Suppressed');
         if (suppressionCol >= 0) qSheet.getRange(rowNum, suppressionCol + 1).setValue('Blocked: Email in Lists & Settings');
@@ -349,7 +396,7 @@ function verifySelectedProspectEmails() {
       }
 
       if (sendErrorCol >= 0) {
-        const errNote = 'Blocked: ' + providerUsed + ' reported status is invalid' +
+        const errNote = (blockedByGuardType ? notesText : ('Blocked: ' + providerUsed + ' reported status is invalid')) +
           (hadStagedDraft ? ' — DELETE staged draft from mailbox!' : '');
         qSheet.getRange(rowNum, sendErrorCol + 1).setValue(errNote);
       }
@@ -357,39 +404,92 @@ function verifySelectedProspectEmails() {
       if (hadStagedDraft) {
         staleDraftWarnings.push('• Row ' + rowNum + ' (' + rawEmail + ')');
       }
-    } else if (normStatus === 'catch-all' || normStatus === 'risky') {
-      softWarnCount++;
-      const warnNote = 'Soft Warning: Server status is ' + normStatus + (notesText ? (' (' + notesText + ')') : '') + '.';
-      if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(warnNote);
-      if (queueStatusCol >= 0) {
-        const qCurr = String(row[queueStatusCol] || '').trim();
-        if (!qCurr || qCurr === 'Email Verification Failed' || qCurr === 'Email Research Required') {
-          qSheet.getRange(rowNum, queueStatusCol + 1).setValue('Ready for Review');
-        }
-      }
-      notesText = warnNote;
-    } else {
-      validCount++;
-      if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(notesText || (providerUsed + ': valid'));
-      if (queueStatusCol >= 0) {
-        const qCurr = String(row[queueStatusCol] || '').trim();
-        if (!qCurr || qCurr === 'Email Verification Failed' || qCurr === 'Email Research Required') {
-          qSheet.getRange(rowNum, queueStatusCol + 1).setValue('Ready for Review');
-        }
-      }
-    }
 
-    personaSyncUpdates.push({
-      campaignId: cid,
-      personaId: personaId,
-      email: rawEmail,
-      name: leadName,
-      status: normStatus,
-      date: todayIso,
-      provider: providerUsed,
-      notes: notesText,
-      rejectPersona: (!isApiError && normStatus === 'invalid')
-    });
+      personaSyncUpdates.push({
+        campaignId: cid,
+        companyId: compId,
+        companyName: compName,
+        personaId: personaId,
+        email: rawEmail,
+        domain: domain,
+        name: leadName,
+        status: normStatus,
+        date: todayIso,
+        provider: providerUsed,
+        notes: notesText,
+        rejectPersona: true,
+        unblockPersona: false
+      });
+    } else {
+      const isSoftWarn = (normStatus === 'catch-all' || normStatus === 'risky');
+      if (isSoftWarn) {
+        softWarnCount++;
+        notesText = 'Soft Warning: Server status is ' + normStatus + (notesText ? (' (' + notesText + ')') : '') + '.';
+      } else {
+        validCount++;
+        notesText = notesText || (providerUsed + ': valid');
+      }
+
+      if (verifNotesCol >= 0) qSheet.getRange(rowNum, verifNotesCol + 1).setValue(notesText);
+      if (queueStatusCol >= 0) {
+        const qCurr = String(row[queueStatusCol] || '').trim();
+        if (!qCurr || qCurr === 'Email Verification Failed' || qCurr === 'Email Research Required' || qCurr === 'Rejected') {
+          qSheet.getRange(rowNum, queueStatusCol + 1).setValue('Ready for Review');
+        }
+      }
+
+      // Rescue & unblock row if it was previously marked Suppressed / Rejected / Failed
+      const wasBlocked = (
+        currReview.toLowerCase() === 'rejected' ||
+        currApproval.toLowerCase().indexOf('rejected') >= 0 ||
+        currApproval.toLowerCase().indexOf('suppression') >= 0 ||
+        currSendLow === 'suppressed - not sent' ||
+        currCompliance.toLowerCase().indexOf('failed') >= 0 ||
+        currSuppression.toLowerCase().indexOf('blocked') >= 0
+      );
+
+      if (complianceCol >= 0) qSheet.getRange(rowNum, complianceCol + 1).setValue('Passed');
+      if (suppressionCol >= 0) qSheet.getRange(rowNum, suppressionCol + 1).setValue('Clear');
+
+      if (!isAlreadyDispatched) {
+        if (reviewCol >= 0 && (!currReview || currReview.toLowerCase() === 'rejected')) {
+          qSheet.getRange(rowNum, reviewCol + 1).setValue('Needs Review');
+        }
+        if (approvalCol >= 0 && (!currApproval || currApproval.toLowerCase() === 'pending review' || currApproval.toLowerCase().indexOf('rejected') >= 0 || currApproval.toLowerCase().indexOf('suppression') >= 0)) {
+          qSheet.getRange(rowNum, approvalCol + 1).setValue('Needs Review');
+        }
+        if (sendStatusCol >= 0 && (!currSendStatus || currSendLow === 'suppressed - not sent' || currSendLow === 'draft failed')) {
+          qSheet.getRange(rowNum, sendStatusCol + 1).setValue('Queued');
+        }
+      }
+
+      if (reviewerNotesCol >= 0 && currReviewerNotes &&
+          (currReviewerNotes.toLowerCase().indexOf('blocked:') >= 0 || currReviewerNotes.toLowerCase().indexOf('suppression') >= 0 || currReviewerNotes.toLowerCase().indexOf('invalid') >= 0)) {
+        qSheet.getRange(rowNum, reviewerNotesCol + 1).setValue('');
+      }
+      if (sendErrorCol >= 0 && currSendError &&
+          (currSendError.toLowerCase().indexOf('blocked:') >= 0 || currSendError.toLowerCase().indexOf('suppression') >= 0 || currSendError.toLowerCase().indexOf('invalid') >= 0)) {
+        qSheet.getRange(rowNum, sendErrorCol + 1).setValue('');
+      }
+
+      if (wasBlocked) rescuedCount++;
+
+      personaSyncUpdates.push({
+        campaignId: cid,
+        companyId: compId,
+        companyName: compName,
+        personaId: personaId,
+        email: rawEmail,
+        domain: domain,
+        name: leadName,
+        status: normStatus,
+        date: todayIso,
+        provider: providerUsed,
+        notes: notesText,
+        rejectPersona: false,
+        unblockPersona: true
+      });
+    }
   });
 
   // Auto-suppress valid-syntax invalid emails into Lists & Settings
@@ -401,7 +501,7 @@ function verifySelectedProspectEmails() {
     }
   }
 
-  // Sync verification statuses back to "Persona Leads"
+  // Sync verification statuses, replacement emails, and Review Status back to "Persona Leads"
   syncVerifiedEmailToPersonaLeads_(ss, personaSyncUpdates);
 
   // Trigger low-balance check per verified client/campaign
@@ -424,7 +524,10 @@ function verifySelectedProspectEmails() {
   let summary = 'Verified ' + targetRows.length + ' selected prospect email(s) via ' + primaryProvider + ':\n\n' +
     '• Valid: ' + validCount + '\n' +
     '• Soft Warning (catch-all / risky): ' + softWarnCount + '\n' +
-    '• Invalid (Blocked & Suppressed): ' + invalidCount + '\n';
+    '• Invalid / Blocked: ' + invalidCount + '\n';
+  if (rescuedCount > 0) {
+    summary += '• Rescued / Unblocked for Review: ' + rescuedCount + ' (Compliance = Passed, Review Status = Needs Review)\n';
+  }
   if (errorCount > 0) {
     summary += '• Request Errors (Unverified): ' + errorCount + ' (Check Email Verification Notes)\n';
   }
@@ -477,7 +580,8 @@ function suppressInvalidVerifiedEmails_(ss, emails) {
 }
 
 /**
- * Syncs manual email verification results back into matching "Persona Leads" rows.
+ * Syncs manual email verification results (including replacement emails & unblocked
+ * Review Status) back into matching "Persona Leads" rows.
  */
 function syncVerifiedEmailToPersonaLeads_(ss, updates) {
   if (!ss || !Array.isArray(updates) || updates.length === 0) return;
@@ -490,9 +594,13 @@ function syncVerifiedEmailToPersonaLeads_(ss, updates) {
   });
 
   const campCol = headers.indexOf('Campaign ID');
+  const compIdCol = headers.indexOf('Company ID');
+  const compNameCol = headers.indexOf('Company Name');
   const personaIdCol = headers.indexOf('Persona ID');
+  const linkedinCol = headers.indexOf('LinkedIn URL');
   const nameCol = headers.indexOf('Name');
   const emailCol = headers.indexOf('Business Email');
+  const domainCol = headers.indexOf('Email Domain');
   const reviewCol = headers.indexOf('Review Status');
   const verifStatusCol = headers.indexOf('Email Verification Status');
   const verifDateCol = headers.indexOf('Email Verification Date');
@@ -505,31 +613,58 @@ function syncVerifiedEmailToPersonaLeads_(ss, updates) {
   for (let u = 0; u < updates.length; u++) {
     const upd = updates[u];
     const targetCid = String(upd.campaignId || '').trim().toLowerCase();
-    const targetPid = String(upd.personaId || '').trim().toLowerCase();
+    const targetCompId = String(upd.companyId || '').trim().toLowerCase();
+    const targetCompName = normalizePersonaCompanyName_(upd.companyName || '');
+    const targetPidRaw = String(upd.personaId || '').trim().toLowerCase();
+    const targetPidLi = normalizeLinkedInUrl_(upd.personaId || '');
     const targetEmail = String(upd.email || '').trim().toLowerCase();
-    const targetName = String(upd.name || '').trim().toLowerCase();
+    const targetName = normalizePersonaName_(upd.name || '');
 
     for (let r = 0; r < rows.length; r++) {
       const rCid = String(rows[r][campCol] || '').trim().toLowerCase();
       if (rCid !== targetCid) continue;
 
-      const rPid = personaIdCol >= 0 ? String(rows[r][personaIdCol] || '').trim().toLowerCase() : '';
+      const rPidRaw = personaIdCol >= 0 ? String(rows[r][personaIdCol] || '').trim().toLowerCase() : '';
+      const rPidLi = personaIdCol >= 0 ? normalizeLinkedInUrl_(rows[r][personaIdCol] || '') : '';
+      const rLi = linkedinCol >= 0 ? normalizeLinkedInUrl_(rows[r][linkedinCol] || '') : '';
       const rEmail = emailCol >= 0 ? String(rows[r][emailCol] || '').trim().toLowerCase() : '';
-      const rName = nameCol >= 0 ? String(rows[r][nameCol] || '').trim().toLowerCase() : '';
+      const rName = nameCol >= 0 ? normalizePersonaName_(rows[r][nameCol] || '') : '';
+      const rCompId = compIdCol >= 0 ? String(rows[r][compIdCol] || '').trim().toLowerCase() : '';
+      const rCompName = compNameCol >= 0 ? normalizePersonaCompanyName_(rows[r][compNameCol] || '') : '';
 
-      const matched = (targetPid && rPid && rPid === targetPid) ||
-        (targetEmail && rEmail && rEmail === targetEmail) ||
-        (targetName && rName && rName === targetName);
+      const pidMatched = Boolean(
+        (targetPidLi && ((rPidLi && rPidLi === targetPidLi) || (rLi && rLi === targetPidLi))) ||
+        (targetPidRaw && rPidRaw && rPidRaw === targetPidRaw)
+      );
+      const emailMatched = Boolean(targetEmail && rEmail && rEmail === targetEmail);
+      const companyMatched = (!targetCompId && !targetCompName) ||
+        (targetCompId && rCompId && rCompId === targetCompId) ||
+        (targetCompName && rCompName && rCompName === targetCompName);
+      const nameMatched = Boolean(targetName && rName && rName === targetName && companyMatched);
 
-      if (!matched) continue;
+      if (!pidMatched && !emailMatched && !nameMatched) continue;
 
       const rowNum = r + 2;
+      if (emailCol >= 0 && targetEmail && rEmail !== targetEmail) {
+        pSheet.getRange(rowNum, emailCol + 1).setValue(targetEmail);
+      }
+      if (domainCol >= 0 && upd.domain) {
+        pSheet.getRange(rowNum, domainCol + 1).setValue(upd.domain);
+      }
       pSheet.getRange(rowNum, verifStatusCol + 1).setValue(upd.status);
       if (verifDateCol >= 0) pSheet.getRange(rowNum, verifDateCol + 1).setValue(upd.date);
       if (verifProvCol >= 0 && upd.provider) pSheet.getRange(rowNum, verifProvCol + 1).setValue(upd.provider);
       if (verifNotesCol >= 0) pSheet.getRange(rowNum, verifNotesCol + 1).setValue(upd.notes);
-      if (upd.rejectPersona && reviewCol >= 0) {
-        pSheet.getRange(rowNum, reviewCol + 1).setValue('Rejected');
+
+      if (reviewCol >= 0) {
+        if (upd.rejectPersona) {
+          pSheet.getRange(rowNum, reviewCol + 1).setValue('Rejected');
+        } else if (upd.unblockPersona) {
+          const currPReview = String(rows[r][reviewCol] || '').trim();
+          if (!currPReview || currPReview === 'Rejected' || currPReview === 'Needs Review') {
+            pSheet.getRange(rowNum, reviewCol + 1).setValue('Ready for Outreach');
+          }
+        }
       }
     }
   }
@@ -583,6 +718,7 @@ function runPersonaMapperFromSidebar(campaignId) {
     const suppressionRules = loadSuppressionRulesFromSettings_(spreadsheet);
     const existingPersonaTracker = getExistingCampaignPersonas_(spreadsheet, activeId);
     const mappedTracker = getMappedCompanyTracker_(spreadsheet, activeId);
+    const domainPatternMemory = buildWorkbookDomainPatternMemory_(spreadsheet);
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
     const batchCompanies = unmappedCompanies.slice(0, batchLimit);
     const isPilotCampaign = activeId.toUpperCase().indexOf('PILOT-') === 0;
@@ -595,6 +731,7 @@ function runPersonaMapperFromSidebar(campaignId) {
     let rejectedPlaceholderCount = 0;
     let strippedLinkedInCount = 0;
     let autoSuppressedInvalidCount = 0;
+    let patternRescueCount = 0;
     let serperCompaniesEnriched = 0;
     let serperLinkedInCandidatesFound = 0;
 
@@ -614,6 +751,8 @@ function runPersonaMapperFromSidebar(campaignId) {
         continue;
       }
 
+      const companyDomain = extractPersonaDomainFromUrl_(company['Domain'] || company['Website'] || '');
+      const domainStats = companyDomain && domainPatternMemory[companyDomain] ? domainPatternMemory[companyDomain] : null;
       const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, activeId, companyName);
       const serperContext = fetchSerperPersonaSearchContext_(company, settings, spreadsheet);
       if (serperContext && serperContext.enabled) {
@@ -626,7 +765,7 @@ function runPersonaMapperFromSidebar(campaignId) {
         clientName: clientName,
         provider: providerChoice,
         model: modelChoice,
-        prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext),
+        prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext, domainStats),
         enableWebSearch: true,
         json: true,
         operation: 'PersonaMapping'
@@ -671,7 +810,17 @@ function runPersonaMapperFromSidebar(campaignId) {
         }
 
         const fitScore = scorePersonaFit_(persona.fitDimensions || {});
-        const emailInfo = prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules);
+        const emailInfo = prepareEmailIntelligence_(
+          persona,
+          company,
+          settings,
+          spreadsheet,
+          suppressionRules,
+          serperContext,
+          domainPatternMemory
+        );
+
+        if (emailInfo.rescuedByFallback) patternRescueCount++;
 
         if (emailInfo.businessEmail && isDuplicatePersonaInCampaign_(persona, company, existingPersonaTracker, emailInfo.businessEmail)) {
           skippedDuplicatePersonas++;
@@ -746,6 +895,7 @@ function runPersonaMapperFromSidebar(campaignId) {
     const remainingUnmapped = Math.max(0, unmappedCompanies.length - batchCompanies.length);
     const notes = [];
     if (serperCompaniesEnriched > 0) notes.push('Serper found ' + serperLinkedInCandidatesFound + ' LinkedIn candidate(s)');
+    if (patternRescueCount > 0) notes.push(patternRescueCount + ' email(s) rescued via alternate pattern');
     if (skippedDuplicatePersonas > 0) notes.push(skippedDuplicatePersonas + ' duplicate skipped');
     if (rejectedPlaceholderCount > 0) notes.push(rejectedPlaceholderCount + ' generic placeholder(s) rejected');
     if (strippedLinkedInCount > 0) notes.push(strippedLinkedInCount + ' unverified LinkedIn link(s) cleared');
@@ -836,6 +986,7 @@ function runPersonaMapperForSelectedCampaign() {
     const suppressionRules = loadSuppressionRulesFromSettings_(spreadsheet);
     const existingPersonaTracker = getExistingCampaignPersonas_(spreadsheet, campaignId);
     const mappedTracker = getMappedCompanyTracker_(spreadsheet, campaignId);
+    const domainPatternMemory = buildWorkbookDomainPatternMemory_(spreadsheet);
     const batchLimit = Math.max(1, Math.min(10, Number(settings['Max Companies Per Run']) || 3));
     const batchCompanies = unmappedCompanies.slice(0, batchLimit);
     const isPilotCampaign = campaignId.toUpperCase().indexOf('PILOT-') === 0;
@@ -848,6 +999,7 @@ function runPersonaMapperForSelectedCampaign() {
     let rejectedPlaceholderCount = 0;
     let strippedLinkedInCount = 0;
     let autoSuppressedInvalidCount = 0;
+    let patternRescueCount = 0;
     let serperCompaniesEnriched = 0;
     let serperLinkedInCandidatesFound = 0;
 
@@ -866,6 +1018,8 @@ function runPersonaMapperForSelectedCampaign() {
         continue;
       }
 
+      const companyDomain = extractPersonaDomainFromUrl_(company['Domain'] || company['Website'] || '');
+      const domainStats = companyDomain && domainPatternMemory[companyDomain] ? domainPatternMemory[companyDomain] : null;
       const evidenceSnippets = getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName);
 
       try {
@@ -880,7 +1034,7 @@ function runPersonaMapperForSelectedCampaign() {
           clientName: clientName,
           provider: providerChoice,
           model: modelChoice,
-          prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext),
+          prompt: buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext, domainStats),
           enableWebSearch: true,
           json: true,
           operation: 'PersonaMapping'
@@ -924,7 +1078,17 @@ function runPersonaMapperForSelectedCampaign() {
           }
 
           const fitScore = scorePersonaFit_(persona.fitDimensions || {});
-          const emailInfo = prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules);
+          const emailInfo = prepareEmailIntelligence_(
+            persona,
+            company,
+            settings,
+            spreadsheet,
+            suppressionRules,
+            serperContext,
+            domainPatternMemory
+          );
+
+          if (emailInfo.rescuedByFallback) patternRescueCount++;
 
           if (emailInfo.businessEmail && isDuplicatePersonaInCampaign_(persona, company, existingPersonaTracker, emailInfo.businessEmail)) {
             skippedDuplicatePersonas++;
@@ -1004,6 +1168,7 @@ function runPersonaMapperForSelectedCampaign() {
     const remainingUnmapped = Math.max(0, unmappedCompanies.length - batchCompanies.length);
     const notes = [];
     if (serperCompaniesEnriched > 0) notes.push('Serper found ' + serperLinkedInCandidatesFound + ' LinkedIn candidate(s)');
+    if (patternRescueCount > 0) notes.push(patternRescueCount + ' email(s) rescued via alternate pattern');
     if (skippedDuplicatePersonas > 0) notes.push(skippedDuplicatePersonas + ' duplicate skipped');
     if (rejectedPlaceholderCount > 0) notes.push(rejectedPlaceholderCount + ' generic placeholder(s) rejected');
     if (strippedLinkedInCount > 0) notes.push(strippedLinkedInCount + ' unverified LinkedIn link(s) cleared');
@@ -1018,6 +1183,225 @@ function runPersonaMapperForSelectedCampaign() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * ============================================================================
+ * DOMAIN EMAIL PATTERN MEMORY & SMART FALLBACK HELPERS
+ * ============================================================================
+ */
+
+function stripDiacriticsAndPunct_(str) {
+  let clean = String(str || '').trim().toLowerCase();
+  try {
+    clean = clean.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  } catch (e) {}
+  return clean;
+}
+
+function extractFirstAndLastTokens_(personName) {
+  const honorifics = {
+    'dr': true, 'mr': true, 'mrs': true, 'ms': true, 'mx': true, 'prof': true,
+    'jr': true, 'sr': true, 'ii': true, 'iii': true, 'iv': true,
+    'phd': true, 'mba': true, 'cpa': true, 'pe': true, 'peng': true,
+    'ceng': true, 'miet': true, 'cem': true
+  };
+  const tokens = stripDiacriticsAndPunct_(personName)
+    .replace(/[.,'"()]+/g, ' ')
+    .split(/\s+/)
+    .filter(function(t) { return t && !honorifics[t]; });
+
+  if (tokens.length < 2) return null;
+  const firstRaw = tokens[0].replace(/[^a-z0-9-]/g, '');
+  const lastRaw = tokens[tokens.length - 1].replace(/[^a-z0-9-]/g, '');
+  const firstAlpha = firstRaw.replace(/-/g, '');
+  const lastNoHyphen = lastRaw.replace(/-/g, '');
+  const lastFirstPart = lastRaw.split('-')[0] || lastNoHyphen;
+  if (!firstAlpha || !lastNoHyphen) return null;
+
+  return {
+    first: firstAlpha,
+    firstInitial: firstAlpha.charAt(0),
+    last: lastNoHyphen,
+    lastHyphen: lastRaw,
+    lastFirstPart: lastFirstPart
+  };
+}
+
+function detectEmailPatternName_(email, personName) {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const atIdx = cleanEmail.indexOf('@');
+  if (atIdx <= 0) return '';
+  const local = stripDiacriticsAndPunct_(cleanEmail.slice(0, atIdx));
+  const tok = extractFirstAndLastTokens_(personName);
+  if (!tok) return '';
+
+  const lastVariants = Array.from(new Set([tok.lastHyphen, tok.last, tok.lastFirstPart].filter(Boolean)));
+  for (let i = 0; i < lastVariants.length; i++) {
+    const l = lastVariants[i];
+    if (local === tok.first + '.' + l) return 'first.last';
+    if (local === tok.firstInitial + l) return 'flast';
+    if (local === tok.firstInitial + '.' + l) return 'f.last';
+    if (local === tok.first + '_' + l) return 'first_last';
+    if (local === tok.first + l) return 'firstlast';
+  }
+  if (local === tok.first) return 'first';
+  if (local === tok.first + tok.last.charAt(0)) return 'firstl';
+  return '';
+}
+
+function buildEmailFromPattern_(patternName, tok, domain, preferNoHyphen) {
+  if (!patternName || !tok || !domain) return '';
+  const lastVal = preferNoHyphen ? tok.lastFirstPart : tok.lastHyphen;
+  if (!lastVal) return '';
+
+  let local = '';
+  if (patternName === 'first.last') local = tok.first + '.' + lastVal;
+  else if (patternName === 'flast') local = tok.firstInitial + lastVal;
+  else if (patternName === 'f.last') local = tok.firstInitial + '.' + lastVal;
+  else if (patternName === 'first_last') local = tok.first + '_' + lastVal;
+  else if (patternName === 'firstlast') local = tok.first + lastVal;
+  else if (patternName === 'first') local = tok.first;
+  else if (patternName === 'firstl') local = tok.first + tok.last.charAt(0);
+
+  if (!local) return '';
+  const candidate = (local + '@' + domain).toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(candidate) ? candidate : '';
+}
+
+/**
+ * Learns proven valid & disproven invalid corporate email patterns per domain
+ * from existing "Persona Leads" & "Prospect Review Queue" rows ($0 cost).
+ * Never exposes actual email addresses across client prompts — stores only pattern structure.
+ */
+function buildWorkbookDomainPatternMemory_(spreadsheet) {
+  const memory = {};
+  if (!spreadsheet) return memory;
+
+  function ensureDomain(dom) {
+    if (!memory[dom]) {
+      memory[dom] = {
+        validPatterns: {},
+        unverifiedPatterns: {},
+        invalidPatterns: {},
+        invalidEmails: {}
+      };
+    }
+    return memory[dom];
+  }
+
+  [PERSONA_MAPPER_SHEETS_.personas, PERSONA_MAPPER_SHEETS_.queue].forEach(function(sheetName) {
+    const sh = spreadsheet.getSheetByName(sheetName);
+    if (!sh || sh.getLastRow() <= 1) return;
+
+    const records = getPersonaMapperSheetRecords_(sh);
+    records.forEach(function(row) {
+      const email = String(row['Business Email'] || '').trim().toLowerCase();
+      const name = String(row['Name'] || '').trim();
+      const verif = String(row['Email Verification Status'] || '').trim().toLowerCase();
+      const atIdx = email.lastIndexOf('@');
+      if (atIdx <= 0 || !name) return;
+
+      const domain = email.slice(atIdx + 1);
+      if (!domain || isPersonalEmailDomain_(domain)) return;
+
+      const stats = ensureDomain(domain);
+      const pattern = detectEmailPatternName_(email, name);
+
+      if (verif === 'invalid') {
+        stats.invalidEmails[email] = true;
+        if (pattern) stats.invalidPatterns[pattern] = (stats.invalidPatterns[pattern] || 0) + 1;
+      } else if (verif === 'valid') {
+        if (pattern) stats.validPatterns[pattern] = (stats.validPatterns[pattern] || 0) + 1;
+      } else if (verif !== 'risky') {
+        if (pattern) stats.unverifiedPatterns[pattern] = (stats.unverifiedPatterns[pattern] || 0) + 1;
+      }
+    });
+  });
+
+  return memory;
+}
+
+function recordDomainPatternOutcome_(memory, domain, personName, email, status) {
+  if (!memory || !domain || !email) return;
+  if (!memory[domain]) {
+    memory[domain] = { validPatterns: {}, unverifiedPatterns: {}, invalidPatterns: {}, invalidEmails: {} };
+  }
+  const stats = memory[domain];
+  const pat = detectEmailPatternName_(email, personName);
+  if (status === 'invalid') {
+    stats.invalidEmails[email] = true;
+    if (pat) stats.invalidPatterns[pat] = (stats.invalidPatterns[pat] || 0) + 1;
+  } else if (status === 'valid') {
+    if (pat) stats.validPatterns[pat] = (stats.validPatterns[pat] || 0) + 1;
+  }
+}
+
+function formatDomainPatternHint_(domainStats, domain) {
+  if (!domainStats) return '';
+  const validList = Object.keys(domainStats.validPatterns || {})
+    .sort(function(a, b) { return domainStats.validPatterns[b] - domainStats.validPatterns[a]; });
+  const unverifiedList = Object.keys(domainStats.unverifiedPatterns || {})
+    .filter(function(p) { return !domainStats.invalidPatterns[p] && validList.indexOf(p) < 0; })
+    .sort(function(a, b) { return domainStats.unverifiedPatterns[b] - domainStats.unverifiedPatterns[a]; });
+  const invalidList = Object.keys(domainStats.invalidPatterns || {})
+    .filter(function(p) { return validList.indexOf(p) < 0; });
+
+  const lines = [];
+  if (validList.length > 0) {
+    lines.push('PROVEN VALID EMAIL PATTERN FOR @' + domain + ': Use "' + validList[0] + '@' + domain + '" (' + domainStats.validPatterns[validList[0]] + ' verified lead(s)).');
+  } else if (unverifiedList.length > 0) {
+    lines.push('OBSERVED EMAIL PATTERN FOR @' + domain + ': Prior records suggest "' + unverifiedList[0] + '@' + domain + '".');
+  }
+  if (invalidList.length > 0) {
+    lines.push('AVOID DISPROVEN PATTERNS FOR @' + domain + ': ' + invalidList.join(', ') + ' (already failed verification).');
+  }
+  return lines.join('\n');
+}
+
+function buildAlternateEmailCandidates_(personaName, domain, primaryEmail, domainStats, suppressionRules) {
+  const tok = extractFirstAndLastTokens_(personaName);
+  if (!tok || !domain) return [];
+
+  const primaryPat = detectEmailPatternName_(primaryEmail, personaName);
+  const rules = suppressionRules || { emails: [] };
+  const validOrdered = (domainStats && domainStats.validPatterns)
+    ? Object.keys(domainStats.validPatterns).sort(function(a, b) { return domainStats.validPatterns[b] - domainStats.validPatterns[a]; })
+    : [];
+
+  const baseOrder = validOrdered.concat(['flast', 'first.last', 'f.last', 'first_last', 'firstlast']);
+  const uniquePatterns = [];
+  baseOrder.forEach(function(p) {
+    if (uniquePatterns.indexOf(p) < 0) uniquePatterns.push(p);
+  });
+
+  const candidates = [];
+  const seenEmails = {};
+  seenEmails[String(primaryEmail || '').toLowerCase()] = true;
+
+  function addCand(em) {
+    if (!em || seenEmails[em]) return;
+    if (rules.emails && rules.emails.indexOf(em) >= 0) return;
+    if (domainStats && domainStats.invalidEmails && domainStats.invalidEmails[em]) return;
+    seenEmails[em] = true;
+    candidates.push(em);
+  }
+
+  // If hyphenated surname failed with full hyphen, prioritize flast with first surname token or hyphen
+  if (tok.lastHyphen !== tok.lastFirstPart) {
+    addCand(buildEmailFromPattern_('flast', tok, domain, true));
+    addCand(buildEmailFromPattern_('first.last', tok, domain, true));
+  }
+
+  uniquePatterns.forEach(function(pat) {
+    if (pat === primaryPat) return;
+    if (domainStats && domainStats.invalidPatterns && domainStats.invalidPatterns[pat] && !domainStats.validPatterns[pat]) {
+      return;
+    }
+    addCand(buildEmailFromPattern_(pat, tok, domain, false));
+  });
+
+  return candidates;
 }
 
 /**
@@ -1151,9 +1535,10 @@ function buildSerperCompanyQueries_(company, settings) {
   const roleClause = '(' + titleTerms.slice(0, 6).join(' OR ') + ')';
   const linkedinQuery = 'site:linkedin.com/in ' + companyClause + ' ' + roleClause;
 
+  // Sharpened Query 2: targets "@domain" published emails & email-format clues PLUS corporate leadership/contact pages
   const leadershipQuery = domain
-    ? ('site:' + domain + ' (leadership OR "management team" OR executives OR team OR sustainability OR "@' + domain + '")')
-    : (companyClause + ' (leadership OR "management team" OR executives OR sustainability)');
+    ? ('"@' + domain + '" OR (site:' + domain + ' (leadership OR "management team" OR executives OR contact OR media OR investor))')
+    : (companyClause + ' (leadership OR "management team" OR executives OR contact OR email)');
 
   return {
     linkedinQuery: linkedinQuery,
@@ -1253,7 +1638,61 @@ function callSerperSearchApi_(apiKey, queryText, glCode, campaignId, clientName,
 }
 
 /**
- * Fetches real Google Search candidates (LinkedIn /in profiles + company leadership pages)
+ * Extracts published @domain email examples & verified source URLs from Serper snippets.
+ */
+function extractDomainEmailCluesFromSerper_(organicItems, companyDomain) {
+  const clues = {
+    emailMatches: [],
+    emailFormatSourceUrl: ''
+  };
+  if (!companyDomain || !Array.isArray(organicItems) || organicItems.length === 0) return clues;
+
+  const escapedDom = companyDomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const emailRe = new RegExp('([a-z0-9._%+-]+@(?:[a-z0-9-]+\\.)*' + escapedDom + ')\\b', 'gi');
+  const genericPrefixes = {
+    'info': true, 'support': true, 'sales': true, 'admin': true, 'billing': true,
+    'contact': true, 'help': true, 'office': true, 'jobs': true, 'careers': true,
+    'hr': true, 'privacy': true, 'legal': true, 'noreply': true, 'no-reply': true,
+    'webmaster': true, 'media': true, 'press': true, 'ir': true, 'investors': true
+  };
+  const seenEmails = {};
+
+  organicItems.forEach(function(item) {
+    if (!item) return;
+    const cleanUrl = sanitizeHttpUrl_(item.link || '');
+    const combinedText = String(item.title || '') + ' ' + String(item.snippet || '');
+    const matches = combinedText.match(emailRe) || [];
+
+    if (matches.length > 0) {
+      matches.forEach(function(m) {
+        const em = String(m || '').toLowerCase();
+        const local = em.split('@')[0];
+        const isGeneric = Boolean(genericPrefixes[local]);
+        if (!seenEmails[em]) {
+          seenEmails[em] = true;
+          clues.emailMatches.push({
+            email: em,
+            isPersonalPattern: !isGeneric,
+            sourceUrl: cleanUrl
+          });
+        }
+        if (!isGeneric && cleanUrl && !clues.emailFormatSourceUrl) {
+          clues.emailFormatSourceUrl = cleanUrl;
+        }
+      });
+      if (!clues.emailFormatSourceUrl && cleanUrl) {
+        clues.emailFormatSourceUrl = cleanUrl;
+      }
+    } else if (cleanUrl && !clues.emailFormatSourceUrl && /email format|@[a-z0-9.-]+|first\.last|first_initial|flast/i.test(combinedText)) {
+      clues.emailFormatSourceUrl = cleanUrl;
+    }
+  });
+
+  return clues;
+}
+
+/**
+ * Fetches real Google Search candidates (LinkedIn /in profiles + "@domain" / leadership pages)
  * via Serper.dev before invoking LLM scoring & copy generation.
  */
 function fetchSerperPersonaSearchContext_(company, settings, spreadsheet) {
@@ -1262,6 +1701,8 @@ function fetchSerperPersonaSearchContext_(company, settings, spreadsheet) {
     hasResults: false,
     linkedinResults: [],
     webResults: [],
+    emailClues: [],
+    emailFormatSourceUrl: '',
     verifiedLinkedInUrls: {},
     allVerifiedUrls: {},
     queries: [],
@@ -1273,13 +1714,14 @@ function fetchSerperPersonaSearchContext_(company, settings, spreadsheet) {
 
   const campaignId = (settings && settings['Campaign ID']) || 'CMP-DEFAULT';
   const clientName = (settings && settings['Department']) || 'Growth Target';
+  const companyDomain = extractPersonaDomainFromUrl_((company && (company['Domain'] || company['Website'])) || '');
   const glCode = mapCountryToSerperGl_(
     (company && (company['Country'] || company['Headquarters'])) || (settings && settings['Target Countries']) || ''
   );
 
   const queryPair = buildSerperCompanyQueries_(company, settings);
   const linkedinOrganic = callSerperSearchApi_(apiKey, queryPair.linkedinQuery, glCode, campaignId, clientName, 'SerperLinkedInSearch');
-  const webOrganic = callSerperSearchApi_(apiKey, queryPair.leadershipQuery, glCode, campaignId, clientName, 'SerperLeadershipSearch');
+  const webOrganic = callSerperSearchApi_(apiKey, queryPair.leadershipQuery, glCode, campaignId, clientName, 'SerperEmailAndLeadershipSearch');
 
   const linkedinResults = [];
   const webResults = [];
@@ -1322,6 +1764,8 @@ function fetchSerperPersonaSearchContext_(company, settings, spreadsheet) {
     });
   });
 
+  const emailClueObj = extractDomainEmailCluesFromSerper_(webOrganic.concat(linkedinOrganic), companyDomain);
+
   const lines = [];
   if (linkedinResults.length > 0) {
     lines.push('Verified Google-Indexed LinkedIn Profile Candidates (Serper.dev):');
@@ -1329,9 +1773,16 @@ function fetchSerperPersonaSearchContext_(company, settings, spreadsheet) {
       lines.push('• ' + r.title + ' | URL: ' + r.url + (r.snippet ? (' | Snippet: ' + r.snippet) : ''));
     });
   }
+  if (emailClueObj.emailMatches.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push('Published @' + companyDomain + ' Email Clues Observed in Google Snippets (Use to Match Exact Pattern):');
+    emailClueObj.emailMatches.slice(0, 6).forEach(function(em) {
+      lines.push('• ' + em.email + (em.isPersonalPattern ? ' [Personal Pattern Clue]' : ' [Corporate Contact]') + (em.sourceUrl ? (' | Source: ' + em.sourceUrl) : ''));
+    });
+  }
   if (webResults.length > 0) {
     if (lines.length > 0) lines.push('');
-    lines.push('Verified Company Leadership & Public Pages (Serper.dev):');
+    lines.push('Verified Company Email/Leadership Pages (Serper.dev):');
     webResults.slice(0, 6).forEach(function(r) {
       lines.push('• ' + r.title + ' | URL: ' + r.url + (r.snippet ? (' | Snippet: ' + r.snippet) : ''));
     });
@@ -1342,6 +1793,8 @@ function fetchSerperPersonaSearchContext_(company, settings, spreadsheet) {
     hasResults: lines.length > 0,
     linkedinResults: linkedinResults,
     webResults: webResults,
+    emailClues: emailClueObj.emailMatches,
+    emailFormatSourceUrl: emailClueObj.emailFormatSourceUrl || '',
     verifiedLinkedInUrls: verifiedLinkedInUrls,
     allVerifiedUrls: allVerifiedUrls,
     queries: [queryPair.linkedinQuery, queryPair.leadershipQuery],
@@ -1740,14 +2193,16 @@ function getCompanyEvidenceSnippets_(spreadsheet, campaignId, companyName) {
 }
 
 /**
- * Builds the Multi-Client Persona Research & Outreach Prompt (incorporating Serper search results when available)
+ * Builds the Multi-Client Persona Research & Outreach Prompt (incorporating Serper candidates & Domain Pattern Memory)
  */
-function buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext) {
+function buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperContext, domainStats) {
   const clientOwner = settings['Department'] || 'Growth Target';
   const senderName = settings['Sender Name'] || 'Alex Mercer';
   const senderTitle = settings['Sender Title'] || 'Solutions Consultant';
   const senderCompany = settings['Sender Company'] || 'eValuater Solutions';
   const customNeeds = settings['Custom Business Needs'] || settings['Campaign Focus'] || settings['Notes'] || 'operational scalability and automated compliance';
+  const companyDomain = extractPersonaDomainFromUrl_((company && (company['Domain'] || company['Website'])) || '');
+  const domainHintText = (domainStats && companyDomain) ? formatDomainPatternHint_(domainStats, companyDomain) : '';
   const snippetsText = (evidenceSnippets && evidenceSnippets.length > 0)
     ? evidenceSnippets.slice(0, 8).join('\n')
     : 'No prior company research snippets recorded yet. Perform fresh discovery.';
@@ -1769,12 +2224,20 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperCo
     snippetsText
   ];
 
+  if (domainHintText) {
+    parts.push(
+      '',
+      'HISTORICAL DOMAIN EMAIL PATTERN MEMORY (USE THIS EXACT FORMAT):',
+      domainHintText
+    );
+  }
+
   if (serperContext && serperContext.hasResults && serperContext.promptSection) {
     parts.push(
       '',
       'LIVE GOOGLE SEARCH CANDIDATES (PRE-FETCHED VIA SERPER.DEV):',
       serperContext.promptSection,
-      'NOTE ON CANDIDATES: Prioritize real current employees from these search results whose title/snippet shows they currently work at this target company (skip anyone clearly labeled "Former" or currently working at a different company). Copy their exact verified "linkedinUrl" or "evidenceUrl" verbatim.'
+      'NOTE ON CANDIDATES: Prioritize real current employees from these search results whose title/snippet shows they currently work at this target company (skip anyone clearly labeled "Former" or currently working at a different company). Copy their exact verified "linkedinUrl" or "evidenceUrl" verbatim. If "@domain" email clues appear above, adopt that exact naming format and place its Source URL into "emailSourceUrl".'
     );
   }
 
@@ -1787,7 +2250,7 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperCo
     '1. Identify up to ' + Math.max(1, Math.min(5, Number(settings['Personas Per Company']) || 2)) + ' real, named human decision-makers matching the target roles using the Google Search candidates above, live web search when available, or verified public knowledge.',
     '2. CRITICAL PERSONA RULE: NEVER return generic job titles, role descriptions, or placeholders as "name" (e.g., NEVER output "VP Procurement", "Procurement Leader", "Supply Chain Director", "Head of ESG", or "Unknown"). If you cannot confirm a real individual\'s first and last name, omit that role entirely (returning "personas": [] is far better than inventing a placeholder).',
     '3. CRITICAL URL RULE: NEVER invent, guess, or construct a "linkedinUrl" from someone\'s name or company name, and NEVER output bare "https://linkedin.com" or "/search/results/" URLs. Only include an exact "linkedinUrl" (https://www.linkedin.com/in/...) or "evidenceUrl" if you observed that exact URL in the search candidates above or verified search results; otherwise set it to "". Never use "..." placeholders.',
-    '4. EMAIL PATTERN RULE: Set "emailDiscoveryMethod" to "Published" or "Public biography" ONLY if the email appears publicly (and supply "emailSourceUrl"), or "Pattern Match" when constructing first.last@verifiedcompanydomain.com (leaving "emailSourceUrl": "" unless an actual public email page exists).',
+    '4. EMAIL PATTERN RULE: Match any proven domain pattern or "@domain" clue above first. Set "emailDiscoveryMethod" to "Published" or "Public biography" ONLY if the email appears publicly (and supply "emailSourceUrl"), or "Pattern Match" when constructing the best verified corporate domain pattern (supplying "emailSourceUrl" if a Serper/public email-pattern page confirmed the format, else "").',
     '5. Separate verified facts from interpretation. Never invent a person, title, recent activity, or URL.',
     '',
     'EMAIL CURATION INSTRUCTIONS (IMPORTANT):',
@@ -1843,9 +2306,9 @@ function buildPersonaMapperPrompt_(company, settings, evidenceSnippets, serperCo
     '      "personalizedHook": "Specific opening hook referencing their context",',
     '      "draftSubject": "Relevant and concise subject line",',
     '      "draftEmail": "Full curated email under 150 words",',
-    '      "businessEmail": "first.last@companydomain.com",',
+    '      "businessEmail": "candidate@companydomain.com",',
     '      "emailDomain": "companydomain.com",',
-    '      "emailSourceUrl": "Exact source URL if email is published publicly, else empty string",',
+    '      "emailSourceUrl": "Exact source URL if email or pattern proof was found publicly, else empty string",',
     '      "emailDiscoveryMethod": "Published, Public biography, Pattern Match, or Not Found",',
     '      "emailIdentityConfidence": "High, Medium, or Low"',
     '    }',
@@ -2522,10 +2985,16 @@ function normalizeEmailVerificationStatus_(rawStatus) {
   return 'risky';
 }
 
-function prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules) {
-  const candidate = String(persona.businessEmail || '').trim().toLowerCase();
+function prepareEmailIntelligence_(persona, company, settings, spreadsheet, suppressionRules, serperContext, domainPatternMemory) {
+  let candidate = String(persona.businessEmail || '').trim().toLowerCase();
   const method = String(persona.emailDiscoveryMethod || (candidate ? 'Public web source' : 'Not Found')).trim();
-  const sourceUrl = sanitizeHttpUrl_(persona.emailSourceUrl || '');
+  let sourceUrl = sanitizeHttpUrl_(persona.emailSourceUrl || '');
+
+  // Attach verified Serper email-format/source URL when Pattern Match had no direct URL
+  if (!sourceUrl && serperContext && serperContext.emailFormatSourceUrl && /pattern/i.test(method)) {
+    sourceUrl = serperContext.emailFormatSourceUrl;
+  }
+
   const empty = {
     businessEmail: '',
     emailDomain: '',
@@ -2539,8 +3008,21 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
     queueStatus: 'Email Research Required',
     country: persona.country || '',
     isBlockedOrInvalid: true,
-    shouldAutoSuppress: false
+    shouldAutoSuppress: false,
+    rescuedByFallback: false
   };
+
+  const companyDomain = extractPersonaDomainFromUrl_(company['Domain'] || company['Website'] || '');
+  if (!candidate && persona.name && companyDomain) {
+    const tok = extractFirstAndLastTokens_(persona.name);
+    const domainStats = domainPatternMemory && domainPatternMemory[companyDomain] ? domainPatternMemory[companyDomain] : null;
+    if (tok) {
+      const validList = domainStats && domainStats.validPatterns
+        ? Object.keys(domainStats.validPatterns).sort(function(a, b) { return domainStats.validPatterns[b] - domainStats.validPatterns[a]; })
+        : [];
+      candidate = buildEmailFromPattern_(validList[0] || 'first.last', tok, companyDomain, false);
+    }
+  }
 
   if (!candidate) return empty;
 
@@ -2572,7 +3054,6 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
     });
   }
 
-  const companyDomain = extractPersonaDomainFromUrl_(company['Domain'] || company['Website'] || '');
   const domainMatches = Boolean(companyDomain && (domain === companyDomain || domain.endsWith('.' + companyDomain)));
   const confidence = titleCaseSignal_(persona.emailIdentityConfidence) || (domainMatches ? 'High' : 'Medium');
 
@@ -2599,18 +3080,65 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
       queueStatus: 'Email Verification Failed',
       country: persona.country || '',
       isBlockedOrInvalid: true,
-      shouldAutoSuppress: false
+      shouldAutoSuppress: false,
+      rescuedByFallback: false
     };
   }
 
-  const verifier = callConfiguredEmailVerifier_(candidate, settings, spreadsheet);
-  const rawStatus = verifier.configured ? verifier.status : 'unverified';
-  const normalizedStatus = normalizeEmailVerificationStatus_(rawStatus);
+  let activeEmail = candidate;
+  let verifier = callConfiguredEmailVerifier_(activeEmail, settings, spreadsheet);
+  let rawStatus = verifier.configured ? verifier.status : 'unverified';
+  let normalizedStatus = normalizeEmailVerificationStatus_(rawStatus);
+  let rescuedByFallback = false;
+
+  if (domainPatternMemory && verifier.configured) {
+    recordDomainPatternOutcome_(domainPatternMemory, domain, persona.name, activeEmail, normalizedStatus);
+  }
+
+  // Smart 1-Retry Pattern Fallback: if Pattern Match returned invalid on a valid-MX domain, test at most 1 alternate pattern
+  const subStatusLow = String(verifier.subStatus || '').toLowerCase();
+  const deadDomainSubStatuses = {
+    'no_dns_entries': true,
+    'mx_not_found': true,
+    'domain_not_found': true,
+    'disposable': true,
+    'toxic': true
+  };
+
+  if (verifier.configured &&
+      normalizedStatus === 'invalid' &&
+      !deadDomainSubStatuses[subStatusLow] &&
+      /pattern/i.test(normalizedMethod)) {
+    const domainStats = domainPatternMemory && domainPatternMemory[domain] ? domainPatternMemory[domain] : null;
+    const alternates = buildAlternateEmailCandidates_(persona.name, domain, activeEmail, domainStats, rules);
+    if (alternates.length > 0) {
+      const altEmail = alternates[0];
+      const altVerifier = callConfiguredEmailVerifier_(altEmail, settings, spreadsheet);
+      const altStatus = normalizeEmailVerificationStatus_(altVerifier.configured ? altVerifier.status : 'unverified');
+      if (domainPatternMemory && altVerifier.configured) {
+        recordDomainPatternOutcome_(domainPatternMemory, domain, persona.name, altEmail, altStatus);
+      }
+      if (altStatus === 'valid' || altStatus === 'catch-all' || altStatus === 'risky') {
+        activeEmail = altEmail;
+        verifier = altVerifier;
+        normalizedStatus = altStatus;
+        rescuedByFallback = true;
+      } else if (altStatus === 'invalid') {
+        activeEmail = altEmail;
+        verifier = altVerifier;
+        normalizedStatus = 'invalid';
+      }
+    }
+  }
 
   let queueStatus = 'Ready for Review';
   let verificationNotes = verifier.notes || 'Domain verified';
   let isBlockedOrInvalid = false;
   let shouldAutoSuppress = false;
+
+  if (rescuedByFallback) {
+    verificationNotes = 'Alternate pattern matched (' + activeEmail + '): ' + verificationNotes;
+  }
 
   if (normalizedStatus === 'invalid') {
     queueStatus = 'Email Verification Failed';
@@ -2619,12 +3147,13 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
     verificationNotes = (verifier.notes || 'Verifier reported invalid') + ' — Auto-rejected & suppressed.';
   } else if (normalizedStatus === 'catch-all' || normalizedStatus === 'risky' || normalizedStatus === 'unverified') {
     if (verifier.configured) {
-      verificationNotes = 'Soft Warning: Server status is ' + normalizedStatus + '. Queued for review.';
+      verificationNotes = (rescuedByFallback ? ('Alternate pattern (' + activeEmail + ') — ') : '') +
+        'Soft Warning: Server status is ' + normalizedStatus + '. Queued for review.';
     }
   }
 
   return {
-    businessEmail: candidate,
+    businessEmail: activeEmail,
     emailDomain: domain,
     emailSourceUrl: sourceUrl,
     emailDiscoveryMethod: normalizedMethod,
@@ -2636,7 +3165,8 @@ function prepareEmailIntelligence_(persona, company, settings, spreadsheet, supp
     queueStatus: queueStatus,
     country: persona.country || '',
     isBlockedOrInvalid: isBlockedOrInvalid,
-    shouldAutoSuppress: shouldAutoSuppress
+    shouldAutoSuppress: shouldAutoSuppress,
+    rescuedByFallback: rescuedByFallback
   };
 }
 
@@ -2708,6 +3238,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
     return {
       configured: false,
       status: 'unverified',
+      subStatus: '',
       provider: provider,
       notes: 'Email verification set to None; passed syntax/domain check.'
     };
@@ -2718,6 +3249,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
     return {
       configured: false,
       status: 'unverified',
+      subStatus: '',
       provider: provider,
       notes: 'Verifier key not set; passed syntax/domain check (unverified for local free-tier testing).'
     };
@@ -2752,11 +3284,12 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
             modelName: 'ZeroBounce'
           });
         }
-        return { configured: true, status: 'unverified', provider: 'ZeroBounce', notes: 'ZeroBounce status ' + code };
+        return { configured: true, status: 'unverified', subStatus: '', provider: 'ZeroBounce', notes: 'ZeroBounce status ' + code };
       }
 
       const body = JSON.parse(response.getContentText() || '{}');
       const st = String(body.status || '').toLowerCase();
+      const subSt = String(body.sub_status || '').toLowerCase();
       const status = normalizeEmailVerificationStatus_(st);
 
       if (typeof logApiUsage_ === 'function') {
@@ -2769,12 +3302,18 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
           inputUnits: 1,
           outputUnits: 0,
           status: 'SUCCESS',
-          details: 'Email: ' + email + ' | Status: ' + st,
+          details: 'Email: ' + email + ' | Status: ' + st + (subSt ? (' (' + subSt + ')') : ''),
           modelName: 'ZeroBounce'
         });
       }
 
-      return { configured: true, status: status, provider: 'ZeroBounce', notes: 'ZeroBounce: ' + st };
+      return {
+        configured: true,
+        status: status,
+        subStatus: subSt,
+        provider: 'ZeroBounce',
+        notes: 'ZeroBounce: ' + st + (subSt ? (' (' + subSt + ')') : '')
+      };
     }
 
     if (p.indexOf('millionverifier') >= 0) {
@@ -2797,11 +3336,12 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
             modelName: 'MillionVerifier'
           });
         }
-        return { configured: true, status: 'unverified', provider: 'MillionVerifier', notes: 'MillionVerifier status ' + code };
+        return { configured: true, status: 'unverified', subStatus: '', provider: 'MillionVerifier', notes: 'MillionVerifier status ' + code };
       }
 
       const body = JSON.parse(response.getContentText() || '{}');
       const res = String(body.result || '').toLowerCase();
+      const subRes = String(body.subresult || '').toLowerCase();
       const status = normalizeEmailVerificationStatus_(res);
 
       if (typeof logApiUsage_ === 'function') {
@@ -2819,7 +3359,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
         });
       }
 
-      return { configured: true, status: status, provider: 'MillionVerifier', notes: 'MillionVerifier: ' + res };
+      return { configured: true, status: status, subStatus: subRes, provider: 'MillionVerifier', notes: 'MillionVerifier: ' + res };
     }
 
     if (p.indexOf('neverbounce') >= 0) {
@@ -2842,7 +3382,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
             modelName: 'NeverBounce'
           });
         }
-        return { configured: true, status: 'unverified', provider: 'NeverBounce', notes: 'NeverBounce status ' + code };
+        return { configured: true, status: 'unverified', subStatus: '', provider: 'NeverBounce', notes: 'NeverBounce status ' + code };
       }
 
       const body = JSON.parse(response.getContentText() || '{}');
@@ -2864,13 +3404,13 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
         });
       }
 
-      return { configured: true, status: status, provider: 'NeverBounce', notes: 'NeverBounce: ' + res };
+      return { configured: true, status: status, subStatus: '', provider: 'NeverBounce', notes: 'NeverBounce: ' + res };
     }
 
     if (p.indexOf('custom') >= 0) {
       const customEndpoint = String(settings['Email Verification Endpoint'] || '').trim();
       if (!customEndpoint || !/^https:\/\//i.test(customEndpoint)) {
-        return { configured: false, status: 'unverified', provider: 'Custom HTTPS', notes: 'Custom HTTPS endpoint missing; queued unverified.' };
+        return { configured: false, status: 'unverified', subStatus: '', provider: 'Custom HTTPS', notes: 'Custom HTTPS endpoint missing; queued unverified.' };
       }
       const sep = customEndpoint.indexOf('?') >= 0 ? '&' : '?';
       const url = customEndpoint + sep + 'email=' + encodeURIComponent(email);
@@ -2895,7 +3435,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
             modelName: 'Custom HTTPS'
           });
         }
-        return { configured: true, status: 'unverified', provider: 'Custom HTTPS', notes: 'Custom verifier HTTP ' + code };
+        return { configured: true, status: 'unverified', subStatus: '', provider: 'Custom HTTPS', notes: 'Custom verifier HTTP ' + code };
       }
       const body = JSON.parse(response.getContentText() || '{}');
       const rawRes = String(body.status || body.result || 'unverified').toLowerCase();
@@ -2914,10 +3454,10 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
           modelName: 'Custom HTTPS'
         });
       }
-      return { configured: true, status: status, provider: 'Custom HTTPS', notes: 'Custom HTTPS: ' + rawRes };
+      return { configured: true, status: status, subStatus: '', provider: 'Custom HTTPS', notes: 'Custom HTTPS: ' + rawRes };
     }
 
-    return { configured: false, status: 'unverified', provider: provider, notes: 'Verifier not mapped; queued unverified.' };
+    return { configured: false, status: 'unverified', subStatus: '', provider: provider, notes: 'Verifier not mapped; queued unverified.' };
   } catch (err) {
     if (String(err && err.message ? err.message : err).indexOf('RUNAWAY LOOP ABORTED') >= 0) {
       throw err;
@@ -2936,7 +3476,7 @@ function callConfiguredEmailVerifier_(email, settings, spreadsheet) {
         modelName: provider
       });
     }
-    return { configured: true, status: 'unverified', provider: provider, notes: 'Verification request error: ' + err.message };
+    return { configured: true, status: 'unverified', subStatus: '', provider: provider, notes: 'Verification request error: ' + err.message };
   }
 }
 
